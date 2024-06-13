@@ -8,6 +8,8 @@
 pip install -r requirements.txt
 ```
 
+### Note that spaCy uses the ```en_core_web_sm``` model.
+
 ## Step2 Data Prapare
 
 The training set and validation set can be downloaded from [BaiduPan](https://pan.baidu.com/s/1zylNX4Ar5nZAjNx5mcxSmg?pwd=wzud).
