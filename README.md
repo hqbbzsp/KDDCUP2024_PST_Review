@@ -39,12 +39,78 @@ data/
 ```
 
 ## Step3 Run the train.sh to reproduce the training model
+
 ```
 bash train.sh
 ```
-you can get models from [BaiduPan](https://pan.baidu.com/s/1eCJ4g13x5GAyknmTAZm7ow?pwd=y982). password is : y982
+
+you can get our finetune models from [BaiduPan](https://pan.baidu.com/s/1eCJ4g13x5GAyknmTAZm7ow?pwd=y982). password is : y982
+
+after run train.sh , we will get finetuning models , the folder structure should be as follows: 
+
+```
+out/
+
+│ ├── gcn/
+
+│ │ └── best_loss_gcnmodel_0.pth
+
+│ │ └── best_loss_gcnmodel_1.pth
+
+│ │ └── best_loss_gcnmodel_2.pth
+
+│ ├── sciroberta/
+
+│ │ └── latest_model.pth
+
+│ │ └── pytorch_model_0.bin
+
+│ │ └── pytorch_model_1.bin
+
+│ │ └── pytorch_model_ab_div_1.bin
+
+│ │ └── pytorch_model_lxe.bin
+
+```
+
+
 
 ## Step4 Run the test.sh to reproduce the answer of paper-source-trace
+
 ```
 bash test.sh
 ```
+
+after run test.sh
+
+we will get result in result folder like below:
+
+```
+result/
+
+│ ├── gcn_fold0.json
+
+│ ├── gcn_fold1.json
+
+│ ├── gcn_fold2.json
+
+│ ├── gcn_fold3.json
+
+│ ├── roberta_spacy_fold2.json
+
+│ ├── test_ab_div_sciroberta.json
+
+│ ├── test_fold0_sciroberta.json
+
+│ ├── test_fold1_sciroberta.json
+
+│ ├── test_lxe_sciroberta.json
+
+│ ├── test_submission.json
+```
+
+the test_submission.json is the final ensemble answer.
+
+
+
+if you have any question , please feel free to contact at zspnjlgdx@gmail.com 
