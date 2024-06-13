@@ -108,7 +108,7 @@ result/
 
 │ ├── test_lxe_sciroberta.json
 
-│ ├── test_submission.json
+│ └── test_submission.json
 ```
 
 the test_submission.json is the final ensemble answer.
