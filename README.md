@@ -51,21 +51,25 @@ after run train.sh , we will get finetuning models , the folder structure should
 ```
 out/
 
+├── kddcup/
+
 │ ├── gcn/
 
-│ │ └── best_loss_gcnmodel_0.pth
+│ │ ├── best_loss_gcnmodel_0.pth
 
-│ │ └── best_loss_gcnmodel_1.pth
+│ │ ├── best_loss_gcnmodel_1.pth
 
 │ │ └── best_loss_gcnmodel_2.pth
 
 │ ├── sciroberta/
 
-│ │ └── pytorch_model_0.bin
 
-│ │ └── pytorch_model_1.bin
 
-│ │ └── pytorch_model_ab_div_1.bin
+│ │ ├── pytorch_model_0.bin
+
+│ │ ├── pytorch_model_1.bin
+
+│ │ ├── pytorch_model_ab_div_1.bin
 
 │ │ └── pytorch_model_lxe.bin
 
