@@ -1,0 +1,1474 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Every Walk&apos;s a Hit: Making Page Walks Single-Access Cache Hits</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Chang</forename><forename type="middle">Hyun</forename><surname>Park</surname></persName>
+							<email>chang.hyun.park@it.uu.se</email>
+						</author>
+						<author>
+							<persName><forename type="first">Ilias</forename><surname>Vougioukas</surname></persName>
+							<email>ilias.vougioukas@arm.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Andreas</forename><surname>Sandberg</surname></persName>
+							<email>andreas.sandberg@arm.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">David</forename><surname>Black-Schaffer</surname></persName>
+							<email>david.black-schaffer@it.uu.se</email>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<address>
+									<settlement>New York</settlement>
+									<region>NY</region>
+									<country key="US">USA</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<orgName type="institution">Uppsala University Uppsala</orgName>
+								<address>
+									<country key="SE">Sweden</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff2">
+								<orgName type="laboratory">Arm Research Cambridge</orgName>
+								<address>
+									<country key="GB">United Kingdom</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff3">
+								<orgName type="laboratory">Arm Research Cambridge</orgName>
+								<address>
+									<country key="GB">United Kingdom</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Every Walk&apos;s a Hit: Making Page Walks Single-Access Cache Hits</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/3503222.3507718</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:28+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>As memory capacity has outstripped TLB coverage, large data applications suffer from frequent page table walks. We investigate two complementary techniques for addressing this cost: reducing the number of accesses required and reducing the latency of each access. The first approach is accomplished by opportunistically "flattening" the page table: merging two levels of traditional 4 KB page table nodes into a single 2 MB node, thereby reducing the table's depth and the number of indirections required to traverse it. The second is accomplished by biasing the cache replacement algorithm to keep page table entries during periods of high TLB miss rates, as these periods also see high data miss rates and are therefore more likely to benefit from having the smaller page table in the cache than to suffer from increased data cache misses.</p><p>We evaluate these approaches for both native and virtualized systems and across a range of realistic memory fragmentation scenarios, describe the limited changes needed in our kernel implementation and hardware design, identify and address challenges related to self-referencing page tables and kernel memory allocation, and compare results across server and mobile systems using both academic and industrial simulators for robustness.</p><p>We find that flattening does reduce the number of accesses required on a page walk (to 1.0), but its performance impact (+2.3%) is small due to Page Walker Caches (already 1.5 accesses). Prioritizing caching has a larger effect (+6.8%), and the combination improves performance by +9.2%. Flattening is more effective on virtualized systems (4.4 to 2.8 accesses, +7.1% performance), due to 2D page walks. By combining the two techniques we demonstrate a state-ofthe-art +14.0% performance gain and -8.7% dynamic cache energy and -4.7% dynamic DRAM energy for virtualized execution with very simple hardware and software changes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>CCS CONCEPTS</head><p>• Computer systems organization → Architectures; • Software and its engineering → Virtual memory.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">INTRODUCTION</head><p>The problem: Traditional page walks do not scale well with large data sets. While memory capacity has grown by 100× over the past decade, TLB sizes have merely tripled to around 1500 L2 TLB entries, delivering a reach of only 3 GB with 2 MB large pages. As a result, applications that use the large amount of available physical memory often suffer from significant numbers of TLB misses and resulting page walk delays. Virtualized environments see an even larger penalty for the 2D page walk to translate each level of the guest page walk on the hypervisor side <ref type="bibr" target="#b15">[17]</ref>. This problem will be exacerbated with 5-level page tables for larger memories <ref type="bibr" target="#b29">[31]</ref>.</p><p>Background: Traditional page table trees have significant overheads on today's systems. Traditional page tables were designed with the assumption that memory is managed in contiguous blocks of exactly one page. The practical implication of this is that nodes in the page table are the same size as a page, leading to a multi-level deep tree of 4 KB page table nodes, each mapped to its own 4 KB memory page. Having each page table node be one memory page vastly simplifies allocation as the operating system does not have to maintain a separate reserve of larger blocks to guarantee it can allocate larger page table nodes. Keeping the nodes small also avoids wasting memory due to fragmentation. However, the small size of the page table node allocations combined with today's large memory capacities results in a deep page table tree, which incurs multiple serial memory indirections on each page table walk.</p><p>Solution: Flatten the page table to reduce indirections and prioritize caching the page table to reduce latency. While there have been many proposals to increase the effective TLB coverage to avoid page walks, we instead seek to reduce the cost of page walks. First, we reduce the number of architectural memory accesses in a page table walk (typically 4 without virtualization or 24 with virtualization enabled). This is done by flattening the page table to reduce the number of indirections required for a page walk by using Center: reduction in page walk latency from prioritizing caching page table entries. Right: reduction in dynamic energy of the cache hierarchy and DRAM from flattening and prioritizing. For benchmarks with high/low (gups/dc) TLB miss rates large pages to store more entries in each page table node. Second, we reduce the latency of the accesses by increasing the effectiveness of on-chip caches for the page table. This is achieved by preferentially caching page table entries during periods of high TLB misses and low data reuse. Together, we reduce the number of memory accesses per translation to 1 (non-virtualized) or 3 (virtualized), and reduce average walk latencies from 50.9 cycles down to 29.1 cycles.</p><p>Flattening the page table is based on two observations. First, the radix nature of the page table tree structure allows two levels of standard (4 KB) page table nodes to be combined into one level of large (2 MB) nodes. This reduces the tree's depth and the number of indirections required to walk the tree, while leveraging existing 2 MB page support. And, second, the page table itself is so much smaller and more static than the actual data, that the bloating <ref type="bibr" target="#b32">[34,</ref><ref type="bibr" target="#b40">42]</ref> and variable latency <ref type="bibr" target="#b32">[34,</ref><ref type="bibr" target="#b39">41]</ref> problems that plague 2 MB pages for data are not significant. To take advantage of these observations, we flatten the page table using large pages for nodes. To ensure that the OS is able to reliably allocate page table nodes, we make flattening optional on a per page table node basis. Through a prototype, we find that the OS changes required to implement this new arrangement are small.</p><p>Concretely, for an 8 GB application we can reduce the number of pages in the ≈16 MB page table from 4106 4 KB pages with a standard 4-level table to only nine 2 MB pages in a flattened 2-level table, thereby reducing the number of indirections required on TLB misses from 4 to 2. While this incurs a ≈2 MB overhead (9 × 2 MB vs. 4106 × 4 KB), the cost is negligible for large applications because the total size of the page table is so small <ref type="bibr">(18 MB vs. 8 GB data)</ref>.</p><p>Prioritizing caching page table entries is also based on two observations. First, the page table itself is close to the size of the LLC, and, second, high TLB miss rates are correlated with high data miss rates. This implies that we can expect to keep most of the page table in the cache and that doing so will not significantly hurt data access latency. We find that preferentially keeping page table entries in the cache during phases of high TLB miss rates is a simple and effective way to reduce the latency of page walk accesses, and, when combined with flattening, we can achieve single-access cache hits for most page walks.</p><p>Context: Page Walker Caches are excellent. Page walk caches (PWCs) already reduce the theoretical 4 memory system accesses per page walk to &lt; 1.5 on average (max 2.5 on our random access benchmark), and from 24 to 4.4 for virtualized systems. Flattening reduces this to 1 (2.8 virtualized), while cache prioritization reduces the latency of each access.</p><p>Contributions. The impact of our approach for applications with relatively few TLB misses (dc) and many (gups) is shown in Figure <ref type="figure" target="#fig_0">1</ref>. While flattening significantly reduces the number of memory requests per page walk (left), by itself it has limited performance benefit. However, for virtualized systems, and with realistic memory fragmentation, its impact increases significantly (Section 4), as they have more complex page walks and more pages in the their page tables. Prioritization significantly reduces latency (middle) by avoiding most DRAM accesses for page walks and does so without significantly hurting the overall cache performance (Section 5). When combined, the approaches beat the state of the art for performance and deliver significant reductions in dynamic cache and DRAM energy (right). Our contributions:</p><p>• We identify, evaluate, and combine complementary approaches for reducing the impact of page walks: flattening to reduce the number of accesses and cache prioritization to reduce their latency. • We identify and quantify the importance of handling large allocation failures in the kernel on real systems. • We demonstrate the flexibility to dynamically choose where in the page table to flatten to efficiently support large data pages and evaluate its impact across three fragmentation scenarios. • We quantify the benefits for virtualized systems and explore the trade-offs in flattening the page table for the host, guest, or both in virtualized systems. • We show that flattened tables are not naturally compatible with recursive page tables and provide an efficient dereferencing solution.</p><p>• We demonstrate the limited OS changes required by reporting on the code changes for a Linux implementation of a flattened page table. • We present simulations from server and mobile system on academic and industrial simulators for robustness.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">RELATED WORK</head><p>There has been a tremendous amount of work aimed at improving translation range and efficiency (and thereby reducing the number of page walks) <ref type="bibr" target="#b6">[8,</ref><ref type="bibr" target="#b14">16,</ref><ref type="bibr" target="#b19">21,</ref><ref type="bibr" target="#b21">23,</ref><ref type="bibr" target="#b23">25,</ref><ref type="bibr" target="#b25">27,</ref><ref type="bibr" target="#b31">33,</ref><ref type="bibr" target="#b31">33,</ref><ref type="bibr" target="#b35">37,</ref><ref type="bibr" target="#b36">38,</ref><ref type="bibr" target="#b40">[42]</ref><ref type="bibr" target="#b41">[43]</ref><ref type="bibr" target="#b42">[44]</ref><ref type="bibr" target="#b43">[45]</ref><ref type="bibr" target="#b44">[46]</ref><ref type="bibr" target="#b50">53]</ref>. Other works have focused on reducing the TLB miss penalty by improving the page table walk caches <ref type="bibr" target="#b12">[14,</ref><ref type="bibr" target="#b15">17,</ref><ref type="bibr" target="#b16">18]</ref>, using speculation to hide latency <ref type="bibr" target="#b3">[5,</ref><ref type="bibr" target="#b6">8,</ref><ref type="bibr" target="#b13">15,</ref><ref type="bibr" target="#b45">47]</ref>, optimizing hash page tables <ref type="bibr" target="#b49">[52]</ref>, and replicating page tables across NUMA nodes <ref type="bibr" target="#b1">[3]</ref>. For virtualized systems, Gandhi et al. proposed merging the 2D page table into a single dimension where possible <ref type="bibr" target="#b24">[26]</ref>. Ahn et al. proposed flat host page tables for precisely the virtual machine memory size <ref type="bibr" target="#b3">[5]</ref>, which will perform similarly to our host page table flattening without the benefits of our guest-flattening. Ausavarungnirun et al. proposed bypassing the shared cache for the lower levels of the tree to avoid pollution in throughput-oriented GPU systems <ref type="bibr" target="#b11">[13]</ref>. Mazumdar et al. proposed predicting dead TLB entries and dead page table entries in the LLC <ref type="bibr" target="#b35">[37]</ref>. This could be used to extend our cache prioritization, although we have not investigated this. Below we discuss four works that seek to directly reduce the cost of page walks. Ryoo et al. proposed POM_TLB <ref type="bibr" target="#b46">[48]</ref> to use a part of the DRAM as a large set-associative TLB. This requires a single memory lookup, and the entries can be cached. On a miss in the in-DRAM TLB, a conventional page table walk is required. Because this space is allocated at system boot, the required large contiguous partition can be guaranteed. This approach has the benefit of not requiring any OS changes, but comes at the cost of the complexity of scanning the structure at address space teardown, and possible interference or security implications as the on-DRAM TLB is shared by all cores, processes, and VMs. Marathe et al. extended POM_TLB with a cache prioritization extension (CSALT <ref type="bibr" target="#b33">[35]</ref>), to keep page table entries in the cache during frequent context switches.</p><p>Margaritov et al. proposed ASAP <ref type="bibr" target="#b34">[36]</ref>, which prefetches the lower levels of the page table during the time spent accessing the higher levels. However, as modern PWCs effectively eliminate the accesses to the higher levels, our simulations show very little opportunity for such prefetching. ASAP requires that appropriate pages are stored sequentially in memory to enable prefetching without pointer chasing. This requires that the kernel can allocate contiguous segments of memory for page table entries for prefetching to function, which is difficult to guarantee. If such regions are not available, ASAP is unable to prefetch.</p><p>Elastic Cuckoo Hashing <ref type="bibr" target="#b47">[49]</ref> restructures the page table into a hash table to generate lookup addresses without pointer chasing. ECH uses multiple hashed regions for parallel lookups, which requires the OS to allocate large contiguous blocks upon creating or resizing the page table. Since the OS cannot guarantee large contiguous memory allocations, this would make it difficult to implement in practice.</p><p>Compendia <ref type="bibr" target="#b4">[6]</ref> is a parallel work that addressed flattening the page table. They claim roughly twice the performance benefits that we observed. However, their methodology uses saved page walk cycle estimates to compute performance change rather than simulation, and does not include overlapping page walks, a data cache hierarchy, or realistic memory fragmentation <ref type="bibr" target="#b40">[42,</ref><ref type="bibr" target="#b51">54]</ref>, which may account for the differences. Further, they do not claim a kernel prototype, address self-referencing page tables, or compare to previous proposals.</p><p>Flattening alone achieves comparable main memory access reductions to what ECH could achieve (with its way-caching), but without the complexity of dynamically resizing the hash table, is better than what POM_TLB could achieve, as its cache does not cover the full page table, and is simpler than ASAP, as the layout modification leverages existing large page support. Importantly, flattening provides a graceful fallback to 4 KB pages when larger contiguous allocations fail, which our prototype kernel shows happens on heavily-loaded systems (Section 6.2). As a result, proposals that require large contiguous allocations to function (such as ECH) face severe implementation challenges. Our final proposal to combine flattening and cache prioritization goes beyond CSALT's prioritization as it does not require a separate POM_TLB cache to achieve similar results, and improves on Compendia in both energy and performance by coordinating with the memory hierarchy. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">FLATTENING THE PAGE TABLE</head><p>Page tables are organized as trees that entail a series of memory indirections for each page walk. These pointer-chasing accesses lead to long latencies to satisfy TLB misses. We can reduce the number of levels in the tree (flatten it) to reduce the number of indirections by using larger nodes in the tree. When combined with modern page walker caches (PWCs), this achieves effective page walks of a single memory access. In Section 5 we will add preferential caching to make this single access a cache hit.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Conventional Page Tables</head><p>We consider conventional 64-bit x86 and Arm page tables, which use a page size of 4 KB and entry size of 8 B, leading to a 512-ary radix tree. However flattening can be applied to other configurations. Figure <ref type="figure">2</ref>   <ref type="figure">2</ref> where we flatten the first two (L4+L3) and the latter two (L2+L1) levels into 2 MB page table nodes. However, one could flatten L3+L2 instead<ref type="foot" target="#foot_1">2</ref> , which would be beneficial in the presence of 2 MB data pages (shown in Figure <ref type="figure">3</ref>, right), or possibly even flatten the top three levels (L4+L3+L2) using a 1 GB page table node that points to 2 MB data pages directly. Alternatively, one could flatten the top two levels (L4+L3) using 2 MB page table nodes and allocate all memory in 1 GB data pages. These approaches all have different trade-offs in terms of bloating within the page table itself and the ease of creating sufficiently large allocations. The choice of which levels to flatten can be made on a per-process and per-table basis at runtime by the OS, with or without application hints.</p><p>Because they are based on the radix nature of the page table, flattened page tables provide a key characteristic for practical implementation: graceful fallback to conventional page tables when needed. If the OS is unable to allocate a 2 MB page for a flattened page table node, it can instead allocate the standard two levels of 4 KB page table nodes at any place in the page table with no additional overhead. This allows the OS to choose whether to take the time at allocation for compaction, merge the two levels at a later point when a 2 MB page is available, or simply use the standard two-level approach.</p><p>Only small changes are needed to support flattened page tables. The system architecture needs to be able to inform the hardware page walker of which nodes are flattened with one bit in one of the control registers for the root and one bit in each page table entry (two bits to support 1 GB flattened nodes). The hardware page table walker can then read those bits to determine which parts of the virtual address should be used for index bits at each level. We describe the changes in more detail in Section 6.1.</p><p>In order to use the flattened page tables, the encoding of the VA bits that are used for the indexing of the page tables needs to be adjusted. Traditionally for a 4-level tree structure every page table has 2 9 = 512 entries. This means that the VA is decoded using 9 bits to index into the page tables and 12 bits which are used for the offset once the translation is complete, and the page has been retrieved.</p><p>When flattening tables, each combined table structure consists of 2 9 × 2 9 = 262 144 entries fitting into a 2 MB page. In this case, each flattened table requires 18 bits for indexing. As shown in Figure <ref type="figure">2</ref> (bottom) this still requires the same total number of VA bits in order to traverse the page table structure and recover the physical address.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Page Walk Caches</head><p>Page walks are cached in three ways: translation caches (TLBs), page table entries in the regular data cache hierarchy, and through Page Walker Caches (PWCs), such as Intel's Paging Structure Cache <ref type="bibr" target="#b27">[29]</ref>. The PWC allows walks to skip lookups for some levels of page table by matching the index bits of each level of the page table node with those cached by previous page walks. Intel's PWC is organized in three depths of translation caching: L4, L3 and L2. An L4 PWC holds previous walk paths that share the top 9 bit virtual address, allowing the walker to skip accessing the L4 page table entry, and go directly to the L3 page table entry. As each L4 entry covers 512 GB of virtual address space, this means that accesses that stay within a 512 GB virtual address range will hit in the PWC and be able to skip the L4 lookup. With an L2 PWC, a walk that matches all upper 27 bits of the virtual address will be able to skip the first three levels of the page table, and directly access the level 1 page table node. Such L2 PWC hits enable single-access translations (only a L1 entry access is required) for TLB misses within 2 MB regions of virtual address space.</p><p>Thus, the PWC enables page walks to skip one, two or three levels of the page walk depending on the locality of the virtual address. The impact of the PWC is shown in Figure <ref type="figure" target="#fig_0">10</ref>, baseline. The PWC enables skipping an average of 2.2 to 2.9 of the 4 accesses a naive page walker would need for all benchmarks except gups and random access. Those two benchmarks are an exception, as they exhibit a highly random access pattern across a large enough virtual address range that the PWC is only able to skip one level (one memory access) per page walk on average.</p><p>As a two-level flattened page table consists of a root level with up to 2 18 page table entries, the L3 PWC can match the top 18 bits of the virtual address. A PWC hit will then skip the first level of the flattened page table (the L4+L3 entry) and directly access the flattened L2+L1 page table entry, resulting in a single memory access for each TLB miss. Our evaluations (Section 7) confirm that the flattened page table augmented with a PWC sees an average of one memory access per page walk (Figure <ref type="figure" target="#fig_0">10</ref>). It is worth noting that merging the first two levels of the page table (L4+L3) may make the PWC more effective as each PWC hit translates twice as many index bits and fewer PWCs are required since there are fewer levels, enabling each one to cache more entries.</p><p>When running many applications with small memory footprints, the benefits from flattening may be smaller as the PWCs already skip many of the page table accesses. In such cases, flattening may not be as beneficial and may result in bloating (Section 3.2). However, cache prioritization (Section 5) will continue to be beneficial whenever TLB pressure is high, either due to many small applications co-running with frequent context switches or simultaneous multithreading, or fewer applications with very large page tables.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4">Supporting Large Data Pages</head><p>If the lower two levels (L2+L1) are flattened, then there is no way to use an L2 entry to directly provide a 2 MB translation. This requires 512 replicated translations in the L2+L1 node all pointing to the same 2 MB page. While this may be helpful for sparse accesses (since it enables only two accesses for the page walk) it puts pressure on the cache if many of those replicated entries are accessed.</p><p>Figure <ref type="figure" target="#fig_1">4</ref> shows the resulting loss in performance with flattening (FPT, middle dark blue) compared to a traditional page table (THP, left light blue) for two fragmentation scenarios: 50% large pages (realistic <ref type="bibr" target="#b40">[42]</ref>) and 100% (performance limit, but unrealistic). To mitigate this, we take advantage of the flexibility to flatten different parts of the page table differently. Specifically, we allocate/promote 2 MB data pages in 1 GB virtual address regions and mark those regions to not have their L2 and L1 tables flattened (Figure <ref type="figure">3</ref> left, bottom mapping). This allows allocations in the 1 GB regions to behave as L4+L3 flattened tables (Figure <ref type="figure">3</ref> center) while other regions also have their L2+L1 levels flattened. Page walks to 4 KB mappings in this region will require up to 3 memory accesses, but 2 MB mappings will only require up to 2 accesses and no replicated entries. With this optimization (FPT+NF in Figure <ref type="figure" target="#fig_1">4</ref>), flattening surpasses the baseline by providing the benefits of L4+L3 flattening with efficient large page access.</p><p>The OS can decide how to flatten the page table, for example, based on mapping statistics gathered for page promotion or hints from the application. In our L4+L3 and L2+L1 flattened simulations, we heuristically mark a 1 GB region to not have L2+L1 flattened if there are 32 or more 2 MB pages in it, but this threshold can be dynamically adjusted by the kernel. Applications with many 2 MB pages may benefit instead from flattening the L3+L2 levels (Figure <ref type="figure">3</ref>, right), enabling the PWC to skip most L4 accesses, providing singleaccess page walks to 2 MB pages and two accesses for 4 KB pages.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.5">Accessing Recursively Mapped Page Tables</head><p>To manipulate page tables Linux uses a mapping of all physical memory to a contiguous virtual address range in kernel space and a software page table walk. However, Windows uses recursive page tables where the page tables map themselves into their own address space. This is done by having a special recursion entry in the top-level (L4) node that points back to the node itself, and using recursions through this node to prevent the page walker from reaching the ordinary leaf node. As a result, the walk returns the address of a the page table node where it stops, and not the normal data translation/frame.</p><p>The degree of recursion can be controlled by the number of index fields in the VA that are filled with the recursion entry index. Recursive access to the page table for a 4-level table with the middle two levels flattened (L4, L3+L2, L1), is shown in Figure <ref type="figure">5</ref> with a normal translation of a data page to the left.</p><p>If the top 9 bits of the VA are the recursion index (Figure <ref type="figure">5</ref>, middle), the 3-step page walk will recurse once and step through the top (L4) node twice: L4 → L4 → L3+L2. The final VA bits will then return the address of the L1 page table node indexed from the entry in the L3+L2 node. In a similar manner, if the top 18 bits of the VA have the recursion index concatenated twice, then the page walker will recurse twice (Figure <ref type="figure">5</ref>, right), and step through the top (L4) node three times: L4 → L4 → L4, returning the address of the L3+L2 page table node indexed by the L4 node.</p><p>Since the address encoding is the same for data translations and pointers to page table nodes, the same page walk can return either data translations (with no recursions) or the addresses of the page table nodes themselves (by adding recursions, which causes the page walk to end earlier on a page table node). The more recursions, the higher the node level returned, and the specific node is selected by the remaining VA bits.</p><p>Traditional page walks terminate and return a large page translation when they encounter an entry marked as a large page (e.g., a 1 GB page is returned if marked at L3 or a 2 MB if at L2). To make recursive page table walks work with flattened page table nodes, the walker is modified to recognize pointers to flattened page tables as large page mappings (in addition to normal 2 MB mappings) while looking up L2 entries (Figure <ref type="figure">5</ref>, right).</p><p>Another problem arises when the root page table node is a flattened node. The page walker cannot simply use 18 bits of the VA to index recursively into flattened nodes. For example, accessing the L4+L3 node in a flattened L4+L3, L2, L1 page table (Figure <ref type="figure">6</ref>) requires two recursions of 18 bits each for the L4+L3 2 MB node (top left), leaving insufficient bits for the final indexing of the node. Similarly, it is not possible to reach the L1 node in this situation (bottom left), as even a single recursion will overshoot in address bits.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Access Data Page</head><formula xml:id="formula_0">Offset Data Page L4 L1 CR3 Flat L2+L1 Flat L3+L2 VA L4 L1 L3 L2 Access Flat L3+L2 Table Page 2 MB Offset R Large L3+L2 PT L4 CR3 L4_i L3_i L2 VA L4 L3 2 Recursions L4_i L3 L2 L1 VA Flat L2+L1 Flat L3+L2 Offset L1 PT L4 CR3 Access L1</formula><p>To address this, we propose using a 4 KB region within the flattened L4+L3 page table as a glue sub-table. This glue table serves two purpose: First, it makes it possible to use a page table with a flattened L4+L3 on systems or devices that do not natively support flattened page tables by accessing the page table through the glue table. Second, it enables recursion in systems with flattened L4+L3 tables without any corner cases in the architecture.</p><p>The insight behind this is that a flattened L4+L3 table can be thought of as a series of concatenated L3 sub-tables (Figure <ref type="figure">7</ref>, L3* in Figure <ref type="figure">6</ref>). To support recursion on flattened L4+L3 tables, we embed a traditional L4 table as one of the L3* sub-tables in the flattened L4+L3 table. We denote this specific L3* sub-table as L4*. This subtable contains pointers to all of the L3* sub-tables (including itself) within the flattened L4+L3 table. This is illustrated in Figure <ref type="figure">7</ref> where the embedded sub-table is highlighted in green at the top, and the contents of the embedded sub- Figure <ref type="figure">6</ref> shows an example of recursion on a flattened L4+L3 table with a glue table. The first case (top right) illustrates how an arbitrary entry in the L4+L3 table can be accessed. To access an entry in the L4+L3 table, the generated virtual address needs to trigger three recursions. The first step of the walk performs two recursions (R1, R2) since it uses 18 bits of address to access an entry within the glue table. The top 9-bits of the index (the L4 bits) trigger the first recursion (R1) by selecting the glue table (or L4*). The lower bits (the L3 bits) select the recursion entry within the glue table which corresponds to the second recursion (R2). We conceptually describe R1 and R2 as two recursions, however, they are actually single memory accesses into a PTE in the L4+L3 node. The next recursion (R3) uses the L2 bits to index into the L4* table to accesses the recursion entry again. The final step of the walk uses the L1 bits to access an entry within the glue table which contains a pointer to an L3* sub-table (denoted as &amp;L3*). The second example (bottom right) shows how an L1 table can be accessed using a single recursion. In this case, the L4 bits select the glue-table (R1) and the L3 bits select an entry within the glue table. The page table walker then uses the L2 bits to index into the L3* table, the L1 bits to index into the L2 table, and the offset bits to access the L1 table. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.6">Implications for Five-Level Page Tables</head><p>Unless programs spread their data across the full address space, 5-level page tables <ref type="bibr" target="#b29">[31]</ref> will behave similarly to 4-level page tables with the PWC caching translations for essentially all 5th-level translations. However, their larger address space opens up more possibilities for flattening. In particular, merging the L5+L4 levels and the L3+L2 levels and directly translating 2 MB pages or using an L1 level when 4 KB pages are needed would be quite attractive. It might even be desirable to use a 1 GB page by merging three levels, if the kernel can reliably allocate such regions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">FLATTENING AND VIRTUALIZATION</head><p>With virtualization, guests use a set of page tables to map from the guest virtual address (gVA) to the guest physical address (gPA), and the hypervisor uses a second set of page tables to map from the guest physical address to the host physical address (hPA). A guest translation therefore needs a two-dimensional page walk (Figure <ref type="figure" target="#fig_2">8a</ref>) in which each of the four guest page table level access first requires its own four-access host page table walk, and a final four-access host page table walk is required to translate the final guest physical address, incurring a total of 24 memory accesses. As there are two page tables involved, there are three possible combinations of page table flattening. Either the host or guest page tables can be flattened (14 accesses), or both (8 accesses), can be flattened. (See Figure <ref type="figure" target="#fig_2">8b</ref>.)</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Effective Memory Accesses per Page Walk</head><p>Although virtualization naively incurs 24 memory accesses per walk, in practice many of these accesses are eliminated by a combination of three techniques (Figure <ref type="figure" target="#fig_2">8a</ref>): PWCs, large pages, and host translations in the TLB. Figure <ref type="figure" target="#fig_2">8a</ref> shows how the PWC skips levels of the guest (5th column, skip downwards) walk and a vPWC skips them for the host walk (applicable on all five rows). Our evaluations show that this reduces the number of accesses to as low as 3 to 4.8, with an average of 4.4. Even the two most random access applications, GUPS and random access, require only 9.6 and 9.4 memory accesses.</p><p>Hypervisors also try to map the guest physical pages to host physical pages in large pages to make host translations more efficient <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b8">10]</ref>. Using large pages comes with the benefit of removing the last level of the conventional four-level page table. In a 2-D page table, a 2 MB guest mapping can remove a row of memory accesses (➊ in Figure <ref type="figure" target="#fig_2">8a</ref>). Large page mappings for the gPA to hPA mapping remove columns (➋).</p><p>With host and guest page tables flattened, the number of accesses per page walk is reduced to 8, and, with the help of the PWC, this comes down to 2.8 in practice, as shown by the box (➌ in Figure <ref type="figure" target="#fig_2">8b</ref>). The guest PWC allows the page walk to skip the flattened g(L4+L3), and directly access the flattened g(L2+L1). To access the g(L2+L1), the host page table is traversed, and here the vPWC skips the flattened h(L4+L3), and directly accesses the flattened h(L2+L1). After the gPA of the data is resolved, the host page table is traversed once more for the actual data gPA to hPA translation, resulting in another walk, where the vPWC skips the h(L4+L3), enabling a single access final translation. Finally, after 2.8 accesses, the actual data can be accessed. Thus, flattening both guest and host page tables allows reducing the number of memory accesses from on average 4.4 down to 2.8.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">CACHE PRIORITIZATION</head><p>The other half of our approach is to reduce the latency (and energy) of each page table access by increasing the chances that it will be a cache hit. We do so by biasing the cache replacement policy to keep page table entries when an application is experiencing high TLB miss rates. Unlike CSALT <ref type="bibr" target="#b33">[35]</ref>, which biases the cache to store TLB entries to support their DRAM-TLB-cache design, we bias the cache to store page table entries for the existing page table walker.</p><p>Biasing the replacement policy to favor page table entries means evicting more data, but we find that applications with high TLB miss rates also exhibit high data miss rates (L2 and L3 data miss ratios of 95% and 80%). This, combined with the page table access being on the critical path to the data access, suggests that allocating more cache space to the (much smaller) page table over the data itself is likely to be more beneficial than caching the data <ref type="foot" target="#foot_2">3</ref> .</p><p>As data sets grow in the future, the likelihood of hitting in the cache will always remain higher for the page table than for the data for applications with limited locality simply due to the disparity in size between the two. Concretely, an application with 8 GB of densely allocated memory requires 2 21 4 KB pages represented by 8 B each, for a total of 16 MB of space. In the conventional fourlevel page table, each intermediate level is 1/512 the size of the previous one, resulting in only 32 KB for the L2 level, which is likely to be skipped by the PWC. From this analysis we see that an 8 GB memory workload could fit all leaf page table entries into a 16 MB cache, and is thus practical to cache in today's systems. Even with a random access pattern, caching even a portion of the page table entries would deliver a significant benefit. Future, larger workloads might even benefit from prioritizing among different levels of the page table itself, although we have not explored this.</p><p>In addition to our simulations, we explored the potential of preferentially caching page tables on current system by creating a thread that runs on another core and periodically touches the page table of a target application to keep it in the shared LLC. We ran this thread together with graph500 (scale 24) on an Intel i7-9700 with a shared 12 MB LLC, and found a 5% performance increase from keeping the entire page table in the LLC (miss ratio of 0% for the page table thread). While this experiment both uses extra LLC bandwidth and does not bring the page table into the target's private L2, unlike our proposed and simulated design, it does demonstrate that preferentially caching page tables is a promising approach. This leads to our conclusion that if the program accesses the memory in a way that does not make good use of the TLB and the caches for data, then we would be better off prioritizing page table entries in the caches.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">IMPLEMENTATION 6.1 Hardware Changes</head><p>Flattened page tables require augmenting the hardware page table walkers to be aware of the size of the page used at each level of the page table. This requires two additional bits (for 4 KB, 2 MB, and 1 GB pages, or one for just 4 KB and 2 MB) in the CR3/TTBR register (for the root node) and at each entry in the page table, possibly in the currently unused bits. These bits indicate the size of the page at the next level of the page table, and are needed to determine how many bits of the virtual address to use as index bits in the walk. As page table nodes are aligned, using flattened page tables frees up 9 or 18 bits (2 MB or 1 GB nodes) in the page table entries that point to flattened page table nodes, leading to more available bits. Similar small changes are required to the PWC, but there is the potential to use storage more effectively if there are fewer levels in the page table. Overall these changes are minor and incur essentially no hardware overhead.</p><p>Cache prioritization requires detecting phases of high cache and TLB miss and enforcing the prioritization. Detection is easily accomplished using existing hardware counters. Prioritization can be accomplished with a range of techniques. For example, existing cache partitioning technique (such as way-partitioning) can allow the OS to pre-load page table entries into part of the cache that will not contend with the application's own data. Alternatively, a per-cacheline tag bit can indicate if the entry is a page table and then bias the replacement policy away from such lines. The cost of such hardware is less than 0.2% of the cache size, and is already present in server-class processors that support per-context cache partitioning <ref type="bibr" target="#b9">[11,</ref><ref type="bibr" target="#b30">32]</ref>. Indeed, Arm's MPAM already stores a partition ID that can be used to differentiate processes or even I/D cache lines <ref type="bibr" target="#b9">[11]</ref>. We use this approach for prioritization in the L2 and LLC during phases of high TLB miss rates: when choosing a victim for replacement, 99% of the time we choose to evict data over page table entries. If there are no data entries in the set, or in the other 1% of the evictions, we evict the LRU entry. We empirically found that this ratio works well.</p><p>To limit impact on co-runners in shared caches, prioritization can occur within a context's (core/process) allocation by using identifiers in the tags <ref type="bibr" target="#b9">[11,</ref><ref type="bibr" target="#b30">32]</ref>. For our multicore simulations we used this approach to prevent one process' data from evicting another's page table.</p><p>As flattened page tables require only trivial hardware changes, the energy benefits will be proportional to the reduction in memory system accesses and execution times.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Software Changes</head><p>We have a working operating system prototype based on Linux 5.8.13 running on an industrial Armv8 functional simulator and on existing HW by adding an additional shim level before the large page tables. The change to the kernel is small: +614/-109 lines. Page tables are automatically flattened if a sufficiently large allocation can be provided by the kernel. Our implementation flattens L3+L2 (Figure <ref type="figure">3</ref>, right). L5+L4 flattening could be added with only minimal changes. We have not implemented dynamical flattening of page table levels after allocation. However, this would be straight-forward to implement by allocating a large page and copying the page table entries of the lower nodes (the L2 child nodes of the L3 node that is being flattened into an L3+L2) into the new flattened node. The upper node (L4) entry can then be updated to point to the flattened node.</p><p>Most Linux's page table management is shared between architectures. The kernel internally assumes that all architectures implement a 5-level radix tree where the highest level, L5 (PGD using Linux's terminology), is always implemented. This avoids special cases since unimplemented levels can be folded into the parent level using a virtual entry that points back to an entry in the parent table. For example, in a system with a three level page table, the kernel would implement L5 (PGD), L2 (PMD), and L1 (PTE), with L3 (PUD) and L4 (P4D) folded into the L5 table. Internally, the kernel treats L3 and L4 as having a single virtual entry (effectively the corresponding L5 entry) and no storage.</p><p>Using this existing support, we can readily implement support for flattened L2+L3 tables. We simply fold the L3 table, request 2 MB instead of 4 KB when allocating an L2 table, and change the macros that define the bit ranges used to index into the tables. However, this approach does not work in practice since it makes 2 MB pages a hard requirement, which could lead to a situation where fragmented systems fail to allocate page table node even when there is free memory.</p><p>To support a graceful fallback to 4 KB table nodes, we needed to be able to selectively fold the L2 and L3 tables per sub-tree of the page table. The kernel currently only supports folding an entire level across a process' entire address space. For our our prototype, we changed the signature of a handful of functions to add a mechanism to determine if a level needs to be folded based on the state of the parent entry. Overall, this change is small (roughly 100 lines of shared code a few tens of lines per architecture) and mostly mechanical.</p><p>With selective sub-tree folding in place, we can allocate large L3 tables. If we succeed in allocating a 2 MB page for a flattened L3+L2 table, we treat the table as an L2 table and fold the L3 table. The L4 entry is configured to point to the new L2 node and a bit in the entry is set to indicate that the next node has been flattened. If the flattened L3+L2 table allocation fails, we allocate normal 4 KB L3 and L2 tables.</p><p>We stress-tested our prototype kernel on a server system with 128 hardware threads by building a Linux kernel with 100 concurrent processes. Since the hardware does not support flattened tables, we allocate and manage the flattened table in the kernel, but inject a shim table between the L4 table and the flattened L3+L2 table to be compatible with the existing architecture. We found that 0.5% (20 L4: 1-cycle, 4-entry FA L3: 1-cycle, 4-entry FA L2: 1-cycle, 24-entry FA Nested TLB <ref type="bibr" target="#b15">[17]</ref> 1-cycle 16-entry FA out of 3464 compiler invocations) failed at least one of the two 2 MB allocations needed for the flattened page table on a system with 6% memory oversubscription (500 MB swap with 8 GB RAM). This increased to 12% failures on a system with 50% oversubscription. When a 2 MB allocation failed, the prototype used our fall-back path with traditional 4 KB tables.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">EVALUATION</head><p>We implemented our proposal in the gem5 <ref type="bibr" target="#b18">[20]</ref> simulator (Table <ref type="table" target="#tab_4">1</ref>). We model the TLB <ref type="bibr" target="#b28">[30]</ref> and the Paging Structure Caches (our PWC) <ref type="bibr" target="#b27">[29,</ref><ref type="bibr">51]</ref> of the Intel Skylake microarchitecture. Unfortunately, the page walker cache provided in gem5 is modeled as a cache with 64 B-lines, which does not accurately represent either page table caches nor translation caches <ref type="bibr" target="#b12">[14]</ref>. We implemented our own PWC, which sends misses to the L1 data cache <ref type="bibr" target="#b30">[32]</ref>, as in Intel processors. Our flattened page tables use the L2 PSC and we model a vPSC for the host page table under virtualization. This work requires comparing two different page table organizations. To keep all other aspects of the simulation state the same, such as data layout in memory and kernel interrupts, we use systemcall emulation (SE) mode to vary the page table organization, while keeping all other states identical. SE is sufficient as we do not study the effect of changes in memory mapping or the page table during the runtime of the program, and focus our evaluation on the program execution itself. The gem5 SE mode normally does not model a page table walker nor a page table in the form of a radix tree. We included page table walks by constructing the page table based on the simulator VA to PA mappings, and having the page table walker appropriately access each level through the caches.</p><p>We evaluate three large page fragmentation scenarios <ref type="bibr" target="#b32">[34,</ref><ref type="bibr" target="#b39">41]</ref>: 0% (all 4 KB pages; worst case for page walks), 50% (typical realworld <ref type="bibr" target="#b40">[42,</ref><ref type="bibr" target="#b51">54]</ref>), and 100% (all large pages; best performance but unrealistic). For the 50% scenario, we allocate large pages for the lower-half of the address space to simulate an OS that runs out of free large pages. Mosalloc <ref type="bibr" target="#b2">[4]</ref> proposed another layout that uses random windows of contiguous memory. The authors found that this can sometimes result in behaviors similar to either 4 KB allocations (our 0% scenario) or 2 MB allocations (our 100% scenario). Thus, we used the lower-half of the address space in large pages scheme.</p><p>We evaluate our proposals on benchmarks that stress the TLB: GraphBIG <ref type="bibr" target="#b38">[40]</ref> (LDBC-1000k dataset, 6.6 GB of memory usage) and graph500 (scale 24, 5.4 GB); benchmarks with significant TLB misses from biobench <ref type="bibr" target="#b5">[7]</ref> and SPECCPU 2006 <ref type="bibr" target="#b26">[28]</ref>; GUPS (𝑁 = 30, 8 GB); large linear classification (liblinear) <ref type="bibr" target="#b22">[24]</ref> (inputs: url_combined and HIGGS); a hashjoin microbenchmark <ref type="bibr" target="#b1">[3]</ref>, and the XSBench <ref type="bibr" target="#b48">[50]</ref>. As large in-memory databases, such as memcached, and very large graphs exhibit random access patterns, we also include a microbenchmark that represents such random access behavior.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.1">Non-virtualized Execution</head><p>Figure <ref type="figure">9</ref> shows the performance of our approach and those of ASAP <ref type="bibr" target="#b34">[36]</ref>, Elastic Cuckoo Hashing <ref type="bibr" target="#b47">[49]</ref>, and CSALT <ref type="bibr" target="#b33">[35]</ref>. The performance numbers are presented relative to a baseline system with a 4-level page table and Intel-style PWCs. We plot results for three fragmentation scenarios stacked to show the change as the percent of large pages increases: bottom (0% large pages), middle (50% large pages, realistic <ref type="bibr" target="#b40">[42]</ref>), and top (100% large pages, best performance, but unrealistic). Performance is normalized to the baseline configuration with 0% large pages (horizontal black line/dark gray bar), and the effect of 50% and 100% large pages can be seen on the baseline system in the gray bar in the middle.</p><p>We see two trends in the results: First, for the 0% (bottom) and 50% (middle) large page cases, flattening the page table (FPT), prioritizing page table entries in the cache (PTP), and the combination (FPT+PTP) contribute to increasing performance improvements beyond the state-of-the-art (blue bars increasing to the right). Second, as the fragmentation decreases (stacked from bottom to top), the impact of flattening and prioritization also decreases. This is because the TLB misses are much less frequent (less opportunity to reduce latency) and the page table size itself is drastically smaller (less need to preferentially cache it). Interestingly, the combination (FTP+PTP) is almost as effective as moving from 0% to 50% large pages (9.2% vs. 11.0%). For the detailed analysis below we look at the 0% large page scenario as flattening and prioritization have the largest potential <ref type="foot" target="#foot_3">4</ref> . Figure <ref type="figure" target="#fig_0">10</ref> shows that the flattened page table together with the PWC results in single-access page walks for all workloads. Overall, flattening the page table for 4 KB pages shows a geometric mean performance improvement of 2.3% (solid light blue bar) vs. 1.7% for ASAP (solid dark green bar) and a net performance loss for ECH (solid medium green bar).</p><p>Prioritizing page table entries in the L2 and L3 caches on the baseline improves performance by 6.8%. This does increase data misses slightly (L2: +4.7 percentage points) in exchange for far fewer page walk misses (L2: -36.2 percentage points). Figure <ref type="figure" target="#fig_0">10</ref> (bottom) shows that this prioritization significantly reduces page walk latency from an average 50.9 cycles per walk (baseline) down to 33.0 (prioritizing). Flattening and prioritizing together results in 29.1 cycles per walk.</p><p>ECH shows lower performance than the baseline as it requires three (4 KB pages) or four (mixed 4 KB/2 MB pages) concurrent memory accesses vs. a single memory access with flattening. CSALT provides little benefit for the 0% large page scenario. We believe this is due to CSALT having been designed and evaluated only with large pages, which makes it poorly optimized for the much larger page tables from our 0% and 50% scenarios, and their assumption of very frequent (every 10 ms) context switches, which would make a PWC less effective.</p><p>Changing PWC size resulted in a performance impact of -1.5% to +2.4%, when sweeping the L3 PWC entries from 1 to 16 (baseline 4) for the most sensitive benchmark, GUPS. In comparison, flattening gave a benefit of 8.9% as it benefits from a single memory access, instead of the 2 memory access from a L3 PWC hit. Achieving a similar benefit to flattening (single memory access) would require increasing the L2 PWC size to approximately 4096 entries. The larger 16-entry L3 PWC provided +2.9% on top of our cache prioritization.</p><p>With larger data sets the ratio of page table size to LLC size increases, potentially making preferential caching less effective. To evaluate this, we increased the page table to LLC ratio by 2x, 4x, 8x, and 16x over the previously presented results. We shrunk the LLC size proportionally to evaluate higher page table to LLC ratios. This experiment does not take into account the increased capacity pressure of the larger workload on the L1 and L2 caches, however, as the workloads are already far surpassing the L1 and L2 cache sizes, we believe the effects would be similar. Even with these increases, we saw similar performance benefits of preferential caching: geometric mean improvements of 6.8% (baseline), 5.9% (2x),  5.6% (4x), 6.5% (8x), and 7.0% (16x). In the 16x page table to LLC ratio, we are caching 6.3% of the page table while still maintaining the benefit of cache prioritization. This scenario represents a 128 GB workload running on a 16 MB LLC. Based on these results we expect cache prioritization to provide benefit up to and possibly above the 128 GB point as we did not see any trend of the performance dropping off. However, for systems with vastly more memory (e.g., 4 TB or 0.2% of the page table cached in a 16 MB LLC), page table entries were found to suffer capacity misses in the LLC <ref type="bibr" target="#b17">[19]</ref>. We cannot predict the benefit of cache prioritization for such systems and it is possible that cache prioritization may not work in such capacity constrained scenarios. If large pages are widely available in these systems, mapping the 4 TB region with 2 MB large pages will result in a 16 MB page table, allowing us to efficiently keep these page table entries in the cache through prioritization.</p><p>To summarize, for 0% large pages, flattening the page table improved performance by 2.3% over the baseline. Prioritizing caching of the page table resulted in a 6.8% improvement, while the combination delivered 9.2%, which is significantly greater than the state of the art (bottom bars in Figure <ref type="figure">9</ref>: ASAP 1.7%, ECH -5.9%, CSALT 0.3%). However, as the proportion of large pages increases, the relative improvement decreases. For the 50% large page scenario, the combination of flattening and prioritization delivered a 5.8 percentage point improvement vs. ASAP 1.2, ECH -3.2, CSALT 0.7 (middle bars in Figure <ref type="figure">9</ref>). Multicore. To evaluate the effect on shared caches and the memory hierarchy, we evaluated flattening and prioritizing with multiprogrammed workloads (32 MB shared L3, 4 cores with private L1s and L2s). We evaluated a total of 20 workloads: 11 homogeneous and 9 heterogeneous. Figure <ref type="figure" target="#fig_3">11</ref>  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.2">Virtualized Executions</head><p>The performance benefits for virtualized systems are shown in Figure <ref type="figure" target="#fig_0">12</ref>. The green bars show the effects of flattening the host page tables (HF), the guest page tables (GF), or both (GF+HF). The blue bars include cache prioritization. The baseline (Base-2D, leftmost) is a virtualized system with the 2D 4-level page table, which naively incurs up to 24 accesses per page walk, but, because we include two sets of PWCs for the guest and the host and a nested TLB <ref type="bibr" target="#b15">[17]</ref> to hold host translations, the average number of accesses is only 4.4.</p><p>Flattening in virtualized environments delivered a larger performance improvement than native environments. Flattening the host page table alone resulted in a 1.1% performance improvement, while flattening the guest page table alone delivered 4.9% improvement.</p><p>To understand the difference, consider Graph500, which which requires 11 MB of guest and 22 KB of corresponding host page tables for its 5.4 GB gVA. The Nested TLB <ref type="bibr" target="#b15">[17]</ref> and the vPWC (host PWC) work together to efficiently cache the small host translations (22 KB) for the guest page tables. As a result, the host translations for the guest page table accesses are effectively single access, even for the baseline 2D walks. This means there is less benefit for flattening the host page table for the guest page table accesses. Indeed, most of the benefit for host flattening comes from the final host data address translation. Guest flattening, however, allows flattening the 11 MB page table, resulting in fewer guest accesses (which also leads to fewer host table walks).</p><p>Finally, flattening both page tables is the most effective. Flattening both host and guest page tables delivered the largest performance improvement of 7.1%. Adding page table prioritization in the cache, increased this significantly to 7.5%, 11.6%, and 14.0% performance improvements for flattening host, guest, and both, respectively. We found that page table prioritization in the cache consistently provided a 6.1 to 6.9 percentage point improvement, which is similar to the native results. The effects of large pages are similar to the non-virtualized executions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.3">Dynamic Energy</head><p>We present dynamic energy normalized to the baseline in Figure <ref type="figure" target="#fig_4">13</ref> for the 0% LP scenario. The cache energy is comprised of the L1D, L2 and L3 modeled with the CACTI <ref type="bibr" target="#b37">[39]</ref> at 22nm. We include both data and page table walks. For DRAM, we report relative off-chip accesses.</p><p>ASAP which issues prefetches into the cache hierarchy for the lower two levels needs to re-access the lower two levels resulting in higher L1D accesses. CSALT does reduce off-chip DRAM accesses by 2.0% but increases the L3 access 5% resulting in 2.7% higher cache energy consumption. ECH issues three accesses per walk for 4 KB pages resulting in higher cache (32%) and memory (14%) energy consumption. This is a different behavior from the baseline, ASAP, CSALT and our work, all of which benefit from fewer page walk accesses due to the PWC.</p><p>Flattening reduces the number of memory accesses to the cache hierarchy (-2.8%). Cache prioritization increases L2 hits and reduces accesses to the L3 and the DRAM, reducing cache hierarchy energy  (-2.5%) and DRAM accesses (-4.6%). Finally the combination of both results in a dynamic energy reduction of 5.1% and 4.7%, for cache and DRAM, respectively. We see a similar trend in virtualization with flattening both guest and host table reducing cache energy by 6.7% and adding prioritization resulting in 8.7% cache and 4.7% DRAM energy saving.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.4">Case Study: Flattening for Mobile Systems</head><p>We evaluated flattening alone on a production industrial simulator used for next-generation mobile core exploration, configured as a high-end mobile device (Table <ref type="table" target="#tab_8">3</ref>). We used the Speedometer 2.0 [2] benchmark, which tests common browser operations such as DOM APIs, JavaScript, CSS resolution, and layout. It is a good representation of real-world mobile system performance, including JITing across iterations (e.g., iteration 1 executes 9.5% more instructions than iteration 5). The system is based on a standard AOSP 10.0 distribution which does not use transparent huge pages. We use virtualization, as future mobile systems are expected to use pKVM for increased security <ref type="bibr" target="#b20">[22]</ref>. Figure <ref type="figure" target="#fig_1">14</ref> shows the performance gains for a range of flattening options. The improvement is largest for flattening both L4+L3 and L2+L1 (dark blue bars, 3.8% and 4.3% for iterations 1 and 5 respectively), which is consistent with our earlier server results. Overall, flattening closer to the leaf nodes delivers the largest benefit, as they make up the majority of the nodes and are least likely to be cached, particularly under virtualization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.5">Flattening Other Levels</head><p>We have also simulated flattening the L3+L2 layer, which is by design beneficial for 2 MB data mappings as discussed in Section 3.4. For L3+L2 flattening, our results show a 0.2, 0.3, 0.1 percentage point benefit over the baseline for 0%, 50% and 100% large page scenarios, respectively. The improvements for virtualization (flattening both host and guest) is 0.7, 1.0, and 1.2 percentage points for the 0%, 50% and 100% large page scenarios. Finally, for the 100% large page scenario, we found that L2+L3 flattening outperformed L4+L3 and L2+L1 flattening by 0.3 and 0.8 percentage points, for native and virtualized executions. These results are consistent with what we saw for the mobile system (Figure <ref type="figure" target="#fig_1">14</ref>).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">CONCLUSION</head><p>In this work we explored two complementary techniques for reducing the impact of page walks: reducing the number of accesses by flattening the page table and reducing the latency of the accesses by preferentially caching page table entries. We evaluated server and mobile systems across a wide range of benchmarks with both academic and industrial simulators.</p><p>We show that modern PWCs result in little impact from flattening for non-fragmented and non-virtualized systems, but that with the increased page table sizes of realistically fragmented systems and complexity of virtualized page walks, flattening provides significant benefit. Further, we see that preferentially caching page table entries during periods of high TLB miss rates provides significant benefit in all scenarios, as high TLB miss rates are strongly correlated with high data cache miss rates, and the page table is sufficiently smaller than the data that it is far more likely to see reuse through the cache hierarchy. We further identify the challenges of self-referencing page tables and provide a practical solution.</p><p>Combined, flattening and prioritization allow us to serve the vast majority of page walks with a single cache hit, delivering significant performance (+14.0%, +7.2% with realistic large page fragmentation) and dynamic energy (-8.7% cache and -4.7% DRAM) benefits beating the state-of-the-art. Implementation requires only very small changes to the operating system (as we leverage existing large page support and provide a graceful fallback path) and hardware (as we use existing performance counters and cache partitioning techniques, or need one bit per tag). If main memory growth continues to outpace TLB growth, we expect that these techniques will become increasingly important.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Left: reduction in memory requests per page walk from flattening the pagetable. Center: reduction in page walk latency from prioritizing caching page table entries. Right: reduction in dynamic energy of the cache hierarchy and DRAM from flattening and prioritizing. For benchmarks with high/low (gups/dc) TLB miss rates</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 4 :</head><label>4</label><figDesc>Figure4: Impact of avoiding redundant page table entries for large pages (FPT+NF vs. FPT) for 50% and 100% large pages. Normalized to 0% large pages.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Flattening in virtualized 2-D page table walks. The PWC and vPWC skip stages of the virtualized walks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Multicore performance. Mean for all 20 mixes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 13 :</head><label>13</label><figDesc>Figure 13: Dynamic energy consumption of the cache hierarchy and DRAM for data and page walks for native (left, center) and virtualized (right) executions. Normalized to respective baselines.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>it e r 1 a n g u la rj s it e r 1 b a c k b o n e js it e r 1 fl ig h t it e r 1 v a n il la js it e r 5 a n g u la rj s it e r 5 b a c k b o n e js it e r 5 fl ig h t it e r 5 v a n il la js It e ra ti o n 1 ItFigure 14 :</head><label>114</label><figDesc>Figure 14: Performance of Speedometer 2.0 in a virtualized system normalized to baseline 2-D page table.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>(L4+L3) and (L2+L1) flattened</head><label></label><figDesc></figDesc><table><row><cell></cell><cell></cell><cell></cell><cell cols="2">(L4+L3) flattened</cell><cell></cell><cell cols="2">(L3+L2) flattened</cell><cell></cell><cell></cell></row><row><cell>Flat L4+L3</cell><cell>Flat L2+L1</cell><cell>262 144 x 4 KB Region 4 KB Translation in Flattened L2+L1</cell><cell>Flat L4+L3</cell><cell>L2</cell><cell>2 MB Translation in L2</cell><cell>L4</cell><cell>Flat L3+L2</cell><cell>L1</cell><cell>4 KB Transla;on in L1</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>L1</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>1GB VA</cell><cell>L2</cell><cell>512 x 2 MB Region 2 MB Translation in L2</cell><cell></cell><cell></cell><cell cols="2">512 x 4 KB Region 4 KB Transla;on in L1</cell><cell></cell><cell cols="2">2 MB Transla;on in Fla=ened L3+L2</cell></row><row><cell cols="10">Figure 3: Flattening the L4+L3 and L2+L1 levels (left): 4 KB pages (flattened L2+L1) require only two accesses, while 2 MB pages</cell></row><row><cell cols="10">are mapped to 1 GB VA ranges that do not flatten their L2+L1 (unflattened L2). Other approaches may flatten the first two levels</cell></row><row><cell cols="10">(middle, L4+L3) or the middle two levels (right, L3+L2). Our prototype OS implementation targets flattening L3+L2 (right) while</cell></row><row><cell cols="6">our evaluations look at flattening both L4+L3 and L2+L1 (left).</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">node and its 512 L1 child nodes with a single 2 MB flattened node,</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">which covers all 512 × 512 (262 144) translations (Figure 2, bottom).</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">If all translations in the region are mapped, this approach saves the</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">4 KB of space needed to hold the original L2 node. However, if some</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">L1-sized regions of the translations are not mapped, this approach</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">will waste 4 KB of space for each such region. In the traditional page</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">table, L1-sized regions that are not used would not have allocated</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">4 KB page table nodes, thereby saving memory. This bloating in the</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">page table itself is a side-effect of flattening the page table, but as</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">the page table itself is a minuscule fraction of the size of the actual</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">data (roughly 1/512th the size with regular pages and a contiguous</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">VA space), the overhead is negligible.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">The choice of which page table levels to flatten is flexible. In</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">this work, we use the design shown in the bottom of Figure</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="4">illustrates address translation pointer chasing through the</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">page table tree for conventional (4 KB nodes, top) and one flattened</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">(2 MB nodes, bottom) page table configuration. The conventional</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">tree has 512 entries per level, with each 9-bit segment of the address</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">used to index within each level 1 , and the address of the first page</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">table node in the CR3 (x86) or TTBR (Arm) register.</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">While an L1 (leaf) page table entry represents a 4 KB virtual</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">memory region, each entry in higher-level nodes can either point</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">to a lower-level node or directly represent a translation of a larger</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">region: e.g., L2 entries can either point to an L1 node of 512 4 KB</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">translations or directly translate a contiguous 512 × 4 KB = 2 MB re-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">gion. Thus the page table elegantly supports large pages by tracking</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">whether each entry is a pointer to a lower-level node or direct trans-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">lation. Some TLB designs leverage this fact to store partial walks</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">and final translations in the same HW structure (e.g. L2 TLB) [9, 12].</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="4">3.2 Flattening the Page Table</cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">Flattening uses the radix nature of the page table to naturally merge</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">levels of the page table into single, larger levels, resulting in a shal-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">lower tree. Merging two levels results in page table levels that</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">naturally use the next larger page size. For example, consider merg-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">ing the L2 and L1 levels in the page table. As each 4 KB L2 node</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">points to 512 4 KB L1 nodes, and each L1 node provides 512 trans-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">lations, if we flatten the L2 and L1 levels, we would replace each L2</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table Page</head><label>Page</label><figDesc>Recursive mappings used to access page tables in a L4, L3+L2, L1 page table organization.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>1 Recursion</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>R</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>L4</cell><cell>L3 L2</cell><cell>L1</cell></row><row><cell cols="5">Problem: Accessing Flattened PT VA L4 L3 L2 L1 Figure 5: Offset Flat L4+L3 R Large (2 MB) L4+L3 PT Unable to address after first 4 KB 12 bits (4KB) R1 R2 First 4 KB accessible 2 recursion</cell><cell cols="4">Solution L4 L4+L3 R R1 R2 L3 R1 L3* Flat 3 recursion L2 R3 R &amp;L3* L4* R2 R3 L1</cell><cell>Offset of interest to the sub-table Point directly L3* Sub-table (4 KB)</cell></row><row><cell cols="4">Problem: Accessing 4 KB PT</cell><cell></cell><cell>Solution</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="2">1 recursion</cell><cell></cell><cell></cell><cell></cell><cell cols="2">1 recursion</cell><cell></cell><cell></cell><cell>L1 PT</cell></row><row><cell>Flat</cell><cell></cell><cell>L2 PT</cell><cell>L1 PT</cell><cell></cell><cell>Flat</cell><cell></cell><cell>L3*</cell><cell>L2</cell></row><row><cell>L4+L3</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>L4+L3</cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>L3*</cell><cell></cell><cell></cell><cell></cell></row><row><cell>R</cell><cell></cell><cell cols="3">Cannot recurse to</cell><cell>R</cell><cell></cell><cell></cell><cell></cell></row><row><cell>R1</cell><cell></cell><cell cols="3">access L1 page table</cell><cell>R1</cell><cell></cell><cell></cell><cell></cell></row><row><cell>L4</cell><cell>L3</cell><cell>L2 L1</cell><cell cols="2">Offset</cell><cell>L4</cell><cell>L3</cell><cell>L2</cell><cell>L1</cell><cell>Offset</cell></row><row><cell cols="10">Figure 6: Recursion problems with flattened L4+L3 nodes and</cell></row><row><cell cols="10">how a glue sub-table (L4*) acts as a traditional unflattened</cell></row><row><cell cols="4">L4 to enable recursion.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">Flat L4+L3 2 MB Node</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">1 st 4 KB L3* 2 nd 4 KB L3* 3 rd 4 KB L3*</cell><cell>…</cell><cell cols="4">511 th 4 KB L3* 512 th 4 KB L4*</cell></row><row><cell></cell><cell></cell><cell cols="2">PTE 1</cell><cell>PTE 2</cell><cell>PTE 3</cell><cell>…</cell><cell cols="3">PTE 511 PTE 512</cell></row><row><cell></cell><cell></cell><cell cols="4">The glue table, or L4*</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">Figure 7: A 4 KB glue sub-table, L4*, points back to all the</cell></row><row><cell cols="10">4 KB, L3*, sub-tables of the flattened L4+L3 2 MB table. Note</cell></row><row><cell cols="10">that the pointers treat the L3* sub-tables as traditional 4 KB</cell></row><row><cell>tables.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head></head><label></label><figDesc>table is shown at the bottom. This table corresponds to the self-referencing entry in a traditional L4 table and occupies a single sub-page (the 512th sub-table in the figure, real systems usually select a random index at boot time) of the 2 MB L4+L3 table. As we are using a sub-table within the 2 MB L4+L3 table, we do not require an additional 4 KB allocation for the L4*. On recursive page table walks the upper 9 bits of the 18-bit index accesses the L4* sub-table of the flattened L4+L3. This triggers a recursion and the lower 9 bits select an entry in the L4*, which holds an address to a L3* sub-table of the flat L4+L3 table, providing recursion back to a sub-table of the flattened L4+L3 table. If multiple recursions are required, the lower 9 bits can point to the PTE entry that points to the L4* and the next recursive walks will access the L4* 4 KB table.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 1 :</head><label>1</label><figDesc>Server simulation configurations</figDesc><table><row><cell>Processor</cell><cell>2 GHz Out-of-order x86 Processor</cell></row><row><cell>L1 I/D Cache</cell><cell>4-cycle, 32 KB, 8-way, 64 B block</cell></row><row><cell>L2 Cache</cell><cell>12-cycle, 256 KB, 8-way, 64 B block</cell></row><row><cell>L3 Cache</cell><cell>42-cycle, 16 MB, 8-way, 64 B block</cell></row><row><cell>Memory</cell><cell>DDR4-2400, 4 channels</cell></row><row><cell>L1 TLB (Parallel lookup)</cell><cell>4 KB: 1-cycle, 64-entry , 4-way 2 MB: 1-cycle, 32-entry, 4-way</cell></row><row><cell>L2 TLB</cell><cell>4 KB/2 MB: 9-cycle, 1 536-entry, 12-way</cell></row><row><cell>PWC (Parallel lookup)</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 2 :</head><label>2</label><figDesc>shows the normalized weighted Benchmark mixes for the multicore evaluation.</figDesc><table><row><cell></cell><cell>Base-2D</cell><cell>HF</cell><cell></cell><cell>GF</cell><cell></cell><cell>GF+HF</cell><cell>Base+PTP</cell><cell></cell><cell>HF+PTP</cell><cell></cell><cell>GF+PTP</cell><cell></cell><cell>GF+HF+PTP</cell><cell>0% LPs</cell><cell>50% LPs</cell><cell>100% LPs</cell></row><row><cell>Normalized IPC (%)</cell><cell>100 120 140</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>100 150 200 250</cell></row><row><cell></cell><cell>bfs</cell><cell>cc</cell><cell>dc</cell><cell>dfs</cell><cell cols="2">gr.color. hashjoin kcore</cell><cell>liblinear</cell><cell>mcf</cell><cell>mummer omnetpp</cell><cell>pr</cell><cell>sssp</cell><cell>tc</cell><cell>xsbench Geomean</cell><cell>graph500 gups liblinear_H rand.</cell><cell>tiger</cell></row><row><cell cols="15">Figure 12: IPC comparison in virtualized environments of various combinations of flattening the page table for the host (HF)</cell></row><row><cell cols="14">and guest (GF) and both (HF+GF), with (blue) and without (green) cache prioritization (PTP).</cell></row><row><cell></cell><cell cols="3">Mix Benchmarks</cell><cell></cell><cell></cell><cell cols="2">Mix Benchmarks</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="2">1 dc×4</cell><cell></cell><cell></cell><cell></cell><cell cols="2">2 liblinear_H×4</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="3">3 rand×2, dc×2</cell><cell></cell><cell></cell><cell cols="2">4 rand×2, hashjoin×2</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="5">5 hashjoin×2, mummer×2</cell><cell cols="3">6 liblinear×2, xsbench×2</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="3">7 tiger×2, dfs, bfs</cell><cell></cell><cell></cell><cell cols="3">8 rand, liblinear, dc, cc</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">speedup for 8 mixes (Table 2) and the geometric mean of all 20. The</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">first two entries show that homogeneous mixes behave similarly to</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">the individual benchmarks in Figure 9. This was consistent across all</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">11 homogeneous mixes. The heterogeneous workloads show a sim-</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">ilar performance improvement trend to the individual benchmarks:</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">Flattening and prioritizing each introduce performance improve-</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">ments, and work together resulting in an average of 2.2%, 9.2%</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">and 11.5% improvement, respectively, for the 0% LP scenario. The</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">improvements are 1.4, 8.6 and 10.3 percentage points, respectively,</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">for the 50%, and 0.2, 0.7 and 0.8 percentage points, respectively for</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">the 100% scenario.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head>Table 3 :</head><label>3</label><figDesc>Mobile-core simulation configuration.</figDesc><table><row><cell>Processor</cell><cell>3 GHz Out-of-order Armv8 Processor</cell></row><row><cell>Caches</cell><cell>L1 I/D: 32 KB 4w, L2: 512 KB 8w, L3: 2 MB 16w</cell></row><row><cell>Memory</cell><cell>90 ns, 48 GB/s</cell></row><row><cell>L1 TLB</cell><cell>I: 32-entry FA, D: 48-entry FA</cell></row><row><cell>L2 TLB/PWC</cell><cell>4 KB, full translations: 1 536-entry 6w 1 GB, 2 MB, partial &amp; full translations: 256-entry 4w</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">We label the page table L4, L3, L2 and L1 from root to leaf.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">We have also simulated this flattening on both our simulators but omit them from the paper due to space constraints. Representative results can be seen in the mobile case study in Figure14.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">MASK<ref type="bibr" target="#b11">[13]</ref> identified that the opposite approach of prioritizing data over page table entries is better for latency-insensitive GPUs.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3">We expect similar effects for 2 MB pages in the future if TLB reach does not increase as fast as data sizes.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>ACKNOWLEDGMENTS</head><p>The authors would like to thank the shepherd, Jayneel Gandhi, and the anonymous reviewers of this paper. We would also like to thank Probir Sarkar, and Abhilash V. Varier, and Richard Grisenthwaite from Arm for valuable insights and feedback.</p><p>This work was supported by the Knut and Alice Wallenberg Foundation through the Wallenberg Academy Fellows Program (grant No 2015.0153), the European Research Council (ERC) under the European Union's Horizon 2020 research and innovation program (grant No 715283), and the NRF of Korea through the Postdoctoral Fellowship Program (NRF-2020R1A6A3A03037317). The computations and data handling were enabled by resources provided by the Swedish National Infrastructure for Computing (SNIC) at NSC (2021/22-435) and UPPMAX (2021/23-626) partially funded by the Swedish Research Council through grant agreement no. 2018-05973.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<ptr target="https://wiki.xenproject.org/wiki/Huge_Page_Support" />
+		<title level="m">Huge Page Support -Xen</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Mitosis: Transparently Self-Replicating Page-Tables for Large-Memory Machines</title>
+		<author>
+			<persName><forename type="first">Reto</forename><surname>Achermann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Panwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><surname>Roscoe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378468</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378468" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="283" to="300" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Predicting Execution Times With Partial Simulations in Virtual Memory Research: Why and How</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Agbarya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Idan</forename><surname>Yaniv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Tsafrir</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO50266.2020.00046</idno>
+		<ptr target="https://doi.org/10.1109/MICRO50266.2020.00046" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="456" to="470" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Revisiting Hardwareassisted Page Walks for Virtualized Systems</title>
+		<author>
+			<persName><forename type="first">Jeongseob</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jin</forename><surname>Seongwook</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaehyuk</forename><surname>Huh</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2012.6237041</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2012.6237041" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="476" to="487" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Compendia: Reducing Virtual-Memory Costs via Selective Densification</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3459898.3463902</idno>
+		<ptr target="https://doi.org/10.1145/3459898.3463902" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2021 ACM SIG-PLAN International Symposium on Memory Management (ISMM 2021)</title>
+				<meeting>the 2021 ACM SIG-PLAN International Symposium on Memory Management (ISMM 2021)<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="52" to="65" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">BioBench: A Benchmark Suite of Bioinformatics Applications</title>
+		<author>
+			<persName><forename type="first">Kursad</forename><surname>Albayraktaroglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aamer</forename><surname>Jaleel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xue</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manoj</forename><surname>Franklin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bruce</forename><surname>Jacob</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chau-Wen</forename><surname>Tseng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Yeung</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISPASS.2005.1430554</idno>
+		<ptr target="https://doi.org/10.1109/ISPASS.2005.1430554" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Performance Analysis of Systems &amp; Software (ISPASS)</title>
+				<meeting>International Symposium on Performance Analysis of Systems &amp; Software (ISPASS)</meeting>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="2" to="9" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Enhancing and Exploiting Contiguity for Fast Memory Virtualization</title>
+		<author>
+			<persName><forename type="first">Chloe</forename><surname>Alverti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stratos</forename><surname>Psomadakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vasileios</forename><surname>Karakostas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA45697.2020.00050</idno>
+		<ptr target="https://doi.org/10.1109/ISCA45697.2020.00050" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note>Konstantinos Nikas, Georgios Goumas, and Nectarios Koziris</note>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Software Optimization Guide for AMD Family 17h Models 30h and Greater Processors</title>
+	</analytic>
+	<monogr>
+		<title level="m">AMD 2020</title>
+				<imprint>
+			<publisher>AMD</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Transparent Hugepage Support</title>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Arcangeli</surname></persName>
+		</author>
+		<ptr target="https://www.linux-kvm.org/images/9/9e/2010-forum-thp.pdf" />
+	</analytic>
+	<monogr>
+		<title level="m">KVM Forum</title>
+				<imprint>
+			<date type="published" when="2010">2010. 2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Arm Architecture Reference Manual Supplement: Memory System Resource Partitioning and Monitoring (MPAM), for Armv8-A</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<pubPlace>Arm; Arm</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Arm Cortex-A76 Core Technical Reference Manual</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<pubPlace>Arm; Arm</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">MASK: Redesigning the GPU Memory Hierarchy to Support Multi-Application Concurrency</title>
+		<author>
+			<persName><forename type="first">Rachata</forename><surname>Ausavarungnirun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vance</forename><surname>Miller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joshua</forename><surname>Landgraf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saugata</forename><surname>Ghose</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adwait</forename><surname>Jog</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">J</forename><surname>Rossbach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3173162.3173169</idno>
+		<ptr target="https://doi.org/10.1145/3173162.3173169" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="503" to="518" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Translation Caching: Skip, Don&apos;t Walk (the Page Table)</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">W</forename><surname>Barr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alan</forename><forename type="middle">L</forename><surname>Cox</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Rixner</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1815961.1815970</idno>
+		<ptr target="https://doi.org/10.1145/1815961.1815970" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="48" to="59" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">SpecTLB: A Mechanism for Speculative Address Translation</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">W</forename><surname>Barr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alan</forename><forename type="middle">L</forename><surname>Cox</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Rixner</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2000064.2000101</idno>
+		<ptr target="https://doi.org/10.1145/2000064.2000101" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="307" to="318" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Efficient Virtual Memory for Big Memory Servers</title>
+		<author>
+			<persName><forename type="first">Arkaprava</forename><surname>Basu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jichuan</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">M</forename><surname>Swift</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2485922.2485943</idno>
+		<ptr target="https://doi.org/10.1145/2485922.2485943" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="237" to="248" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Accelerating Two-dimensional Page Walks for Virtualized Systems</title>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Bhargava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Serebrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francesco</forename><surname>Spadini</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Srilatha</forename><surname>Manne</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1346281.1346286</idno>
+		<ptr target="https://doi.org/10.1145/1346281.1346286" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="26" to="35" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Large-Reach Memory Management Unit Caches</title>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2540708.2540741</idno>
+		<ptr target="https://doi.org/10.1145/2540708.2540741" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="383" to="394" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Translation-Triggered Prefetching</title>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3037697.3037705</idno>
+		<ptr target="https://doi.org/10.1145/3037697.3037705" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="63" to="76" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<author>
+			<persName><forename type="first">Nathan</forename><surname>Binkert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bradford</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gabriel</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Saidi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arkaprava</forename><surname>Basu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><surname>Hestness</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><forename type="middle">R</forename><surname>Hower</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tushar</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Somayeh</forename><surname>Sardashti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rathijit</forename><surname>Sen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Korey</forename><surname>Sewell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Muhammad</forename><surname>Shoaib</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nilay</forename><surname>Vaish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Wood</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2024716.2024718</idno>
+		<ptr target="https://doi.org/10.1145/2024716.2024718" />
+	</analytic>
+	<monogr>
+		<title level="m">The Gem5 Simulator</title>
+				<imprint>
+			<date type="published" when="2011-08">2011. Aug. 2011</date>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="page" from="1" to="7" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Efficient Address Translation for Architectures with Multiple Page Sizes</title>
+		<author>
+			<persName><forename type="first">Guilherme</forename><surname>Cox</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3037697.3037704</idno>
+		<ptr target="https://doi.org/10.1145/3037697.3037704" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="435" to="448" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<author>
+			<persName><forename type="first">Will</forename><surname>Deacon</surname></persName>
+		</author>
+		<ptr target="https://mirrors.edge.kernel.org/pub/linux/kernel/people/will/slides/kvmforum-2020-edited.pdf" />
+		<title level="m">Virtualising for the Masses: Exposing KVM on Android</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note>KVM Forum</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Supporting Superpages in Non-Contiguous Physical Memory</title>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miao</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bruce</forename><forename type="middle">R</forename><surname>Childers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Mossé</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rami</forename><surname>Melhem</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2015.7056035</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2015.7056035" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on High-Performance Computer Architecture (HPCA)</title>
+				<meeting>International Symposium on High-Performance Computer Architecture (HPCA)</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="223" to="234" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">LIBLINEAR: A Library for Large Linear Classification</title>
+		<author>
+			<persName><forename type="first">Kai-Wei</forename><surname>Rong-En Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cho-Jui</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiang-Rui</forename><surname>Hsieh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chih-Jen</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Lin</surname></persName>
+		</author>
+		<ptr target="http://jmlr.org/papers/v9/fan08a.html" />
+	</analytic>
+	<monogr>
+		<title level="j">J. Mach. Learn. Res</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="1871" to="1874" />
+			<date type="published" when="2008-06">2008. June 2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Efficient Memory Virtualization: Reducing Dimensionality of Nested Page Walks</title>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arkaprava</forename><surname>Basu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">M</forename><surname>Swift</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2014.37</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2014.37" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="178" to="189" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Agile Paging: Exceeding the Best of Nested and Shadow Paging</title>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">M</forename><surname>Swift</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2016.67</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2016.67" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="707" to="718" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Tailored Page Sizes</title>
+		<author>
+			<persName><forename type="first">Faruk</forename><surname>Guvenilir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA45697.2020.00078</idno>
+		<ptr target="https://doi.org/10.1109/ISCA45697.2020.00078" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">L</forename><surname>Henning</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1186736.1186737</idno>
+		<ptr target="https://doi.org/10.1145/1186736.1186737" />
+	</analytic>
+	<monogr>
+		<title level="m">SPEC CPU2006 Benchmark Descriptions</title>
+				<imprint>
+			<date type="published" when="2006">2006. 2006</date>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="page" from="1" to="17" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m">TLBs, Paging-Structure Caches, and Their Invalidation</title>
+				<imprint>
+			<publisher>Intel</publisher>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">Intel 64 and IA-32 Architectures Optimization Reference Manual</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<publisher>Intel</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m">Intel 2017. 5-Level Paging and 5-Level EPT. Intel</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<title level="m" type="main">Intel 64 and IA-32 Architectures Software Developer&apos;s Manual</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<publisher>Intel</publisher>
+			<biblScope unit="volume">3</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Redundant Memory Mappings for Fast Access to Large Memories</title>
+		<author>
+			<persName><forename type="first">Vasileios</forename><surname>Karakostas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Furkan</forename><surname>Ayar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adrián</forename><surname>Cristal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mario</forename><surname>Nemirovsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">M</forename><surname>Swift</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Osman</forename><surname>Ünsal</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2749469.2749471</idno>
+		<ptr target="https://doi.org/10.1145/2749469.2749471" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="66" to="78" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Coordinated and Efficient Huge Page Management with Ingens</title>
+		<author>
+			<persName><forename type="first">Youngjin</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hangchen</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Peter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">J</forename><surname>Rossbach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Emmett</forename><surname>Witchel</surname></persName>
+		</author>
+		<ptr target="https://www.usenix.org/conference/osdi16/technical-sessions/presentation/kwon" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. USENIX Conference on Operating Systems Design and Implementation (OSDI)</title>
+				<meeting>USENIX Conference on Operating Systems Design and Implementation (OSDI)</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="705" to="721" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">CSALT: Context Switch Aware Large TLB</title>
+		<author>
+			<persName><forename type="first">Yashwant</forename><surname>Marathe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nagendra</forename><surname>Gulur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jee</forename><surname>Ho Ryoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuang</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lizy</forename><forename type="middle">K</forename><surname>John</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3123939.3124549</idno>
+		<ptr target="https://doi.org/10.1145/3123939.3124549" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="449" to="462" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Prefetched Address Translation</title>
+		<author>
+			<persName><forename type="first">Artemiy</forename><surname>Margaritov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitrii</forename><surname>Ustiugov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Bugnion</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3352460.3358294</idno>
+		<ptr target="https://doi.org/10.1145/3352460.3358294" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1023" to="1036" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Dead Page and Dead Block Predictors: Cleaning TLBs and Caches Together</title>
+		<author>
+			<persName><forename type="first">Chandrashis</forename><surname>Mazumdar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prachatos</forename><surname>Mitra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arkaprava</forename><surname>Basu</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA51647.2021.00050</idno>
+		<ptr target="https://doi.org/10.1109/HPCA51647.2021.00050" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on High-Performance Computer Architecture (HPCA)</title>
+				<meeting>International Symposium on High-Performance Computer Architecture (HPCA)</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="507" to="519" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">A Survey of Techniques for Architecting TLBs</title>
+		<author>
+			<persName><forename type="first">Sparsh</forename><surname>Mittal</surname></persName>
+		</author>
+		<idno type="DOI">10.1002/cpe.4061</idno>
+		<ptr target="https://doi.org/10.1002/cpe.4061" />
+	</analytic>
+	<monogr>
+		<title level="j">Concurrency and Computation: Practice and Experience</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<biblScope unit="page">e4061</biblScope>
+			<date type="published" when="2017">2017. 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Optimizing NUCA Organizations and Wiring Alternatives for Large Caches with CACTI 6.0</title>
+		<author>
+			<persName><forename type="first">Naveen</forename><surname>Muralimanohar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajeev</forename><surname>Balasubramonian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Norm</forename><surname>Jouppi</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2007.33</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2007.33" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="3" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">GraphBIG: Understanding Graph Computing in the Context of Industrial Solutions</title>
+		<author>
+			<persName><forename type="first">Lifeng</forename><surname>Nai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yinglong</forename><surname>Xia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilie</forename><forename type="middle">G</forename><surname>Tanase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ching-Yung</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2807591.2807626</idno>
+		<ptr target="https://doi.org/10.1145/2807591.2807626" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. High Performance Computing, Networking, Storage and Analysis (SC)</title>
+				<meeting>High Performance Computing, Networking, Storage and Analysis (SC)</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Making Huge Pages Actually Useful</title>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Panwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aravinda</forename><surname>Prasad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Gopinath</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3173162.3173203</idno>
+		<ptr target="https://doi.org/10.1145/3173162.3173203" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="679" to="692" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Perforated Page: Supporting Fragmented Memory Allocation for Large Pages</title>
+		<author>
+			<persName><forename type="first">Hyun</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanghoon</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bokyeong</forename><surname>Cha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youngjin</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaehyuk</forename><surname>Black-Schaffer</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Huh</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA45697.2020.00079</idno>
+		<ptr target="https://doi.org/10.1109/ISCA45697.2020.00079" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Efficient Synonym Filtering and Scalable Delayed Translation for Hybrid Virtual Caching</title>
+		<author>
+			<persName><forename type="first">Hyun</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Taekyung</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaehyuk</forename><surname>Heo</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Huh</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2016.18</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2016.18" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="90" to="102" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Hybrid TLB Coalescing: Improving TLB Translation Coverage under Diverse Fragmented Memory Allocations</title>
+		<author>
+			<persName><forename type="first">Hyun</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Taekyung</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jungi</forename><surname>Heo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaehyuk</forename><surname>Jeong</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Huh</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3079856.3080217</idno>
+		<ptr target="https://doi.org/10.1145/3079856.3080217" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="444" to="456" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Increasing TLB Reach by Exploiting Clustering in Page Translations</title>
+		<author>
+			<persName><forename type="first">Binh</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yasuko</forename><surname>Eckert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gabriel</forename><forename type="middle">H</forename><surname>Loh</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2014.6835964</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2014.6835964" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on High-Performance Computer Architecture (HPCA)</title>
+				<meeting>International Symposium on High-Performance Computer Architecture (HPCA)</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="558" to="567" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Aamer Jaleel, and Abhishek Bhattacharjee</title>
+		<author>
+			<persName><forename type="first">Binh</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Viswanathan</forename><surname>Vaidyanathan</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2012.32</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2012.32" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="258" to="269" />
+		</imprint>
+	</monogr>
+	<note>CoLT: Coalesced Large-Reach TLBs</note>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Large Pages and Lightweight Memory Management in Virtualized Environments: Can You Have it Both Ways?</title>
+		<author>
+			<persName><forename type="first">Bin</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ján</forename><surname>Veselý</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Gabriel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Loh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Bhattacharjee</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2830772.2830773</idno>
+		<ptr target="https://doi.org/10.1145/2830772.2830773" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Rethinking TLB Designs in Virtualized Environments: A Very Large Part-of-Memory TLB</title>
+		<author>
+			<persName><forename type="first">Jee</forename><surname>Ho Ryoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nagendra</forename><surname>Gulur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuang</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lizy</forename><forename type="middle">K</forename><surname>John</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3079856.3080210</idno>
+		<ptr target="https://doi.org/10.1145/3079856.3080210" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>International Symposium on Computer Architecture (ISCA)<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Elastic Cuckoo Page Tables: Rethinking Virtual Memory Translation for Parallelism</title>
+		<author>
+			<persName><forename type="first">Dimitrios</forename><surname>Skarlatos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Apostolos</forename><surname>Kokolis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianyin</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josep</forename><surname>Torrellas</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378493</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378493" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<meeting>Internationla Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">XS-Bench -The Development and Verification of a Performance Abstraction for Monte Carlo Reactor Analysis</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">R</forename><surname>John R Tramm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tanzima</forename><surname>Siegel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Islam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaveh</forename><surname>Schulz ; Stephan Van Schaik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ben</forename><surname>Razavi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Herbert</forename><surname>Gras</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cristiano</forename><surname>Bos</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Giuffrida</surname></persName>
+		</author>
+		<ptr target="https://www.mcs.anl.gov/papers/P5064-0114.pdf" />
+	</analytic>
+	<monogr>
+		<title level="m">PHYSOR 2014 -The Role of Reactor Physics toward a Sustainable Future</title>
+				<imprint>
+			<date type="published" when="2014">2014. 2017</date>
+		</imprint>
+		<respStmt>
+			<orgName>Vrije Universiteit Amsterdam</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical Report</note>
+	<note>Reverse Engineering Hardware Page Table Caches Using Side-Channel Attacks on the MMU</note>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Hash, Don&apos;t Cache (the Page Table)</title>
+		<author>
+			<persName><forename type="first">Idan</forename><surname>Yaniv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Tsafrir</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2964791.2901456</idno>
+		<ptr target="https://doi.org/10.1145/2964791.2901456" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ACM SIGMETRICS International Conference on Measurement and Modeling of Computer Science (SIGMETRICS)</title>
+				<meeting>ACM SIGMETRICS International Conference on Measurement and Modeling of Computer Science (SIGMETRICS)</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Enigma: Architectural and Operating System Support for Reducing the Impact of Address Translation</title>
+		<author>
+			<persName><forename type="first">Lixin</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Evan</forename><surname>Speight</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ram</forename><surname>Rajamony</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiang</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1810085.1810109</idno>
+		<ptr target="https://doi.org/10.1145/1810085.1810109" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Conference on Supercomputing (ICS)</title>
+				<meeting>International Conference on Supercomputing (ICS)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="159" to="168" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">A Comprehensive Analysis of Superpage Management Mechanisms and Policies</title>
+		<author>
+			<persName><forename type="first">Weixi</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alan</forename><forename type="middle">L</forename><surname>Cox</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Rixner</surname></persName>
+		</author>
+		<ptr target="https://www.usenix.org/conference/atc20/presentation/zhu-weixi" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. USENIX Annual Technical Conference (USENIX ATC). USENIX Association</title>
+				<meeting>USENIX Annual Technical Conference (USENIX ATC). USENIX Association</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="829" to="842" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

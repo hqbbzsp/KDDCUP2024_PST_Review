@@ -1,0 +1,1911 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Unifying Data, Model and Hybrid Parallelism in Deep Learning via Tensor Tiling</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2018-05-10">10 May 2018</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Minjie</forename><surname>Wang</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">New York University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Chien-Chin</forename><surname>Huang</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">New York University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jinyang</forename><surname>Li</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">New York University</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Unifying Data, Model and Hybrid Parallelism in Deep Learning via Tensor Tiling</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2018-05-10">10 May 2018</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:1805.04170v1[cs.DC]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T12:48+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Deep learning systems have become vital tools across many fields, but the increasing model sizes mean that training must be accelerated to maintain such systems' utility. Current systems like TENSORFLOW and MXNET focus on one specific parallelization strategy, data parallelism, which requires large training batch sizes in order to scale. We cast the problem of finding the best parallelization strategy as the problem of finding the best tiling to partition tensors with the least overall communication. We propose an algorithm that can find the optimal tiling. Our resulting parallelization solution is a hybrid of data parallelism and model parallelism. We build the SOYBEAN system that performs automatic parallelization. SOYBEAN automatically transforms a serial dataflow graph captured by an existing deep learning system frontend into a parallel dataflow graph based on the optimal tiling it has found. Our evaluations show that SOYBEAN is 1.5×−4× faster than pure data parallelism for AlexNet and VGG. We present this automatic tiling in a new system, SOYBEAN, that can act as a backend for TENSORFLOW, MXNET, and others.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Deep neural networks (DNNs) have delivered tremendous improvements across many machine learning tasks, ranging from computer vision <ref type="bibr" target="#b31">[33,</ref><ref type="bibr" target="#b38">40]</ref> and speech recognition <ref type="bibr" target="#b16">[18,</ref><ref type="bibr" target="#b24">26]</ref> to natural language processing <ref type="bibr" target="#b13">[15,</ref><ref type="bibr" target="#b28">30]</ref>. The popularity of DNNs has ushered in the development of several machine learning systems focused on DNNs <ref type="bibr" target="#b0">[2,</ref><ref type="bibr" target="#b2">4,</ref><ref type="bibr" target="#b11">13,</ref><ref type="bibr" target="#b20">22]</ref>. These systems allow users to program a DNN model with ease in an array-language frontend, and each also enables training on a GPU for performance.</p><p>The power of DNNs lies in their ability to use very large models and to train with huge datasets. Unfortunately, such power does not come for free, as training such networks is extremely time consuming. For example, a single AlexNet training run takes more than a week using one GPU <ref type="bibr" target="#b38">[40]</ref>. Compounding the problem, DNN users must completely retrain the model after any changes in the training parameters while fine-tuning a DNN. Given this frustratingly long train-ing process, the holy grail of a DNN system is to deliver good training performance across many devices.</p><p>The most widely used method for scaling DNN training today is data parallelism. Traditional DNN training is based on batched stochastic gradient descent where the batch size is kept deliberately small. Within a batch, computation on each sample can be carried out independently and aggregated at the end of the batch. Data parallelism divides a batch among several GPU devices and incurs cross-device communication to aggregate and synchronize model parameters at the end of each batch using a parameter service <ref type="bibr" target="#b18">[20,</ref><ref type="bibr" target="#b41">43]</ref>. DNN models are large and growing. For example, in 2012 AlexNet had ∼150MB of model parameters, and a DNN acoustic model from three years later <ref type="bibr" target="#b44">[46]</ref> had 1.6GB of parameters. In order to reduce the overhead of synchronizing large models, one must use very large batch sizes, ensuring that computation time dominates over communication time. Data parallelism's reliance on very large batch size comes at a price: it is known that training using larger batches converges more slowly, hurts accuracy <ref type="bibr" target="#b37">[39]</ref>, and is more likely to lead to globallysuboptimal local minima <ref type="bibr" target="#b33">[35]</ref>.</p><p>To avoid this batch-size-dilemma of data parallelism, one can divide the model parameters across devices and synchronize the intermediate computation results instead of the model parameters. This scheme is referred to as model parallelism. However, the relative merits of model and data parallelism depend on the batch size, the model size, and the shape of the model in use. Previous work <ref type="bibr" target="#b37">[39]</ref> also suggests that different layers of a DNN model should be treated differently to achieve better training speed. Due to this unclear trade-off and the fact that model parallelism requires a more complex implementation, with the exception of an earlier learning system <ref type="bibr" target="#b18">[20]</ref>, all existing systems focus on data parallelism.</p><p>Our insight is that data, model and hybrid parallelism can be unified as approaches to parallelizing tensor operations by dividing the tensor inputs along different dimensions 1 . This insight allows us to cast the challenge of scaling DNN as a problem of "tensor tiling": along which dimension should one partition each input or intermediate tensor involved in the DNN computation? As the scaling bottleneck of DNN training is the communication overhead, we define the corresponding optimization problem on the tensor dataflow graph, and propose an algorithm to find the best tiling strategy that minimizes the communication cost. The resulting tiling strategy is comprehensive. Not only can it partition along any one dimension (thus supporting either data or model parallelism), it also can partition any tensor along more than one dimension (thus supporting a hybrid version of both data and model parallelism). Furthermore, unlike existing approaches that adopt a single partitioning strategy for all tensors involved in the computation, decisions are made separately for each tensor, depending on its size, shape, and the overall DNN model configuration.</p><p>Because of the flexibility allowed for tiling, it is difficult to find an optimal strategy. In fact, at its full generality, the tiling problem is known to be NP-complete <ref type="bibr" target="#b25">[27]</ref>. Fortunately, many DNN models have the common structure of multiple stacked neuron layers. As a result, we can reorganize the dataflow graph of a DNN training into a chain of levels such that each level only interacts with the adjacent levels. With this formulation, we solve the tiling problem using a novel algorithm that recursively applies dynamic programming to find the optimal tiling solution given any DNN configuration and batch size.</p><p>To demonstrate the effectiveness our formulation, we have implemented a prototype system called SOYBEAN as a C++based backend plugin for an existing DNN system MXNET. The practice can be applied to any dataflow-based DNN systems. We evaluated SOYBEAN on a 8-GPU machine and compared its performance against data parallelism with varying configurations. Our evaluations show that SOYBEAN is 1.5× to 4× faster than pure data parallelism for AlexNet and VGG.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Background &amp; Challenges</head><p>Before introducing SOYBEAN's approach to efficient deep learning, we must motivate the importance of the problem and the current popular approaches. We first introduce basic DNN concepts, and describe data parallelism and model parallelism. We compare the communication costs of these two approaches with a concrete Multi-Layer Perceptron example, which reveals our core precept: data parallelism, model parallelism, and even hybrid parallelism are just different ways of tiling tensors in the dataflow graph. Finally, we discuss the challenges and our contributions of solving this tiling problem in dataflow graph. for The weights of neuron connections between successive layers l and l + 1 are represented by matrix W l , where W i,j l is the weight between the i-th neuron of layer l and j-th neuron of layer l + 1. The set of weights of all layers W 1 , W 2 , ..., W l is referred to as a DNN's model parameters.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Background on DNN and Deep Learning Systems</head><formula xml:id="formula_0">(epoch = 1 to N): foreach (D i in {D 1 , D 2 , ...}): ∂C ∂θ = CalculateGradient(D i , θ) θ := θ − ∂C ∂θ //</formula><p>To calculate the cost function, one performs forward propagation to compute the activation of a layer from its preceding layer. Specifically, x l+1 = f (x l • W l ), where layer l's activation vector x l is multiplied with the weight matrix W l and then scaled using an element-wise non-linear function f . The cost function is C = g(x lout) where x lout is the activation of the last (outout) layer and g is the loss function. Gradients are computed through backward propagation using the chain rule. The computation proceeds from a higher to lower layer. Specifically, two kinds of matrix computations are involved in each step. One computes the gradient of the activation dC dx l = df ( dC dx l+1 )W T l . The other computes the gradient of weight matrix dC dW l = x T l df ( dC dx l+1 ). Here, df is the derivative function of f . The weight matrix W l is then Because SGD is such a common computation, these systems automatically derive the computation required for the backward propagation and handle parameter updates. The overall computation for both forward and backward propagation is transformed into a dataflow graph of tensor operators. As shown in Figure <ref type="figure">8</ref>(b), the dataflow graph for DNN training is mostly serial. Popular DNN systems such as TENSORFLOW and MXNET directly execute this dataflow on their backends. Hence, if a user wishes to parallelize training across devices, he or she must manually express the parallel computation in the user code so that the resulting dataflow graph generated has the required parallelism. Furthermore, users are also expected to explicitly specify placement, i.e. which device should be responsible for executing which portions of the dataflow graph. This is a tedious process.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Scaling challenges and trade-offs</head><p>Data parallelism is the widely-used method for scaling DNN training across many devices. It takes advantage of the fact that all training samples in one batch independently contribute to the gradients of the model parameters. Therefore, data parallelism partitions a batch of samples and lets each device compute the gradients of the same model parameters using a different partition. The resulting gradients are aggregated before updating the parameters. The aggregation and update can be done on each device by slicing parameters evenly, or on a separate device called a Parameter Server <ref type="bibr" target="#b18">[20,</ref><ref type="bibr" target="#b41">43]</ref>. After the model parameters are updated, they will be replicated to all devices for the next iteration. This results in a Bulk Synchronous Parallel (BSP) approach to parallelizing the training algorithm (Figure <ref type="figure">.</ref>2).</p><p>Data parallelism has achieved good speedup for some DNN models (e.g. Inception network <ref type="bibr" target="#b2">[4]</ref>). However, since the communication overhead of data parallelism increases as the model grows bigger, one must train using a very large batch size to amortize the communication cost across many devices. In fact, for any DNN model, one can always scale the "training throughput" by ever increasing the batch size. Unfortunately, large batch training is known to be problematic such as longer convergence time or decreased model accuracy <ref type="bibr" target="#b33">[35,</ref><ref type="bibr" target="#b37">39]</ref>.</p><p>Model parallelism partitions the model parameters of each layer among devices, so that the update of parameters can be performed locally (Figure <ref type="figure" target="#fig_2">2</ref>). Each device can only calculate part of a layer's activation using its parameter partition, so all devices need to synchronize their activations and activation gradients for each layer during both the forward and backward propagations. Since model parallelism exchanges activations instead of the model parameters, it works well for models with small activation size such as DNN models with large fully-connected layers.</p><p>The trade-off between data and model parallelism can be illustrated using an example as follows. Consider a MLP network with five fully-connected layers; each layer has 300 neurons; the batch size is 400. Therefore, all weight matrices are of shape 300 × 300 whereas activation matrices are of shape 400 × 300 (Figure <ref type="figure" target="#fig_7">5</ref>). The model parameter size is 300 × 300 × 5 × 4B = 1.8MB, and the total activation size of forward propagation 400 × 300 × 5 × 4B = 2.4MB. When parallelizing training for this network on 16 GPUs, data parallelism needs to first collect all parameter gradients and then synchronize the updated parameters for all devices, so the total communication is 1.8MB × 16 × 2 = 57.6MB, while model parallelism transfers activations and their gradients in both forward and backward propagations, so the total communication is 2.4MB × 16 × 2 = 76.8MB. Data parallelism is better than model parallelism in this particular example because the total activation(gradient) size is bigger than the total parameter size and data parallelism exchanges parameters across devices. If the batch size is 300 while the layer size is 400, model parallelism becomes better.</p><p>However, an even better strategy for this example is a hybrid of data and model parallelism as follows. The 16 GPUs are divided into four groups. We use data parallelism among groups, while within each group we apply model parallelism. The calculation of communication cost is then also divided into two parts. First, for data parallelism among groups, the communication is 1.8MB × 4 × 2 = 14.4MB. Second, for model parallelism within each group, the communication is  4 MB due to data parallelism partitioning on the batch dimension. Finally, because there are four groups, the total communication is 14.4MB + 4 × 4.8MB = 33.6MB. This results in communication savings of 41.7% and 56.2% compared with pure data and model parallelism, respectively.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Our approach</head><p>Our insight to this challenge is that data, model and hybrid parallelism can all be unified as different tensor tiling  schemes including partitioning a tensor along certain dimension or replicating the whole tensor. We then find the best parallelism by finding the tensor tiling scheme that minimizes communication cost. The formulation lets us support a wide range of parallel strategies used for DNN training in the literature, including:</p><p>• Data parallelism. This corresponds to replicating the weight tensors and partitioning all other tensors by the data dimension. • Model parallelism. This corresponds to partitioning each weight tensor along any one dimension. • Mixed parallelism <ref type="bibr" target="#b37">[39]</ref>. This corresponds to distributing some layers using data parallelism and other layers using some model parallelisim strategy. • Hybrid parallelisim <ref type="bibr" target="#b18">[20]</ref>. Here, workers are divided into groups. An operator's tensor is first partitioned across groups and then partitioned across workers within a group, using different strategies. Combined parallelism has been used by the earlier generation of specialized training systems (e.g. <ref type="bibr" target="#b12">[14,</ref><ref type="bibr" target="#b18">20]</ref>), but is not explored with the current generation of general-purpose systems due to its programming complexity.</p><p>We then build a prototype system called SOYBEAN. Figure.3 shows an overview of SOYBEAN's overall system design. We reuse the front-end of existing deep learning systems that express tensor computation by a dataflow graph, which we refer to as the semantic dataflow graph. An example semantic dataflow graph is shown in Figure <ref type="figure">8(b)</ref>. It is mostly serial. Based on the semantic dataflow graph, SOY-BEAN determines the best tensor tiling scheme that incurs the least communication cost. SOYBEAN then transforms the serial semantic dataflow graph into a parallel execution dataflow graph based on the scheme. It automatically maps the partitioned arrays and operators to the set of underlying devices. Finally, the execution graph is dispatched to an existing dataflow engine backend for execution. Since the DNN training is done over many iterations using the same semantic dataflow graph, the runtime cost of the dataflow transformation can be amortized.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Finding the Optimal Tiling</head><p>Given a dataflow graph, SOYBEAN aims to find a tiling for each tensor in the graph such that the resulting parallel ex-ecution incurs minimal communication cost. There are three main challenges that SOYBEAN solves:</p><p>• Optimize based on the dataflow: In a dataflow graph, a tensor could act as the output of one operator as well as the input of another. Hence, a tiling that results in no communication for some operators may lead to more communications globally. For example, data parallelism requires no communication in forward and backward propagations, but the gradient aggregation part may be costly so that the overall communication cost is not minimized. SOYBEAN solves this by considering operators that share inputs or outputs together when searching for the optimal tiling. We also show that our algorithm could finish in polynomial time thanks to the sequential nature of deep learning algorithm. • Determine communication cost: Given the tilings of the inputs and outputs, SOYBEAN needs to determine the corresponding communication costs. In SOYBEAN, we view communication as tiling conversions. Our core insight is that all the data needs to be fetched to the device before the operator can be executed. The process of fetching data from one location to another is in fact re-organizing the tiles and is thus equal to tiling conversion. • Decompose the optimization problem: The problem of finding the best tiling for n devices has a very large search space depending on n. SOYBEAN provides a recursive solution; it first finds the best tiling for partitioning the tensors among two devices. Then it recursively build upon its baseline solution to find tiling for n &gt; 2 devices.</p><p>In this section, we first discuss the formulation of the tiling problem (Sec 4.1). Next, we describe how to find the optimal tiling across two devices (Sec 4.2) and build upon this baseline solution to tile across are more than two devices (Sec 4.3). We prove the solution's optimality in Sec 4.4 and discuss extensions in Sec 4.5. We formulate the tiling problem to be solved by SOY-BEAN. To ease the discussion, we only consider 2-D tensor (matrix) here. Extension to high-dimensional tensor is straight-forward and will be covered in section 4.5.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Parallelism as the Tiling Problem</head><p>We first define the set of supported tiling schemes of a matrix. SOYBEAN only considers even tiling schemes that result in (sub-)tensors of the same shape and size, because we want to balance the computation across all devices. There are three basic tilings that divide a matrix computation into two equal parts: row tiling, column tiling and replication, as shown in Figure <ref type="figure">.</ref>4(a). Since all tiles are of the same shape, basic tillings can be applied again on each tile to further partition the matrix. We call this tiling composition. The result of a tiling composition is still an even tiling.</p><p>Let T 1 = {R, C, r} be the set that contains all basic tilings of a matrix, where R, C and r represent row tiling, column tiling and replication, respectively. We then define a k-cut tiling set that contains all possible tilings after k compositions as follows:</p><formula xml:id="formula_1">Definition 1. T k = {t 1 t 2 |t 1 ∈ T k−1 ∧ t 2 ∈ T 1 }, ∀k 2.</formula><p>For example, a 2-cut tiling set T 2 is as follows: We then formally define the tiling of a dataflow graph:</p><formula xml:id="formula_2">T 2 = {RR, RC, Rr, CR, CC, Cr, rR, rC, rr}</formula><p>Definition 2. The k-cuts tiling of a dataflow graph G is a function T G : M → T k that maps from all the matrices M in dataflow graph to their tilings.</p><p>Given the above definition, we could unify data, model and hybrid parallelisms as different tilings of the dataflow graph (Figure <ref type="figure" target="#fig_7">.5</ref>). We explain why this is the case using the same MLP example in Figure <ref type="figure">.</ref>8.</p><p>• In data parallelism, all activations are partitioned along the batch dimension while all parameters are replicated. Suppose the batch dimension is the row dimension. Then data parallelism on two devices can be described by the following tiling:</p><formula xml:id="formula_3">T data (m) = r if m is weight matrix, R otherwise.</formula><p>• In model parallelism, the weight matrices are partitioned in order to avoid gradient aggregation among devices. For a 2D weight matrix, there are two possible tilings: R and C. Suppose we choose row tiling. In order to compute the gradient of parameters locally, the activation matrices are partitioned along column while the activation gradients are replicated. Therefore, model parallelism on two devices can be described as following tiling:</p><formula xml:id="formula_4">T model (m) =    R if m is weight matrix, C if m is activation, r otherwise.</formula><p>• Hybrid parallelism divides all devices into groups. It supports one type of parallelism within a group and a different type across groups. This can be described as a composition of T data and T model . An example tiling of hybrid parallelism on four devices is as follows. It performs data parallelism across groups and model parallelism within a group.</p><formula xml:id="formula_5">T hybrid (m) =    rR if m is weight matrix, RC if m is activation, Rr otherwise.</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Tiling across two devices</head><p>We first solve the base case problem of finding the best tiling for two devices that minimizes communication. Let us consider the MLP model in Figure <ref type="figure">8</ref>(b). If there are L layers, the forward propagation for computing loss value L can be simplified as follows:</p><formula xml:id="formula_6">L = x 0 1 l L W l<label>(1)</label></formula><p>Here, we ignore the element-wise functions. x 0 is the input data and W l is the weight matrix of layer l. How to assign the tiling schemes for all matrices in this computation to minimize the communication cost? We first explain how to calculate the communication cost of one matrix multiplication given the tilings of its input/output matrices (Sec 4.2.1). Then we give an algorithm to optimize for the cost (Sec 4.2.2).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.1">Calculating the communication cost</head><p>Let us first consider only one matrix multiplication, X × Y = Z. What is the communication cost given the tilings of its inputs t X and t Y and its output t Z ? This problem is a variant of the traditional block matrix multiplication, except in addition to being partitioned along rows and columns, the matrix can also be replicated. The core principle here is that each submatrix multiplication cannot be performed without all its inputs being fetched to the device on which it is executed. Therefore, we can view a parallel matrix multiplication as having three phases:</p><formula xml:id="formula_7">+ × = R × r = R r × C = C × = × = C × R = red</formula><p>• Inputs Conversion Phase: The tiles of the inputs (X and Y) are fetched to the device(s) that require them for computation, if they reside on different devices. • Computation Phase: Submatrix multiplications are executed on all devices locally. • Outputs Conversion Phase: The temporary outputs of the local matrix multiplications are pushed to the devices specified by the tilings of the outputs (Z).</p><p>Notably, communication only happens in the Inputs and Outputs Conversion phases, which means we can compute the communication cost by computing the conversion costs of different tilings. However, since there are many types of input and output tilings, we do not want to enumerate all possible combinations to calculate the cost. Rather, we find a small set of so-called aligned tiling and reduce all tiling combinations to one of those cases. Aligned tilings may or may not correspond to real tilings. We use them to simplify the conversion cost calculation by drastically cutting down the number of cases we have to consider.</p><p>Given the three basic tilings, there are three corresponding aligned tilings, as depicted in Figure <ref type="figure">.</ref>6. For the left most tiling, the two inputs are row-partitioned and replicated, respectively and output is row partitioned. Similarly for the scenario in the middle. There is no communication cost for these two tilings. The third scenario is different in that its output tiling does not correspond to any basic tiling. Rather, the intermediate matrices computed on each device need to be aggregated later using an extra reduction operation. We denote this intermediate tiling as red.</p><p>All of the aligned tilings have several properties in common. First of all, they are all correct block matrix multiplications. Second, removing any submatrix product will give wrong results. Therefore, there is no redundant computation. Finally, they are balanced in that the number of submatrix products is equal to the number of devices.</p><p>One-cut Communication Cost: Let us define c(t 1 →t 2 ) as the conversion cost from tiling t 1 to t 2 . To compute the communication cost of a matrix multiplication, we calculate the minimum cost of converting the given input/output tilings to one of the three aligned tilings in Figure <ref type="figure">6</ref>. To put it formally, the communication cost c(t X , t Y , t Z ) of a matrix with input tiling t X , t Y and output tiling t Z is as follows:</p><formula xml:id="formula_8">min    c(t X →R) + c(t Y →r) + c(R→t Z ), c(t X →r) + c(t Y →C) + c(C→t Z ), c(t X →C) + c(t Y →R) + c(red→t Z )    (2)</formula><p>Computing the cost of tiling conversion is straightforward. It is equal to the area required for the local multiplication (which we refer to as "ghost area") minus the area that already exists on the device. Figure <ref type="figure">7</ref>(b) illustrates how an unaligned multiplication C × r = R is computed through a conversion to an aligned multiplication R × r = R. The submatrix required for local computation is marked by the dashed line. The submatrix filled by yellow shading on device #1 needs to be fetched from device #2. Hence, its area is equal to the amount of communications involved in this tiling conversion.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.2">One-cut tiling algorithm</head><p>Given a dataflow graph G, the one-cut tiling algorithm finds a tiling across two devices (or groups), T min : M → T 1 , such that the overall communication cost is minimized:</p><formula xml:id="formula_9">T min = arg min T o∈O G c(T (o X ), T (o Y ), T (o Z ))<label>(3)</label></formula><p>where O G represents all the matrix multiplications in the dataflow graph G, and o X , o Y and o Z represent the input matrices and output matrix of a matrix multiplication o.</p><p>The central problem in searching optimal tilings is that changing the tiling of one matrix may affect many multiplications. Again, let us look at the MLP example. If we only consider the forward propagation part L = x 0 1 l L W l , we can first calculate the communication cost of x 1 = x 0 W 1 under all the possible tilings of x 0 , x 1 and W 1 . We then proceed to the next multiplication x 2 = x 1 W 2 , but when choosing x 1 to be tiling t 1 , we should include the minimal cost of x 1 to be t 1 in the first multiplication. The total communication cost is then the minimal cost after we finish the last multiplication. When further taking the backward propagation part dL dx0 = dL dx L L l 1 W T l into consideration, two multiplications (x l = x l−1 W l and dL dx l−1 = dL dx l W T l ) should be considered together, because the tiling of W l affects both multiplications.</p><p>Our tiling algorithm exploits an intuitive idea: operators that share inputs or outputs should be considered together. To achieve this, our algorithm first treats the dataflow graph as an undirected graph G , and then uses a breadth-first search on this graph to organize graph nodes into a list of levels L = l 0 , l 1 , . . . , l n . BFS puts nodes that share inputs or outputs in adjacent levels. We then use dynamic programming (DP) to search for optimal tilings: Initial condition:</p><formula xml:id="formula_10">g 0 (τ 0 ) = level cost 0 (φ, τ 0 )<label>(4)</label></formula><p>DP equation (l 1):</p><formula xml:id="formula_11">g l (τ l ) = min τ l−1 {level cost l (τ l−1 , τ l ) + g l−1 (τ l−1 )}<label>(5)</label></formula><p>Here, τ l contains the tilings of all matrices that are shared among multiplications in level l and l + 1. The level cost l is calculated by summing up the cost of each matrix multiplication in level l. The DP state g l (τ l ) represents the minimal communication cost after executing all the operators from level zero to level l and also partitioning matrices used by level l + 1 by tilings in τ l . The algorithm searches for all possible tilings and therefore guarantees optimal. Unfortunately, the running time of the DP algorithm is exponential. Because all the operations are matrix multiplications, the node degree in the undirected graph G is at most three. According to Moore bound, if there are N nodes in the graph, the diameter is O(log N ). Since the number of BFS levels is equal to the graph diameter, the maximum number of nodes in each level is O(N/logN ). Computing the total cost of each level needs to explore all tiling combinations of the inputs and outputs of the operators in that level. Therefore, the worst-case complexity of calculating level cost l is</p><formula xml:id="formula_12">|T 1 | O(N/ log N ) = O(3 N ).</formula><p>The observation that saves us is that deep learning does not have an arbitrary dataflow graph. Rather, its graph usually Algorithm 1: k-cuts tiling algorithm input : A dataflow graph G and a number k output: A k-cuts tiling T of the graph and its communication cost c if k = 0 then return φ and 0</p><formula xml:id="formula_13">else P k , δ k ← OneCutTiling(G); G ← ConstructTileGraph(G, P k ); T k−1 , c k−1 ← KCutsTiling(G , k − 1); T k ← P k • T k−1 ; c k ← δ k + 2c k−1 ;</formula><p>return T k and c k has a large diameter. This is because training neural network usually involves computing each layer sequentially. For an N -layer MLP network, there are 3N matrix multiplications (forward, backward and gradient computation) and the diameter is N . In this case, the average number of nodes in each level is some constant c, so the average running complexity of the whole DP algorithm is linear, O(3 c N ).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Tiling across many devices</head><p>The k-cut algorithm finds the optimal tiling for n = 2 k devices. It is a recursive algorithm. Specifically, we can divide 2 k devices into 2 groups, each with 2 k−1 devices. We first use the one-cut algorithm to find the best tiling to partition the computation among the two groups. Within each group, we perform (k − 1)-cuts to find the optimal tiling. Algorithm 1 shows the pseudocode.</p><p>In Algorithm 1, P k •T k−1 is the composition of two tilings (see Section 4.1). δ k is the cost of the k-th cut. As each cut partitions computation into two groups, the cost of the subproblem is multiplied by two. The total communication cost is the weighted summation of per-cut costs:</p><formula xml:id="formula_14">Theorem 1 (Total communication cost). c k = k i=1 2 k−i δ i</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Proof of Optimality</head><p>Due to the limit of space, we only emphasize the key point that leads our proof. The core property that makes the k-cuts algorithm optimal is the commutativity of tiling composition because they are orthogonal ways of partitioning. If we let R k be the k-row tiling, then the T 2 tiling set could be rewritten as T 2 = {R 2 , C 2 , r 2 , RC, Rr, Cr}. In fact, we have: Theorem 2 (Flattening).</p><formula xml:id="formula_15">T k = {R kR C kC r kr |k R , k C , k r ∈ Z ∧ k R + k C + k r = k}</formula><p>Let T k = P k , P k−1 , . . . , P 1 be the tiling sequence generated by our k-cuts algorithm. We can also prove that the order of the tiling applied will not influence the total communication cost c k . This gives us the following property: Theorem 3 (Greediness). Let δ k , δ k−1 , . . . δ 1 be the cost of each tiling. We have δ i 2δ i−1 , ∀2 i k.</p><p>The greedy theorem means that for any tiling sequence T k we can reorder it such that the contribution of the cost of each tiling is increasing. Suppose there is another tiling sequence T k that is not chosen by our algorithm but has c k &lt; c k , we can prove that there must exist a "cross" step such that after that step, the remaining tilings in T k produces larger communication cost than the remaining tilings in T k . We can prove that by choosing the tiling at the "cross" step in T k , it will give smaller cost than the one in T k which contradicts to the local optimality of k-cuts algorithm.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5">Extensions to General Dataflow Graph</head><p>First, we extend the k-cuts tiling algorithm to high-dimensional tensors. We change the basic tiling set to T 1 = {P 1 , P 2 , . . . , P d , r}, where P d represents partitioning along d th dimension. The running complexity of the one-cut algorithm then becomes O((d + 1) c N ) given N nodes in the dataflow graph, which is still acceptable provided that d is usually small. Second, we discuss how to handle operators beyond matrix multiplications. Recall that the communication cost is equal to the tiling conversion cost. The only information that is tied to operator type is the set of the aligned tilings of an operator. Here, we categorize operators for discussion. For element-wise functions (e.g. non-linear activation function), the only aligned computation method is to have the same tiling for all of the operator's inputs and outputs. Note that having all of an operator's inputs and outputs replicated is not allowed due to redundant computation. For convolution, the activation and parameter tensors have four dimensions. Tiling on batch dimension leads to data parallelism while tiling on channel dimensions leads to model parallelism. Tilings on image and kernel dimensions are strictly worse than data parallelism so is ignored in our implementation. Note that the image and kernel sizes are in fact multipliers on the batch size and weight size, respectively. The larger the image size, the larger the activation tensor and thus the better data parallelism is. Finally, for all other operators, we only allow partitioning on the batch dimension, resulting in data parallelism. These changes should be easy since they only focus on the operator semantics while the complicated communication patterns will be automatically deduced by SOYBEAN.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Constructing the Execution Dataflow Graph</head><p>This section covers how SOYBEAN dispatches operators to different devices and how the semantic dataflow graph is converted to the execution graph given the k-cuts tiling schemes computed by our algorithm.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Tile Placement</head><p>The first consideration is load balancing. Fortunately, SOY-BEAN's tiling algorithm ensures that all tensors and operators in the dataflow graph are evenly partitioned, which means the workload is perfectly balanced. Another consideration is the interconnects between devices. For example, GPUs within a single machine can be connected to different CPUs by PCI-e. Given the fixed total amount of communications, we want the majority of data transmission to be between GPUs attached to the same CPU to avoid the high latency of QPI connections. When scaling beyond one machine, this becomes more critical since network transmission is even slower. At a high level, the interconnection hierarchy divides devices into groups and encourages communications within each group. The k-cuts tiling algorithm naturally fits this scenario because each cut partitions the workload into two groups of devices; each group is then recursively partitioned. Theorem 3 indicates that SOY-BEAN tends to partition groups such that the majority of communication happens within groups. Therefore, our placement strategy follows the algorithm structure. We map the workloads partitioned by the first cut to the groups connected by the slowest interconnects (e.g. Ethernet or QPI). We then continue mapping workloads within each group to the second slowest interconnects, and so on.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Connecting Partitioned Operators</head><p>The k-cuts tiling algorithm partitions each operator in the semantic graph into 2 k sub-operators. The inputs and outputs of these sub-operators are tiles (sub-tensors) of their original inputs and outputs. Therefore, to construct the execution graph is to connect the sub-operators for every connected operators in the semantic graph. Similar to the aligned matrix multiplication, this includes three phases:</p><p>1. We need to first convert the input tiling to the aligned tiling for the downstream operator. The tiling conversion dispatches each tile to the location specified by the placement. A simple solution is letting the receiver devices pull from the device that contains the area they need. The situation becomes complicated when the receiver only needs one slice of the sender's data and needs to concatenate slices from multiple senders. In this case, we transfer the data in three steps. First, the flattening theorem (Theorem 2) allows us to represent each original tensor as a grid of tiles. Therefore, the sender can slice its own tile into shards such that each shard is dispatched to different receiver. Second, the receivers will fetch the shards they need from senders. Finally, the flattening theorem again allows the receiver to directly concatenate the received shards back to tiles.</p><p>2. Once the tiling conversions of inputs are done, all suboperators can be executed locally by the definition of aligned tiling. Moreover, since all sub-operators are identical, we can just connect the input tiles to the suboperators one by one.</p><p>3. The temporary outputs of the sub-operators again should be converted to the output tilings for later computation. This is the same process as the input tiling conversion.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Evaluation</head><p>In this section, we examine SOYBEAN's performance. Specifically, we want to answer following questions:</p><p>1. Is communication really a bottleneck when using data parallelism with small batch sizes?</p><p>2. Can SOYBEAN reduce overall runtime?</p><p>3. How well does SOYBEAN accelerate modern DNNs?</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Experimental Setup</head><p>We evaluated SOYBEAN on Amazon's EC2 cluster. We used a p2.8xlarge instance, with 480GB of memory and 32 virtual CPUs as well as 8 NVIDIA GK210 GPUs on the instance. Each of the GPUs has 12GB of memory; they are connected by PCI-e, with a maximum peer-to-peer bi-directional bandwidth of 20GB/s.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Communication Overhead Evaluation</head><p>In this evaluation, we want to know if communication overhead accounts for a large percentage of the overall runtime when the batch size is relatively small or when the weight size is large. We first tested the runtime for data parallelism (DP), model parallelism (MP), and SOYBEAN with different parameters, i.e., batch size and weight size. To see the ratio of the communication overhead to runtime, we also modified MXNET's backend to skip any communication, and re-ran our experiments. Thus, the runtime measured by the modified backend is solely due to computation. We can then determine the communication overhead by subtracting the computation time from the original runtime. Note that we report communication overhead instead of communication time because communication can be overlapped with computation. As a result, the communication overhead is strictly smaller than the communication time. Figure <ref type="figure">8</ref>(a) and Figure <ref type="figure">8</ref>(b) show the runtime and communication overhead of a 4-layer MLP for different tilings on different numbers of GPUs. Both tests have the same weight size, 8192×8192, but different batch sizes, 512 and 2048, respectively. In Figure <ref type="figure">8(a)</ref>, the communication overhead for data parallelism increases as the number of GPUs increases. This is because a GPU needs to send its data to more GPUs when the total number of GPUs increases. However, the aggregate communication throughput is limited by contention on shared PCI-e resources, so it cannot increase linearly with several simultaneous peer-to-peer connections. As a result, increased GPU-to-GPU communication is slower, even below the PCI-e bandwidth limit.</p><p>In these two figures, data parallelism performs sq worse than MP and SOYBEAN. That's because both communication overhead and computation time in data parallelism are larger than MP and SOYBEAN. We will show why different tilings may result in different computation time in Section 6.3. However, even if the computation time is the same as with MP and/or SOYBEAN, data parallelism is still slower. The key reason is the communication overhead is huge, ∼5× longer than the computation time on 8 GPUs with batch size 512, and ∼2.5× longer on 8 GPUs with batch size 2048.</p><p>Figure <ref type="figure">8</ref>(c) uses the same batch size as Figure <ref type="figure">8</ref>(b) but with larger weight size, 12288 (12K). Unlike changing the batch size, which significantly affects the ratio of communication overhead to total runtime, changing the weight size from 8K to 12K has little effect on the ratio. This is because when changing the weight size, both communication and computation increase for all parallelism schemes.</p><p>The results show that to achieve good performance, one should not use data parallelism when the batch size is small, due to the communication overhead. As the batch size increases, the percentage of the runtime consumed by communication overhead becomes smaller for data parallelism, and a crossover point will be reached when its runtime is lower than model parallelism on the same model and batch size. Because SOYBEAN can use hybrid tilings, it always achieves optimally low communication overhead.</p><p>We also performed the same evaluation for convolution neural networks. Figure <ref type="figure">9</ref>(a) shows results from training a CNN with small (6px×6px) images with a large filter size (2K), while Figure <ref type="figure">9</ref>(b) shows results from training with larger (24px×24px) images with a small filter size (512). We fixed the batch size to 256 for both experiments. The results show that with the larger image size, data parallelism has better performance than model parallelism. SOYBEAN still outperforms both partitioning schemes due to its ability to cut in different dimensions. Figure <ref type="figure">8</ref> shows that the computation time varies with the tiling approach chosen. Regardless of the tiling, however, the total amount of computed data is the same. Therefore, we suspected that the shapes of matrices might affect the computation performance. To validate this assumption, we partitioned the input matrices into several sub-matrices by using SOYBEAN, but put all of them on single GPU. We achieved better performance with this approach than with using the un-cut matrices to do the same computation on a single GPU, as shown in table 1. We believe the difference is related to how CUDA <ref type="bibr" target="#b50">[52]</ref> chooses different algorithms according to the matrix shapes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Can Shape Affect Computation Performance?</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4">Scalability</head><p>Our goal is to achieve good performance regardless of the model and batch sizes; particularly difficult is good scalability with smaller batch sizes, which data parallelism does not achieve. In this section, we evaluate SOYBEAN's scalability with two popular image recognition neural networks, AlexNet and VGG on 8 GPUs. We first trained each network on a single GPU to determine the maximum throughput (images/second). Using this throughput as baseline, we then calculated the speedup for different batch sizes.</p><p>Figure <ref type="figure" target="#fig_12">10</ref>(a) shows the results with AlexNet. SOYBEAN achieves a greater than 7× speedup with a batch size of 256, while data parallelism requires increasing the batch size to more than 1K to achieve the same speedup. AlexNet consists of many convolution layers followed by fully connected layers. As discussed in Section 6.2, data parallelism needs a large batch size to achieve good scalability for fully con-nected layers. Moreover, Section 6.2 also shows that SOY-BEAN can always achieve similar or better performance for convolution layers than data parallelism. As a result, SOY-BEAN performs much better than data parallelism. VGG has similar structure to AlexNet but with more layers. Therefore, SOYBEAN can still achieve better scalability than data parallelism as shown in Figure <ref type="figure" target="#fig_12">10(b)</ref>. One may notice that in Figure <ref type="figure" target="#fig_12">10</ref>(a), SOYBEAN can achieve superlinear speedup. This is because some matrix shapes fall into categories that have better computation performance after partitioning, as discussed in Section 6.3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Related Work</head><p>How to distribute arbitrary data easily for users while achieving high-performance computation at the same time has been a popular research topic. However, it is difficult to design systems that automatically optimizes locality without knowledge of the underlying data and processing. Relatedly, distributed array programs are increasingly important due to the emergence of machine learning and deep learning. As a result,  significant effort has been expended in optimizing distributed array frameworks. Deep learning systems. Many frameworks, such as Tensorflow <ref type="bibr" target="#b2">[4]</ref>, MXNet <ref type="bibr" target="#b11">[13]</ref>, PyTorch <ref type="bibr" target="#b0">[2]</ref>, Theano <ref type="bibr" target="#b8">[10]</ref> and Caffe2 <ref type="bibr" target="#b20">[22]</ref> have been proposed to facilitate developing new neural network models. These distributed array frameworks emphasize deep learning and machine learning applications.</p><p>Besides the common array operations, they also provide many functionalities for neural networks such as automatic differentiation (backpropagation). Though these frameworks allow users to develop models with both data parallelism and model parallelism, their interfaces are not friendly for utilizing model parallelism. SOY-BEAN not only simplifies exploit model parallelism, but can automatically choose correct combinations of various parallelisms to reduce communication. Moreover, because of the similar design approach, performing optimizations over dataflow graphs, SOYBEAN can be implemented in these frameworks as long as they allow customized optimizations. General distributed programming frameworks. Most distributed frameworks target primitives for key-value collections (e.g. MapReduce <ref type="bibr" target="#b17">[19]</ref>, Dryad <ref type="bibr" target="#b29">[31]</ref>, Piccolo <ref type="bibr" target="#b55">[57]</ref>, Spark <ref type="bibr" target="#b64">[66]</ref>, Ciel <ref type="bibr" target="#b48">[50]</ref>, Dandelion <ref type="bibr" target="#b59">[61]</ref> and Naiad <ref type="bibr" target="#b49">[51]</ref>). Some provide graph-centric primitives (e.g. GraphLab <ref type="bibr" target="#b42">[44]</ref> and Pregel <ref type="bibr" target="#b45">[47]</ref>). It is possible to implement a deep learning framework backend by augmenting an in-memory framework, such as Spark or Piccolo. When doing so, SOYBEAN can be applied to optimize the high-level data-flow graph before lowering the graph to the underlying framework. Distributed array frameworks. Relational queries are a natural layer on top of key-value centric distributed execution frameworks, as seen in systems like DryadLINQ <ref type="bibr" target="#b63">[65]</ref>, Shark <ref type="bibr" target="#b62">[64]</ref>, Dandelion <ref type="bibr" target="#b59">[61]</ref> and Dremel <ref type="bibr" target="#b46">[48]</ref>. Several attempts have been made to build array interfaces on these. MadLINQ <ref type="bibr" target="#b56">[58]</ref> adds support for distributed arrays and arraystyle computation to the dataflow model of DryadLINQ <ref type="bibr" target="#b63">[65]</ref>.</p><p>SciHadoop <ref type="bibr" target="#b10">[12]</ref> is a plug-in for Hadoop to process arrayformatted data. Google's R extensions <ref type="bibr" target="#b60">[62]</ref>, Presto <ref type="bibr" target="#b61">[63]</ref> and SparkR <ref type="bibr" target="#b1">[3]</ref> extend the R language to support distributed arrays. Julia [1] is a newly developed dynamic language designed for high performance and scientific computing. Julia provides primitives for users to parallel loops and distribute arrays. Theoretically, one can use these extensions and languages to implement any neural network models. However, users have to manually deal with all optimizations provided by deep learning frameworks, like backpropagation (and with SOYBEAN, tiling).</p><p>Spartan <ref type="bibr" target="#b25">[27]</ref> and Kasen <ref type="bibr" target="#b65">[67]</ref> are two distributed array frameworks that perform automatic tiling on general array programs. Both systems provide primitives operating directly on arrays and thus expose the data access pattern of array operations that can be used for tiling optimization. Spartan proves that under such setting, automatic tiling is an NP-hard problem and provides only heuristic algorithms to find the best tiling. By contrast, SOYBEAN specifically targets deep learning systems and observes many fixed graph structures in neural network models. These fixed graph structures allow SOYBEAN to be able to find the optimal solutions in most cases. Moreover, SOYBEAN doesn't rely on specific primitives, but directly optimizes array operations. Distributed array libraries. Optimized, distributed linear algebra libraries, like LAPACK <ref type="bibr" target="#b3">[5]</ref>, ScaLAPACK <ref type="bibr" target="#b14">[16]</ref>, Elemental <ref type="bibr" target="#b54">[56]</ref> Global Arrays Toolkit <ref type="bibr" target="#b51">[53]</ref> and Petsc <ref type="bibr" target="#b5">[7,</ref><ref type="bibr" target="#b6">8]</ref> expose APIs specifically designed for large matrix operations. They focus on providing highly optimized implementations of specific operations. However, their speed depends on correct partitioning of arrays and their programming models are difficult for use in deep learning. Compiler-assisted data distribution. Prior work in this space proposes static, compile-time techniques for analysis. The first set of techniques focuses on partitioning <ref type="bibr" target="#b27">[29]</ref>; the second on data co-location <ref type="bibr" target="#b35">[37,</ref><ref type="bibr" target="#b47">49,</ref><ref type="bibr" target="#b53">55]</ref>. Prior work also has examined nested loops with affine array subscript patterns, using different structures (vector <ref type="bibr" target="#b27">[29]</ref>, matrix <ref type="bibr" target="#b58">[60]</ref> or reference <ref type="bibr" target="#b30">[32]</ref>) to model memory access patterns or polyhedral model <ref type="bibr" target="#b43">[45]</ref> to perform localization analysis. Since static analysis deals poorly with ambiguities in source code <ref type="bibr" target="#b4">[6]</ref>, recent work proposes profile-guided methods <ref type="bibr" target="#b15">[17]</ref> and memorytracing <ref type="bibr" target="#b52">[54]</ref> to capture memory access patterns. Simpler approaches focus on examining stencil code <ref type="bibr">[23-25, 36, 54]</ref>.</p><p>Access patterns can be used to find a distribution of data that minimizes communication cost <ref type="bibr" target="#b7">[9,</ref><ref type="bibr" target="#b19">21,</ref><ref type="bibr" target="#b26">28,</ref><ref type="bibr" target="#b27">29,</ref><ref type="bibr" target="#b57">59]</ref>. All approaches construct a weighted graph that captures possible layouts. Although searching the optimal solution is NP-Complete <ref type="bibr" target="#b32">[34,</ref><ref type="bibr" target="#b36">38,</ref><ref type="bibr" target="#b39">41,</ref><ref type="bibr" target="#b40">42]</ref>, heuristics perform well in practice <ref type="bibr" target="#b40">[42,</ref><ref type="bibr" target="#b53">55]</ref>. DMLL <ref type="bibr" target="#b9">[11]</ref> aims to extend a data-parallel programming mode to heterogeneous hardware. To achieve the goal, DMLL propose a new intermedia language based on common parallel patterns to partition data and distributed across the underlying heterogeneous distributed hardware.</p><p>SOYBEAN borrows many ideas from these works, such as constructing a weighted graph. However, unlike prior work that requires language-specific extensions and/or modification to capture parallel access patterns, SOYBEAN is designed to utilize the parallelism exposed by the underlying data-flow graphs, and can be quickly integrated with modern deep learning frameworks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.">Conclusion</head><p>Deep learning systems have become indispensible in many fields, but as their complexities grow, DNN training time is becoming increasingly intractable. We demonstrate effective tiling in SOYBEAN that can achieve performance as good as or better than the best of data parallelism and model parallelism for many types of DNNs on multiple GPUs. With the speed and simplicity provided by SOYBEAN's backend, users can train networks using frontends like TENSORFLOW and MXNET quickly and easily, making DNNs useful for a larger audience.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: (a) A Multi-Layer Perceptron (MLP) model; (b) The dataflow graph of its forward and backward propagations.just calculated. This training method is called Stochastic Gradient Descent (SGD). In practice, training is performed by iterating over the training data many times (i.e. "epoches") doing SGD in mini-batches, as illustrated in the following pseudocode.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head></head><label></label><figDesc>update model parameters Here, the training dataset D is partitioned into batches {D 1 , D 2 , . . .} and SGD is performed iteratively, updating model parameters (θ) after each batch. DNN models have a common graphical representation, in which layers of neurons are connected by weighted edges across layers. The weights are the model parameters to be learned. DNN training involves a series of tensor computations along the graph structure. Figure 8(a) shows a Multi-Layer Perception (MLP) model with 3 fully connected layers.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Data parallelism and model parallelism</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>2 . 4 4</head><label>24</label><figDesc>MB × 4 × 2 = 4.8MB. Note that the activation size is reduced to2.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>4</head><label>4</label><figDesc></figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Overview of SOYBEAN's design.</figDesc><graphic url="image-26.png" coords="4,143.59,86.64,63.84,59.52" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: (a) Three basic tilings: row tiling, column tiling and replication; (b) Left: compose two basic row tilings into a four-way row tiling; right: compose row tiling and column tiling to partition matrix into four blocks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Top: forward propagation of one layer in a MLP model. Bottom: how matrices are tiled in the forward propagation for different parallelisms.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure. 4</head><label>4</label><figDesc>Figure.4(b)  shows how 2-cut tilings RR and RC partition the matrix into four pieces. Note that a k-cut tiling partitions a matrix into 2 k pieces. To simplify the discussion, we assume the number of workers is n = 2 k .We then formally define the tiling of a dataflow graph:</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 6 :Figure 7 :</head><label>67</label><figDesc>Figure 6: Three forms of aligned tilings for matrix multiplication. The resulting partition of the third form is an intermediate one red, and requires an extra reduction.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 8 :Figure 9 :</head><label>89</label><figDesc>Figure 8: Runtime comparison of a 4-layer MLP for DP, MP, and SOYBEAN with different batch sizes and hidden sizes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Throughtput comparison of SOYBEAN and data parallelism on 8 GPUs.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 :</head><label>1</label><figDesc>Runtime per batch comparison for a 4-layers MLP network between single GPU and single GPU with SOYBEAN partitions. The weight size is fixed to 8K×8K.</figDesc><table><row><cell cols="2">Batch Size Single GPU</cell><cell>Single GPU w/ SOYBEAN tilings</cell></row><row><cell>512</cell><cell>0.31s</cell><cell>0.19s</cell></row><row><cell>1024</cell><cell>0.56s</cell><cell>0.39s</cell></row><row><cell>2048</cell><cell>1.13s</cell><cell>0.73s</cell></row></table></figure>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<ptr target="http://pytorch.org" />
+		<title level="m">PyTorch</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<ptr target="http://amplab-extras.github.io/SparkR-pkg" />
+		<title level="m">Sparkr: R frontend for spark</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Tensorflow: A system for large-scale machine learning</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kudlur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Levenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Monga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">G</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Warden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wicke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">12th USENIX Symposium on Operating Systems Design and Implementation</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">LAPACK: A portable linear algebra library for high-performance computers</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Anderson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Bai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dongarra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Greenbaum</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mckenney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Du Croz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Hammerling</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Demmel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Bischof</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sorensen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1990 ACM/IEEE conference on Supercomputing</title>
+				<meeting>the 1990 ACM/IEEE conference on Supercomputing</meeting>
+		<imprint>
+			<publisher>IEEE Computer Society Press</publisher>
+			<date type="published" when="1990">1990</date>
+			<biblScope unit="page" from="2" to="11" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">The use and limitations of static-analysis tools to improve software quality</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Anderson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">CrossTalk: The Journal of Defense Software Engineering</title>
+		<imprint>
+			<biblScope unit="volume">21</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="18" to="21" />
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Efficient management of parallelism in object oriented numerical software libraries</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Balay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">D</forename><surname>Gropp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">C</forename><surname>Mcinnes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">F</forename><surname>Smith</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Modern Software Tools in Scientific Computing</title>
+				<editor>
+			<persName><forename type="first">E</forename><surname>Arge</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">A</forename><forename type="middle">M</forename><surname>Bruaset</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">H</forename><forename type="middle">P</forename><surname>Langtangen</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Birkhäuser Press</publisher>
+			<date type="published" when="1997">1997</date>
+			<biblScope unit="page" from="163" to="202" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<title level="m" type="main">PETSc users manual</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Balay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Abhyankar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">F</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Brune</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Buschelman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Eijkhout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">D</forename><surname>Gropp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Kaushik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">G</forename><surname>Knepley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">C</forename><surname>Mcinnes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Rupp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">F</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhang</surname></persName>
+		</author>
+		<idno>ANL-95/11 -Revision 3.5</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+		<respStmt>
+			<orgName>Argonne National Laboratory</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical Report</note>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Solving alignment using elementary linear algebra</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Kodukula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Kotlyar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Pingali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Stodghill</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Languages and Compilers for Parallel Computing</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="page" from="46" to="60" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Theano: a CPU and GPU math expression compiler</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bergstra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Breuleux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Bastien</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Lamblin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pascanu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Desjardins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Turian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Warde-Farley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Python for Scientific Computing Conference (SciPy)</title>
+				<meeting>the Python for Scientific Computing Conference (SciPy)</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Have abstraction and eat performance, too: Optimized heterogeneous computing with parallel patterns</title>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">J</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Rompf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">K</forename><surname>Sujeeth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">De</forename><surname>Sa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Aberger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Olukotun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2016 International Symposium on Code Generation and Optimization, CGO &apos;16</title>
+				<meeting>the 2016 International Symposium on Code Generation and Optimization, CGO &apos;16</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Scihadoop: array-based query processing in hadoop</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">B</forename><surname>Buck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Watkins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Lefevre</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ioannidou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Maltzahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Polyzotis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Brandt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of 2011 International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+				<meeting>2011 International Conference for High Performance Computing, Networking, Storage and Analysis</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">MXNet: A Flexible and Efficient Machine Learning Library for Heterogeneous Distributed Systems</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2015-12">Dec. 2015</date>
+		</imprint>
+	</monogr>
+	<note>ArXiv e-prints</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Project adam: Building an efficient and scalable deep learning training system</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chilimbi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Suzue</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Apacible</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kalyanaraman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 11th USENIX Conference on Operating Systems Design and Implementation, OSDI&apos;14</title>
+				<meeting>the 11th USENIX Conference on Operating Systems Design and Implementation, OSDI&apos;14</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Learning phrase representations using RNN encoder-decoder for statistical machine translation</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Van Merrienboer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Gulcehre</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Bougares</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Schwenk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Scalapack: A scalable linear algebra library for distributed memory concurrent computers</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">J</forename><surname>Dongarra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pozo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">W</forename><surname>Walker</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Frontiers of Massively Parallel Computation, 1992., Fourth Symposium on the</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="page" from="120" to="127" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Data access partitioning for fine-grain parallelism on multicore architectures</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ravindran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mahlke</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">MICRO 2007. 40th Annual IEEE/ACM International Symposium on</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2007">2007. 2007</date>
+			<biblScope unit="page" from="369" to="380" />
+		</imprint>
+	</monogr>
+	<note>Microarchitecture</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Context-dependent pre-trained deep neural networks for large vocabulary speech recognition</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dahl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Acero</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Transactions on Audio, Speech, and Language Processing</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Mapreduce: Simplified data processing on large clusters</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ghemawat</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Operating System Design and Implementation (OSDI)</title>
+				<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Large scale distributed deep networks</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Corrado</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Monga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">Z</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ranzato</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Senior</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">Y</forename><surname>Ng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Neural Information Processing Systems (NIPS)</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Partitioning and labeling of index sets in do loops with constant dependence vectors</title>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">D</forename><surname>Hollander</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">1989 International Conference on Parallel Processing</title>
+				<meeting><address><addrLine>University Park, PA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1989">1989</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Caffe2: a lightweight, modular, and scalable deep learning framework</title>
+		<author>
+			<persName><surname>Facebook</surname></persName>
+		</author>
+		<ptr target="https://github.com/caffe2/caffe2" />
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Automatic recognition of performance idioms in scientific applications</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">E</forename><surname>Snavely</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">F</forename><surname>Van Der Wijngaart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Frumkin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Parallel &amp; Distributed Processing Symposium (IPDPS), 2011 IEEE International</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="118" to="127" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Data layout transformation for stencil computations on short-vector simd architectures</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Henretty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Stock</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L.-N</forename><surname>Pouchet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Franchetti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ramanujam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sadayappan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Compiler Construction</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="225" to="245" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">Open64-based regular stencil shape recognition in hercules</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">K O</forename><surname>Hernandez</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Deep neural networks for acoustic modeling in speech recognition</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hinton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dahl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Rahman Mohamed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Jaitly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Senior</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vanhoucke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sainath</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kingsbury</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Signal Processing Magazine</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Spartan: A distributed array framework with smart tiling</title>
+		<author>
+			<persName><forename type="first">C.-C</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Power</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ortiz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Xiao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Communication-free hyperplane partitioning of nested loops</title>
+		<author>
+			<persName><forename type="first">C.-H</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sadayappan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Parallel and Distributed Computing</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="90" to="102" />
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Compiler techniques for data partitioning of sequentially iterated parallel loops</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">E</forename><surname>Hudak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">G</forename><surname>Abraham</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">In ACM SIGARCH Computer Architecture News</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="page" from="187" to="200" />
+			<date type="published" when="1990">1990</date>
+			<publisher>ACM</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Sequence to sequence learning with neural network</title>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">L</forename><surname>Ilya Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Oriol</forename><surname>Vinyals</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems (NIPS)</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Dryad: Distributed data-parallel programs from sequential building blocks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Budiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Birrell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Fetterly</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Conference on Computer Systems</title>
+				<imprint>
+			<publisher>Eu-roSys</publisher>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Reduction of cache coherence overhead by compiler data layout and loop transformation</title>
+		<author>
+			<persName><forename type="first">Y.-J</forename><surname>Ju</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Dietz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Languages and Compilers for Parallel Computing</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="page" from="344" to="358" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Very deep convolutional networks for large-scale image recognition</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">Z K</forename><surname>Simonyan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Automatic data layout for distributed-memory machines</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kennedy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">U</forename><surname>Kremer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Programming Languages and Systems</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="869" to="916" />
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+	<note>TOPLAS)</note>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">On large-batch training for deep learning: Generalization gap and sharp minima</title>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">S</forename><surname>Keskar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Mudigere</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Nocedal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Smelyanskiy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">T P</forename><surname>Tang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1609.04836</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Pattern-driven automatic parallelization</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">W</forename><surname>Kessler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Scientific Programming</title>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="251" to="274" />
+			<date type="published" when="1996">1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Data optimization: Allocation of arrays to reduce communication on simd machines</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Knobe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">D</forename><surname>Lukas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">L</forename><surname>Steele</surname><genName>Jr</genName></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Parallel and Distributed Computing</title>
+		<imprint>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="102" to="118" />
+			<date type="published" when="1990">1990</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Np-completeness of dynamic remapping</title>
+		<author>
+			<persName><forename type="first">U</forename><surname>Kremer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fourth Workshop on Compilers for Parallel Computers</title>
+				<meeting>the Fourth Workshop on Compilers for Parallel Computers<address><addrLine>Delft, The Netherlands</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">One weird trick for parallelizing convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1404.5997</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Imagenet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="1106" to="1114" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Index domain alignment: Minimizing cost of cross-referencing between distributed arrays</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Frontiers of Massively Parallel Computation, 1990. Proceedings., 3rd Symposium on the</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1990">1990</date>
+			<biblScope unit="page" from="424" to="433" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">The data alignment phase in compiling programs for distributed-memory machines</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Journal of parallel and distributed computing</title>
+				<imprint>
+			<date type="published" when="1991">1991</date>
+			<biblScope unit="volume">13</biblScope>
+			<biblScope unit="page" from="213" to="221" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Scaling distributed machine learning with the parameter server</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">W</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">J</forename><surname>Smola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ahmed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Josifovski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Long</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">J</forename><surname>Shekita</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B.-Y</forename><surname>Su</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX OSDI</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Graphlab: A new parallel framework for machine learning</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Low</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gonzalez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kyrola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bickson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Guestrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hellerstein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Conference on Uncertainty in Artificial Intelligence (UAI)</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Data layout transformation for enhancing data locality on nuca chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Alias</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">U</forename><surname>Bondhugula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Henretty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Krishnamoorthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ramanujam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Rountev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sadayappan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Parallel Architectures and Compilation Techniques, 2009. PACT&apos;09. 18th International Conference on</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="page" from="348" to="357" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<title level="m" type="main">Increasing deep neural network acoustic model size for large vocabulary continuous speech recognition</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">L</forename><surname>Maas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">Y</forename><surname>Hannun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">T</forename><surname>Lengerich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Qi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Jurafsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">Y</forename><surname>Ng</surname></persName>
+		</author>
+		<idno>CoRR, abs/1406.7806</idno>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Pregel: a system for large-scale graph processing</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Malewicz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">H</forename><surname>Austern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">J</forename><surname>Bik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">C</forename><surname>Dehnert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Horn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Leiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Czajkowski</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD &apos;10: Proceedings of the 2010 international conference on Management of data</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Dremel: Interactive analysis of web-scale datasets</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Melnik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gubarev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">J</forename><surname>Long</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Romer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shivakumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tolton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Vassilakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">VLDB</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Automatic array alignment in parallel matlab scripts</title>
+		<author>
+			<persName><forename type="first">I</forename><forename type="middle">Z</forename><surname>Milosavljevic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Jabri</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">13th International and 10th Symposium on Parallel and Distributed Processing</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1999">1999. 1999. 1999. 1999</date>
+			<biblScope unit="page" from="285" to="289" />
+		</imprint>
+	</monogr>
+	<note>IPPS/SPDP. Proceedings</note>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<monogr>
+		<title level="m" type="main">Ciel: a universal execution engine for distributed data-flow computing</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">G</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Schwarzkopf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Smowton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Madhavapeddy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Hand</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<publisher>NSDI</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Naiad: a timely dataflow system</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">G</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Mcsherry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Isaacs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Abadi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fourth ACM Symposium on Operating Systems Principles</title>
+				<meeting>the Twenty-Fourth ACM Symposium on Operating Systems Principles</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="439" to="455" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Scalable parallel programming with cuda</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Nickolls</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Buck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Garland</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Skadron</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Queue</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="40" to="53" />
+			<date type="published" when="2008-03">Mar. 2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Global arrays: A nonuniform memory access programming model for highperformance computers</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Nieplocha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">J</forename><surname>Harrison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">J</forename><surname>Littlefield</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">The Journal of Supercomputing</title>
+		<imprint>
+			<biblScope unit="volume">10</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="169" to="189" />
+			<date type="published" when="1996">1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Trace-driven memory access pattern recognition in computational kernels</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kartsaklis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Janjusic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Cavazos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Second Workshop on Optimizing Stencil Computations</title>
+				<meeting>the Second Workshop on Optimizing Stencil Computations</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="25" to="32" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<title level="m" type="main">Automatic alignment of array data and processes to reduce communication time on DMPPs</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Philippsen</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+			<publisher>ACM</publisher>
+			<biblScope unit="volume">30</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Elemental: A new framework for distributed memory dense matrix computations</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Poulson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Marker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">A</forename><surname>Van De Geijn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">R</forename><surname>Hammond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">A</forename><surname>Romero</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Trans. Math. Softw</title>
+		<imprint>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page">24</biblScope>
+			<date type="published" when="2013-02">feb 2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">Piccolo: Building fast, distributed programs with partitioned tables</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Power</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Operating System Design and Implementation (OSDI)</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="293" to="306" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">MadLINQ: large-scale distributed matrix computation for the cloud</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Kang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moscibroda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 7th ACM european conference on Computer Systems, EuroSys &apos;12</title>
+				<meeting>the 7th ACM european conference on Computer Systems, EuroSys &apos;12</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">A methodology for parallelizing programs for multicomputers and complex memory multiprocessors</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ramanujam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sadayappan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1989 ACM/IEEE conference on Supercomputing</title>
+				<meeting>the 1989 ACM/IEEE conference on Supercomputing</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1989">1989</date>
+			<biblScope unit="page" from="637" to="646" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<analytic>
+		<title level="a" type="main">Compile-time techniques for data distribution in distributed memory machines. Parallel and Distributed Systems</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ramanujam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sadayappan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="472" to="482" />
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">Dandelion: a compiler and runtime for heterogeneous systems</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">J</forename><surname>Rossbach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Currey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-P</forename><surname>Martin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Fetterly</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fourth ACM Symposium on Operating Systems Principles</title>
+				<meeting>the Twenty-Fourth ACM Symposium on Operating Systems Principles</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="49" to="68" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Large-scale parallel statistical forecasting computations in r</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stokely</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Rohani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Tassone</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">JSM Proceedings, Section on Physical and Engineering Sciences</title>
+				<meeting><address><addrLine>Alexandria, VA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<analytic>
+		<title level="a" type="main">Presto: distributed machine learning and graph processing with sparse matrices</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Venkataraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Bodzsar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Roy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Auyoung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">S</forename><surname>Schreiber</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 8th ACM European Conference on Computer Systems (Eurosys)</title>
+				<meeting>the 8th ACM European Conference on Computer Systems (Eurosys)</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<analytic>
+		<title level="a" type="main">Shark: Sql and rich analytics at scale</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">S</forename><surname>Xin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Rosen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">J</forename><surname>Franklin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shenker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Stoica</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<analytic>
+		<title level="a" type="main">DryadLINQ: A system for generalpurpose distributed data-parallel computing using a high-level language</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Fetterly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Budiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">U</forename><surname>Erlingsson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">K</forename><surname>Gunda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Currey</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Operating System Design and Implementation (OSDI)</title>
+				<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<analytic>
+		<title level="a" type="main">Spark: cluster computing with working sets</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chowdhury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">J</forename><surname>Franklin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shenker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Stoica</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2nd USENIX conference on Hot topics in cloud computing</title>
+				<meeting>the 2nd USENIX conference on Hot topics in cloud computing</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="10" to="10" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">Measuring and optimizing distributed array programs</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Zheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2016-08">Aug. 2016</date>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="912" to="923" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

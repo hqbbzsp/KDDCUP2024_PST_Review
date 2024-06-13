@@ -1,0 +1,770 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Faster Neural Networks Straight from JPEG</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Lionel</forename><surname>Gueguen</surname></persName>
+							<email>lgueguen@uber.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Uber AI Labs</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Alex</forename><surname>Sergeev</surname></persName>
+							<email>asergeev@uber.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Uber AI Labs</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Ben</forename><surname>Kadlec</surname></persName>
+							<email>bkadlec@uber.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Uber AI Labs</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Rosanne</forename><surname>Liu</surname></persName>
+							<email>rosanne@uber.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Uber AI Labs</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jason</forename><surname>Yosinski</surname></persName>
+							<email>yosinski@uber.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Uber AI Labs</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><surname>Uber</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Uber AI Labs</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Faster Neural Networks Straight from JPEG</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="MD5">27FA97832E455C20CAB550EAF404FB44</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.3" ident="GROBID" when="2023-07-27T05:03+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>The simple, elegant approach of training convolutional neural networks (CNNs) directly from RGB pixels has enjoyed overwhelming empirical success. But could more performance be squeezed out of networks by using different input representations? In this paper we propose and explore a simple idea: train CNNs directly on the blockwise discrete cosine transform (DCT) coefficients computed and available in the middle of the JPEG codec. Intuitively, when processing JPEG images using CNNs, it seems unnecessary to decompress a blockwise frequency representation to an expanded pixel representation, shuffle it from CPU to GPU, and then process it with a CNN that will learn something similar to a transform back to frequency representation in its first layers. Why not skip both steps and feed the frequency domain into the network directly? In this paper, we modify libjpeg to produce DCT coefficients directly, modify a ResNet-50 network to accommodate the differently sized and strided input, and evaluate performance on ImageNet. We find networks that are both faster and more accurate, as well as networks with about the same accuracy but 1.77x faster than ResNet-50.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>The amazing progress toward training neural networks, particularly convolutional neural networks <ref type="bibr" target="#b13">[14]</ref>, to attain good performance on a variety of tasks <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b9">10]</ref> has led to the widespread adoption of such models in both academia and industry. When CNNs are trained using image data as input, data is most often provided as an array of red-green-blue (RGB) pixels. Convolutional layers proceed to compute features starting from pixels, with early layers often learning Gabor filters and later layers learning higher level, more abstract features <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b26">27]</ref>.</p><p>In this paper, we propose and explore a simple idea for accelerating neural network training and inference in the common scenario where networks are applied to images encoded in the JPEG format. In such scenarios, images would typically be decoded from a compressed format to an array of RGB pixels and then fed into a neural network. Here we propose and explore a more direct approach. First, we modify the libjpeg library to decode JPEG images only partially, resulting in an image representation consisting of a triple of tensors containing discrete cosine transform (DCT) coefficients in the YCbCr color space. Due to how the JPEG codec works, these tensors are at different spatial resolutions. We then design and train a network to operate directly from this representation; as one might suspect, this turns out to work reasonably well.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Related Work</head><p>When training and/or inference speed is critical, much work has focused on accelerating network computation by reducing the number of parameters or by using operations more computationally efficient on a graphics processing unit (GPU) <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b8">9]</ref>. Several works have employed spatial frequency decomposition and other compressed representations for image processing without using deep learning <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b4">5,</ref><ref type="bibr" target="#b6">7]</ref>. Other works have combined deep learning with compressed representations other than JPEG to promising effect <ref type="bibr" target="#b23">[24,</ref><ref type="bibr" target="#b0">1]</ref>. The most similar works to ours come from <ref type="bibr" target="#b5">[6]</ref> and <ref type="bibr" target="#b24">[25]</ref>. <ref type="bibr" target="#b5">[6]</ref> train on DCT coefficients compressed not via the JPEG encoder but by a Figure <ref type="figure">1</ref>: (a) The three steps to encode JPEG images: first, the RGB image is converted to the YCbCr color space and the chroma channels are downsampled, then the channels are projected through the DCT and quantized, and finally the quantized coefficients are losslessly compressed. See Sec. 2 for full details. (b) JPEG decoding follows the inverse process. In this paper, we run only the first step of decoding and then feed the DCT coefficients directly into a neural network. This saves time in three ways: the last steps of normal JPEG decoding are skipped, the data transferred from CPU to GPU is smaller by a factor of two, and the image is already in the frequency domain. To the extent early layers in neural networks already learn a transform to the frequency domain, this allows the use of neural networks with fewer layers. simpler truncation approach. <ref type="bibr" target="#b24">[25]</ref> train on a similar input representation but do not employ the full early JPEG stack, in particular not including the Cb/Cr downsampling step. Thus our work stands on the shoulders of many previous studies, extending them to the full early JPEG stack, to much deeper networks, and to training on a much larger dataset and more difficult task. We carefully time the relevant operations and perform ablation studies necessary to understand from where performance improvements arise.</p><p>The rest of the paper makes the following contributions. We review the JPEG codec in more detail, giving intuition for steps in the process that have features appropriate for neural network training (Sec. 2). Because the Y and Cb/Cr DCT blocks have different resolution, we consider different architectures inspired by ResNet-50 <ref type="bibr" target="#b9">[10]</ref> by which the information from these different channels may be combined, each with different speed and performance considerations (Sec. 3 and Sec. 5). It turns out that some combinations produce much faster networks at the same performance as baseline RGB models or better performance at a more modest speed gain (Fig. <ref type="figure" target="#fig_5">5</ref>). Having found faster and more accurate networks in DCT space, we ask whether one could simply find a nearby ResNet architecture that operates in RGB space that exhibits the same boosts to performance or speed. We find that simple mutations to ResNet-50 do not produce competitive networks (Sec. 4). Finally, given the superior performance of the DCT representation, we do an ablation study to examine whether this is due to the different color space or specific first layer filters. We find that the exact DCT transform works curiously well, even better than trying to learn a transform of the same dimension (Sec. 4.3, Sec. 5.3)! So others may reproduce experiments and benefit from speed increases found in this paper, we release our code at https://github.com/uber-research/jpeg2dct.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">JPEG Compression</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">The JPEG Encoder</head><p>The JPEG standard (ISO/IEC 10918) was created in 1992 as the result of an effort started as early as 1986 <ref type="bibr" target="#b10">[11]</ref>. Despite it being over 30 years old, the JPEG standard, which supports both 8-bit grayscale images and 24-bit color images, remains the dominant image representation in consumer electronics and on the internet. In this paper, we consider only the 24-bit color version, which begins with RGB pixels encoded with 8 bits per color channel.</p><p>As illustrated in Fig. <ref type="figure">1a</ref>, JPEG encoding consists of the following three steps. The color space of an image is converted from RGB to YCbCr, consisting of one luma component (Y), representing the brightness, and two chroma components, Cb and Cr, representing the color. The spatial resolution of the chroma channels is reduced, usually by a factor of 2 or 3, while the resolution of Y is kept the same. This basic compression takes advantage of the fact that the eye is less sensitive to fine color details than to fine brightness details. In this paper, we assume a reduction by a factor of 2. Each of the three Y, Cb, and Cr channels in the image is split into blocks of 8×8 pixels, and each block undergoes a DCT, which is similar to a Fourier transform in that it produces a spatial frequency spectrum. The amplitudes of the frequency components are then quantized. Since human vision is much more sensitive to small variations in color or brightness over large areas than to the strength of high-frequency brightness variations, the magnitudes of the high-frequency components are stored with a lower accuracy than the low-frequency components. The quality setting of the encoder (for example 50 or 95 on a scale of 0-100 in the Independent JPE Group's library) affects the extent to which the resolution of each frequency component is reduced. If a very low-quality setting is used, many high-frequency components may be discarded as they end up quantized to zero. The size of the resulting data for all 8×8 blocks is further reduced using a lossless compression algorithm, a variant of Huffman encoding. Decoding or decompression from JPEG entails the corresponding inverse transforms in reverse order of the above steps; inverse transforms are lossless except for the inverse of the quantization step. Due to the loss of precision during the quantization of the DCT coefficients, the original image is recovered up to some distortions.</p><p>A standard implementation of the codec is libjpeg <ref type="bibr" target="#b14">[15]</ref> released for the first time on 7-Oct-1991. The current version is the release 9b of 17-Jan-2016, and it provides a stable and solid foundation of the JPEG support for many applications. An accelerated branch, libjpeg-turbo <ref type="bibr" target="#b15">[16]</ref>, has been developed for exploiting Single Instruction Multiple Data (SIMD) parallelism. Other even faster versions have been developed that leverage the high parallelism of GPUs <ref type="bibr" target="#b22">[23]</ref>, where the Huffman codec is run on the CPU, and the pixel transformations, such as the color space transform and DCT, are executed on the GPU. Fig. <ref type="figure">1</ref> shows the JPEG encoding process and a schematic view of the partial decoding process we employ in this paper. We decode a compressed image up to its DCT coefficients, which are then directly inputted to a CNN. Because CNNs often compute Gabor filters on the first layer <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b28">29,</ref><ref type="bibr" target="#b27">28]</ref>, and Gabor filters are similar to the conversion to frequency space realized by the DCT, it may be possible to prune the CNN of its first few layers without detriment; we experimentally verify this hunch in later sections. When using DCT coefficients, one has the option to either cast quantized values from int directly to float or to put them through the approximate inverse quantization process employed by the JPEG decoder. We chose to approximately invert quantization as it results in a network less sensitive to the quantization tables, which depend on the compression quality.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Details of the DCT Transform</head><p>Before delving into network details, it is worth considering a few aspects of the DCT in more detail. In JPEG compression, the DCT transform <ref type="bibr" target="#b16">[17]</ref> is applied to non-overlapping blocks of size 8×8. Each block is projected onto a basis of 64 patterns representing various horizontal, vertical, and composite frequencies. The basis is orthogonal, so any block can be fully recovered from the knowledge of its coefficients. The DCT can be thought of as convolution with a specific filter size of 8×8, stride of 8×8, one input channel, 64 output channels, and specific, non-learned orthonormal filters. The 64 filters are illustrated in Fig. <ref type="figure" target="#fig_0">2a</ref>. Let us consider a few details. Because the DCT processes each of the three input channels (one for luminance and two for chroma) separately, in terms of convolution it should be thought of as a three separate applications of convolution to three single-channel input images (equivalently: depthwise convolution), because information from separate input channels stays separate. Because the filter size and stride are both 8, spatial information does not cross to adjacent blocks. Finally, note that while the standard convolutional layer may learn an orthonormal basis, in general it will not. Instead, learned bases may be undercomplete, complete but not orthogonal, or overcomplete, depending on the number of filters and spatial size.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Designing CNN models for DCT input</head><p>In this section, we describe transforms that facilitate the adoption of DCT coefficients by a conventional CNN architecture such as ResNet-50 <ref type="bibr" target="#b9">[10]</ref>. Some careful design is required, as DCT coefficients from the Y channel, D Y , generally have a larger size than those from the chroma channels, D Cb and D Cr , as shown in Fig. <ref type="figure">1a</ref>, where the actual shapes are calculated based on an image input size of 224 × 224. It is necessary, then, to have special transforms that take care of the spatial dimension matching, before the resulting activations can be concatenated and fed into a conventional CNN. We consider two abstract transforms (T 1 , T 2 ) that separately operate on different coefficient channel, with the objective of resulting in matching spatial sizes among three activations a Y , a Cb and a Cr , where</p><formula xml:id="formula_0">a Y = T 1 (D Y ), a Cb = T 2 (D Cb )</formula><p>, and a Cr = T 2 (D Cr ). Fig. <ref type="figure" target="#fig_1">3</ref> illustrates this process.</p><p>In addition to ensuring that convolutional feature map sizes align, it is important to consider the resulting receptive field size and stride (hereafter denoted with R and S) for each unit at the end of transforms and throughout the network. Whereas for typical networks taking RGB input, the receptive field and stride of each unit will be the same in terms of each input channel (red, green, blue), here the receptive fields considered in the original pixel space may be different for information flowing through the Y channel vs the Cb and Cr channels, which is probably not desired. We examine the representation size resulting from the DCT operation, and when compared with the same set of parameters of a ResNet-50 at various blocks (bottom table), we find that the spatial dimensions of D Y matches the activation dimensions of Block 3, while the spatial dimensions of D Cr and D Cb matches those from Block 4. This inspired us to skip some of the ResNet blocks in the design of network architecture, but skipping without further modification results in a much less powerful network (fewer layers and fewer parameters), as well as final network layers with much smaller receptive fields.</p><p>The transforms (T 1 , T 2 ) are generic and allow us to bring the DCT coefficients to a compatible size. In determining transforms we considered the following design concepts. The transforms can be (1) nonparametric and/or manually designed, such as up-or down-sampling of the original DCT coefficients, (2) learned, and can be simply expressed as convolution layers, or (3) a combination of layers, such as a ResNet block itself. We explored seven different methods of transforms (T 1 , T 2 ), from the simplest upsampling to deconvolution, and combined with different options of subsequent ResNet block stacks. We describe each, with further details in Sec. S1 in the Supplementary Information:</p><p>• UpSampling. Both chroma DCT coefficients D Cb and D Cr are upsampled by duplicating pixels by a factor of two in height and width to the dimensions of D Y . The three are then concatenated channelwise, and go through a batch normalization layer before going into ResNet ConvBlock 3 (CB 3 ) but with reduced stride 1, then standard CB 4 and CB 5 .</p><p>• UpSampling-RFA. This setup is similar to UpSampling, but here we keep ResNet CB 2 (rather than removing it) and CB 2 and CB 3 such that they mimic the increase in R and S observed in the original ResNet-50 blocks; we denote this "Receptive Field Aware" or RFA. As illustrated in Fig. <ref type="figure" target="#fig_3">4</ref>, without this modification, the jump in R from input to the first block is large and the R later in the network is never as large (green line) as in the baseline ResNet.</p><p>By instead keeping CB 2 but decreasing its stride, the transition to large R is more gradual and upon reaching CB 3 R and S match the baseline ResNet through the rest of the layers. The architecture is depicted in Fig. <ref type="figure" target="#fig_1">3b</ref> and in Fig. <ref type="figure">S1</ref>.</p><p>• Deconvolution-RFA. An alternative to upsampling is a learnable deconvolution layer. In this design, we use two separate deconvolution layers on D Cb and D Cr to increase the spatial size. The rest of the design is the same as UpSampling-RFA. • DownSampling. As opposed to upsampling spatially smaller coefficients, another approach is to downsample the large one, D Y , with a convolution layer. The rest of the design is similar to UpSampling, but with a few changes made to handle smaller input spatial size. As we will see in Sec. 5, this network operating on smaller total input results in much faster processing at the expense of higher error.  <ref type="figure" target="#fig_3">4</ref>, where one can see that Late-Concat-RFA has a smoother increase of receptive fields in comparison to Late-Concat. As explained in Fig. <ref type="figure">S1</ref> for details, because the spatial size is smaller than in a standard ResNet, we use a larger number of channels in the early blocks. • Late-Concat-RFA-Thinner. This architecture is identical to Late-Concat-RFA but with modified numbers of channels. The number of channels is decreased in the first two CBs along the D Y path and increased in the third, changing channel counts from {1024, 512, 512} to {384, 384, and 768}. The D Cb and D Cr components are fed through a CB with 256 channels instead of 512. All other parts of the network are identical to Late-Concat-RFA. These changes were made in an attempt to keep the performance of the Late-Concat-RFA model but obtain some of the speed benefits of the Late-Concat. As will be shown in Fig. <ref type="figure" target="#fig_5">5</ref>, it strikes an attractive balance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">RGB Network Controls</head><p>As we will observe in Sec. 5 and Fig. <ref type="figure" target="#fig_5">5</ref>, many of the networks taking DCT as input perform with lower error and/or higher speed than the baseline ResNet-50 RGB. In this section, we examine whether this is just due to making many architecture tweaks, some of which happen to work better than a baseline ResNet.</p><p>Here we start with a baseline ResNet and attempt to mutate the architecture slightly to get it to perform with lower error and/or higher speed. Inputs are RGB images of size 224 × 224 × 3. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Reducing the Number of Layers</head><p>To start, we test the simple idea of removing convolution layers in ResNet-50. We remove the Identity blocks one at a time, from the bottom up, from Blocks 2 and 3, resulting in 6 experiments as 6 layers are removed. We never remove the convolution layer between Blocks 2 and 3 to keep the number of channels in each block and representation size unchanged.</p><p>In this series of experiments, the first identity layer (ID) from Block 2 is removed first. Secondly, both the first and second ID layers are removed. The experiment continues until all 3 ID layers of both Block 2 and 3 are removed. In the last configuration, the network shares similarities with the UpSampling architecture, where the RGB signal is transformed with a small number of convolutions to a representation size of 28 × 28 × 512. The RGB input goes through the following series of layers: convolution, max pooling, one last identity layer from Block 3. We can see the trade-off between the inference speed and accuracy in Fig. <ref type="figure" target="#fig_5">5</ref> under the legend "Baseline, Remove ID Blocks" (series of 6 gray squares). As shown, networks become slightly faster but at a large reduction in accuracy.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Reducing the Number of Channels</head><p>Because reducing the number of layers worked poorly, we also investigate thinning the network: reducing the number of channels in each layer to speed up inference. The last fully connected layer is modified to adapt to the size of its input layer while maintaining the same number of outputs. We propose to reduce the number of channels by taking the original number of channels and dividing it by a fixed ratio. We conduct three experiments with ratios {1.1, √ 2, 2}. The same trade-off between speed or GFLOPS and accuracy is shown in Fig. <ref type="figure" target="#fig_5">5</ref> under the legend "Reduced # of Channels". As with reducing the number of layers, networks become slightly faster but at a large reduction in accuracy. Perhaps both results might have been suspected, as the authors of ResNet-50 likely already tuned the network depth and width well; nevertheless, it is important to verify that the performance improvements observed could not have been obtained through this much simpler approach.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Learning the DCT Transform</head><p>A final set of four experiments -shown in Fig. <ref type="figure" target="#fig_5">5</ref> as four "YCbCr pixels, DCT layer" diamondsaddress whether we can obtain a similar benefit to the DCT architectures but starting from RGB pixels by using convolutional layers designed to replicate, exactly or approximately, the DCT transform. RGB images are first converted into YCbCr space, then each channel is fed independently through a convolution layer. To mimic the DCT, the convolution filter size is set to 8×8 with a stride of 8, and 64 output channels (or in some cases: more) are used. The resulting activations are then concatenated before being fed into ResNet Block 2. In DCT-Learn, we randomly initialize filters and train them in the standard way. In DCT-Ortho, we regularize the convolution weights toward orthonormality, as described in <ref type="bibr" target="#b1">[2]</ref>, to encourage them not to discard information, inspired by the orthonormality of the DCT transform. In DCT-Frozen, we simply use the exact DCT coefficients without training, and in DCT-Frozenx2 we modify the stride to be 4 instead of 8 to increase representation size at that layer and allow filters to overlap. Surprisingly, this network tied the performance (6.98%) of the best other Table <ref type="table">1</ref>: The averaged top-1 and top-5 error rates are represented for the baseline ResNet-50 architecture and the proposed DCT based ones. Standard deviation is appended to the top error rates for experiments repeated more than three times. The frame per second inference speed measured on an NVIDIA Pascal GPU is also reported given that data is packed in batches of size 1024. approach when averaged over three runs, though without the speedup of the Deconvolution-RFA approach. This is interesting because it departs from network design rules of thumb currently in vogue: first layer filters are large instead of small, hard-coded instead of learned, run on YCbCr space instead of RGB, and process channels depthwise (separately) instead of together. Future work could evaluate to what extent we should adopt these atypical choices as standard practice.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Results and Discussions</head><p>Experiments described in Section 3 and 4 are conducted with the Keras framework and TensorFlow backend. Training is performed on the ImageNet dataset <ref type="bibr" target="#b3">[4]</ref> with the standard ResNet-50 stepwise decreasing learning rates described in <ref type="bibr" target="#b9">[10]</ref>. The distributed training framework Horovod <ref type="bibr" target="#b20">[21]</ref> is employed to facilitate parallel training over 128 NVIDIA Pascal GPUs. To accommodate the parallel training, the learning rates are multiplied by the number of parallel running instances. Each experiment trains for 90 epochs, which correspond to only 2-3 hours in this parallelization setup. A total of more than 50 experiments are run. All experiments are conducted with images which are first resized to 224×224 pixels with a random crop, and the JPEG quality used during encoding is 100, so as little information is lost as possible. A limitation of using a JPEG representation during training is that to do data augmentation e.g. via random crops, one must decompress the image, transform it, and then re-encode it before accessing the DCT coefficients. Of course, inference after the model is trained will not require this process. Inference time measurements are calculated by running the inference on 20 batches of size 1024 × 224 × 224 × 3 on the 128 GPUs where the overall time is collected, and the effective number of images per second per GPU is then calculated. All timing is computed for inference, not training, and is computed as if data were already loaded; thus timing improvements do not include possible additional savings due to reduced JPEG decompression time.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Error Rate versus Inference Speed</head><p>We report full results in Table <ref type="table">1</ref>, for all seven proposed DCT architectures from Section 3, along with two baselines: ResNet-50 on RGB inputs, and ResNet-50 on YCbCr inputs. The full results include validation top-1 and top-5 error rates and inference frames per second (FPS). Both ResNet baselines achieve a top-5 error rate of 7.35% at an inference speed of 208 FPS on an NVIDIA Pascal GPU, while the best DCT network achieves it at 6.98% with 268 FPS. We analyze the 7 experiment results by dividing them into three categories. The first category contains those where DCT coefficients are directly connected with the ResNet-50 architecture; this includes UpSampling, DownSampling, and Late-Concat. Several of these architectures providing significant inference speed-up (three far-right dots in Fig. <ref type="figure" target="#fig_5">5</ref>), almost 2× in the best case.</p><p>The speedup is due to less computation as a consequence of reduced ResNet blocks. A sharp increase of error with DownSampling suggests that a reduction in the spatial structure of the Y (luma) causes a reduction of information while maintaining its spatial resolution (as in UpSampling and Late-Concat) performs closer to the baseline. In the second category, the two best architectures above are extended to increase their R slowly, so as to mimic the R growth of ResNet-50 (see Fig. <ref type="figure" target="#fig_3">4</ref>). This category contains UpSampling-RFA and Late-Concat-RFA, and they are shown to achieve better error rates than their non-RFA counterparts while still providing an average speed-up of 1.3×. With the proper RFA adjustments in architecture, these two versions manage to beat the RGB baseline. A third category attempts to further improve the RFA architectures, by (1) learning the upsampling operation with Deconvolution-RFA, and (2) reducing the number of channels with Late-Concat-RFA-Thinner.</p><p>On the one hand, Deconvolution-RFA reduces the top-5 error rate of UpSampling-RFA by 0.15% while maintaining an equivalent inference speed. On the other hand, Late-Concat-RFA-Thinner achieves error rates on par with the baseline while providing a speed-up ratio of 1.77×. A review of the GFLOPS for each architecture (cf. Fig. <ref type="figure" target="#fig_5">5</ref>) shows that despite more computation of some architectures, all architectures achieve higher speeds thanks to halved data transfer between CPU and GPU. Speed tests performed for the Late-Concat-RFA architecture that ignore data transfer gains show that about 25% of the measured gain is due to limited data transfer.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Ability to Trade-Off</head><p>In analyzing results from RGB network controls, we observe a continual increase in inference speed and GFLOPS coupled with an increase in error rates, as the network size is reduced. None of the controls can maintain one while improving the other. The curves (gray and light gray in Fig. <ref type="figure" target="#fig_5">5</ref>), however, exhibit how the two opposing forces play with each other and provide insights to the user to determine the trade-offs when choosing network size. We observe that decreasing the number of channels offers the worst trade-off curve, as the error rate increases drastically for only small speed-up gains. Removing the identity blocks offers a better trade-off curve, but this approach still allows only limited speed-ups and reaches a cliff where speed-up is bounded.</p><p>Considering the trade-off curves from DCT architectures (blue and red curves in Fig. <ref type="figure" target="#fig_5">5</ref>), however, we notice the apparent advantage especially if one urges to gain an improvement on inference speed. We notice the significant gain in speedup while maintaining an error rate within a 1% range of the baseline. We conclude therefore that making use of DCT coefficients in CNNs constitutes an appealing strategy to balance loss versus computational speed. We also want to highlight two of the proposed DCT architectures that demonstrate compelling error/speed trade-offs. First, the Deconvolution-RFA architecture achieves the smallest top-5 error rate overall, while still improving inference speed by 30% over the baseline (black square in the figure). Secondly, the Late-Concat-RFA-Thinner architecture provides an error rate closest to the baseline while allowing 77% faster inference. Moreover, the small slopes of the two curves strongly manifest that at a slight cost of computation, the RFA tweaks in the design improves accuracy by allowing a slow, smooth increase of receptive fields.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Learning DCT Transform</head><p>Another interesting curve to examine is the result from Sec. 4.3, experiments attempting to learn convolutions behaving like DCT. It is the darker gray curve in Fig. <ref type="figure" target="#fig_5">5</ref> annotated with legends starting with "YCbCr pixels". The first two experiments trying to learn the DCT weights from random initialization, with and without orthonormal regularization, achieve slightly higher error rates than our RGB and DCT baselines. The third and fourth experiments relying on frozen weights initialized from the DCT filters themselves achieve lower error rates, on par with the best DCT architecture. These results show that learning the DCT filters is hard with one convolution layer and produce sub-performant networks. Moreover leveraging directly the DCT weights allow better error rates, making the JPEG DCT coefficients an appealing representation for feeding CNN.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusions</head><p>In this paper, we proposed and tested the simple idea of training CNNs directly on the blockwise discrete cosine transform (DCT) coefficients computed as part of the JPEG codec. Results are compelling: at a similar performance to a ResNet-50 baseline, we observed speedups of 1.77x, and at performance significantly better than the baseline, we obtained speedups of 1.3x. This simple change of input representation may be an effective method of accelerating processing in a wide range of speed-sensitive applications, from processing large data sets in data-centers to processing JPEG images locally on mobile devices.  Six sets of experiments are grouped. ResNet-50 baseline on both RGB and YCbCr show nearly identical performance, indicating that the YCbCr color space on its own is not sufficient for improved performance. Two sets of controls on the RGB baseline -baseline with removed ID blocks and with a reduced number of channels -show that simply making ResNet-50 shorter or thinner cannot produce speed gains at a competitive level of performance to the DCT networks. Finally, two sets of DCT experiments are shown, those that merge Y and Cb/Cr channels early in the network (within one layer of each other) or late (after more than a layer of processing of the Y channel). Several of these networks are both faster and more accurate, and the Late-Concat-RFA-Thinner network is about the same level of accuracy while being 1.77x faster than ResNet-50.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: (a) The 64 orthonormal DCT basis vectors used for decomposing single-channel 8×8 pixel blocks in the JPEG standard [26]. (b) The 64 first-layer convolution filters of size 7×7 learned by a baseline ResNet-50 network operating on RGB pixels [10]. (c) The 64 convolution filters of size 8×8 learned starting from random weights by the DCT-Learn network described in Sec. 4.3. (d) The 64 convolution filters from the DCT-Ortho network, similar to (c) but with an added orthonormal regularization.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: (a) The first layers of the original ResNet-50 architecture [10]. (b) The architecture of UpSampling-RFA is illustrated with coefficients D Y , D Cb and D Cr of dimensions 28 × 28 × 64 and 14 × 14 × 64, respectively. The short names NT and U stand for the operations No Transform and Upsampling, respectively. (c) The architecture Late-Concat is depicted where the luminance coefficients D Y go through the ResNet Block 3, while the chroma coefficients go through single convolutions. This results in extra total computation along the luma path compared to the chroma path and tends to work well.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>•</head><label></label><figDesc>Late-Concat. In this design, we run D Y on its own through two ConvBlocks (CBs) and three IdentityBlocks (IBs) of ResNet-50. In parallel, D Cb and D Cr are passed through a CB before being concatenated with the D Y path. The joined representation is then fed into the standard ResNet stack just after CB 4 . The architecture is depicted in Fig. 3c and in Fig. S1. The effect is extra total computation along the luma path compared to the chroma path, and the result is a fast network with good performance. • Late-Concat-RFA. This receptive field aware version of Late-Concat passes D Y through three CBs with kernel size and strides tweaked such that the increase in R mimics the R in the original ResNet-50. In parallel D Cb and D Cr take the same path as in Late-Concat before being concatenated to the result of the D Y path. The comparison of averaged receptive field is illustrated in Fig.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: The average of receptive field sizes within each ResNet block vs. the corresponding block stride. Both axes are in log scale. The measurements are reported for some of the DCT based architectures, and they are compared to the growth of the receptive field observed in ResNet-50. The plots underline how the receptive field aware (RFA) versions of basic DCT based architectures allow a transition similar to the one observed in the baseline network.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>Top-5 error Baseline, remove ID blocks Baseline, reduced # of channels YCbCr pixels, ResNet-50 RGB pixels, ResNet-50 DCT Early</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: (top) Inference speed vs top-5 error rates. (bottom) GigaFLOPS vs top-5 error rates.Six sets of experiments are grouped. ResNet-50 baseline on both RGB and YCbCr show nearly identical performance, indicating that the YCbCr color space on its own is not sufficient for improved performance. Two sets of controls on the RGB baseline -baseline with removed ID blocks and with a reduced number of channels -show that simply making ResNet-50 shorter or thinner cannot produce speed gains at a competitive level of performance to the DCT networks. Finally, two sets of DCT experiments are shown, those that merge Y and Cb/Cr channels early in the network (within one layer of each other) or late (after more than a layer of processing of the Y channel). Several of these networks are both faster and more accurate, and the Late-Concat-RFA-Thinner network is about the same level of accuracy while being 1.77x faster than ResNet-50.</figDesc></figure>
+		</body>
+		<back>
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>UpSampling</head><p>Reference: Baseline Concat <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">192)</ref> CB3(s=1) Y <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">64)</ref> Cb,Cr <ref type="bibr" target="#b13">(14,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr">128)</ref> U <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">128)</ref> </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>BN</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>UpSampling-RFA</head><p>Reference: Upsampling CB4(k=1, s=1) IB(k=2), IB</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>DownSampling</head><p>Reference: Baseline Concat <ref type="bibr" target="#b13">(14,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr">192)</ref> Y <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">64)</ref> Cb,Cr <ref type="bibr" target="#b13">(14,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr">128)</ref> C(256, 2, 2) <ref type="bibr" target="#b13">(14,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr">256)</ref> CB3(s=1) CB4(s=1)</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Late-Concat</head><p>Reference: Baseline Concat Y <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">64)</ref> Cb,Cr <ref type="bibr">(14, 14,</ref>  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Deconvolution-RFA</head><p>Reference: Upsampling-RFA Concat <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">192)</ref> Y <ref type="bibr" target="#b27">(28,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr">64)</ref> Cb,Cr <ref type="bibr" target="#b13">(14,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr">128)</ref> Deconv <ref type="bibr">(28, 28,</ref>  </p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Compressed learning: A deep neural network approach</title>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Adler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Elad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Zibulevsky</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1610.09615</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Neural photo editing with introspective adversarial networks</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Brock</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Theodore</forename><surname>Lim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Ritchie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Weston</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">5th International Conference on Learning Representations</title>
+		<meeting><address><addrLine>Toulon, France</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Xception: Deep learning with depthwise separable convolutions</title>
+		<idno>CoRR, abs/1610.02357</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Franc ¸ois Chollet</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Imagenet: A large-scale hierarchical image database</title>
+		<author>
+			<persName><forename type="first">Jia</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li-Jia</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li</forename><surname>Fei-Fei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Computer Vision and Pattern Recognition</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2009">2009. 2009</date>
+			<biblScope unit="page" from="248" to="255" />
+		</imprint>
+	</monogr>
+	<note>CVPR 2009. IEEE Conference on</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Jpeg compressed image retrieval via statistical features</title>
+		<author>
+			<persName><forename type="first">Guocan</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianmin</forename><surname>Jiang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Pattern Recognition</title>
+		<imprint>
+			<biblScope unit="volume">36</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="977" to="985" />
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Using compression to speed up image classification in artificial neural networks</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Fu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gabriel</forename><surname>Guimaraes</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">A similarity metric for retrieval of compressed objects: Application for mining satellite image time series</title>
+		<author>
+			<persName><forename type="first">Lionel</forename><surname>Gueguen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mihai</forename><surname>Datcu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Knowledge and Data Engineering</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="562" to="575" />
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Face recognition using the discrete cosine transform</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ziad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><forename type="middle">D</forename><surname>Hafed</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Levine</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">International journal of computer vision</title>
+		<imprint>
+			<biblScope unit="volume">43</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="167" to="188" />
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Deep compression: Compressing deep neural network with pruning, trained quantization and huffman coding</title>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huizi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<idno>CoRR, abs/1510.00149</idno>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Deep residual learning for image recognition</title>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaoqing</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+		<idno>CoRR, abs/1512.03385</idno>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Jpeg at 25: Still going strong</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hudson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Niss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sebestyn</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE MultiMedia</title>
+		<imprint>
+			<biblScope unit="volume">24</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="96" to="103" />
+			<date type="published" when="2017-04">Apr 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">Squeezenet: Alexnet-level accuracy with 50x fewer parameters and &lt;1mb model size</title>
+		<author>
+			<persName><forename type="first">Forrest</forename><forename type="middle">N</forename><surname>Iandola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><forename type="middle">W</forename><surname>Moskewicz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Khalid</forename><surname>Ashraf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kurt</forename><surname>Keutzer</surname></persName>
+		</author>
+		<idno>CoRR, abs/1602.07360</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Imagenet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoff</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="1106" to="1114" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Gradient-based learning applied to document recognition</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lecun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Bottou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Haffner</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Proceedings of the IEEE</title>
+		<imprint>
+			<biblScope unit="volume">86</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<biblScope unit="page" from="2278" to="2324" />
+			<date type="published" when="1998-11">Nov 1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title/>
+		<ptr target="http://libjpeg.sourceforge.net/" />
+	</analytic>
+	<monogr>
+		<title level="j">February</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<date type="published" when="2018">2018. 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Jpeg library turbo</title>
+		<imprint>
+			<date type="published" when="2018-02-06">2018. February 6, 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Efficient dct-domain blind measurement and reduction of blocking artifacts</title>
+		<author>
+			<persName><forename type="first">Shizhong</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">C</forename><surname>Bovik</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Transactions on Circuits and Systems for Video Technology</title>
+		<imprint>
+			<date type="published" when="2002-12">Dec 2002</date>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="page" from="1139" to="1149" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">A critical evaluation of image and video indexing techniques in the compressed domain</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Mrinal K Mandal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sethuraman</forename><surname>Idris</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Panchanathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Image and Vision Computing</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="issue">7</biblScope>
+			<biblScope unit="page" from="513" to="529" />
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Playing Atari with Deep Reinforcement Learning</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Mnih</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kavukcuoglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Silver</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Graves</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Antonoglou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wierstra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Riedmiller</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2013-12">December 2013</date>
+		</imprint>
+	</monogr>
+	<note>ArXiv e-prints</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Faster r-cnn: Towards real-time object detection with region proposal networks</title>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>Shaoqing Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="91" to="99" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Meet Horovod: Uber&apos;s open source distributed deep learning framework for TensorFlow</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Sergeev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Del</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Balso</forename></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Direct feature extraction from compressed images</title>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ishwar K</forename><surname>Sethi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Storage and Retrieval for Still Image and Video Databases IV</title>
+		<imprint>
+			<publisher>International Society for Optics and Photonics</publisher>
+			<date type="published" when="1996">1996</date>
+			<biblScope unit="volume">2670</biblScope>
+			<biblScope unit="page" from="404" to="415" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Srom</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gpujpeg</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018-02-06">2018. February 6, 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Torfason</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fabian</forename><surname>Mentzer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eirikur</forename><surname>Agustsson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Tschannen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Radu</forename><surname>Timofte</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luc</forename><surname>Van Gool</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1803.06131</idno>
+		<title level="m">Towards image understanding from deep compression without decoding</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">On using cnn with dct based image data</title>
+		<author>
+			<persName><forename type="first">Matej</forename><surname>Ulicny</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rozenn</forename><surname>Dahyot</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 19th Irish Machine Vision and Image Processing conference IMVIP</title>
+		<meeting>the 19th Irish Machine Vision and Image Processing conference IMVIP</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Wikipedia</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Jpeg</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018-02-06">2018. February 6, 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">How transferable are features in deep neural networks?</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Yosinski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Clune</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lipson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">Z</forename><surname>Ghahramani</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">M</forename><surname>Welling</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">C</forename><surname>Cortes</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">N</forename><forename type="middle">D</forename><surname>Lawrence</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">K</forename><forename type="middle">Q</forename><surname>Weinberger</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2014-12">December 2014</date>
+			<biblScope unit="volume">27</biblScope>
+			<biblScope unit="page" from="3320" to="3328" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Understanding neural networks through deep visualization</title>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Yosinski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeff</forename><surname>Clune</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anh</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Fuchs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hod</forename><surname>Lipson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Deep Learning Workshop, International Conference on Machine Learning (ICML)</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">Visualizing and understanding convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Matthew</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rob</forename><surname>Zeiler</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Fergus</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1311.2901</idno>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

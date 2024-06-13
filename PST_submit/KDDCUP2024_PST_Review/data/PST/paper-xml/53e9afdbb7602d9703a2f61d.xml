@@ -1,0 +1,754 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Evaluating and Optimizing Thread Pool Strategies for Real-Time CORBA</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Irfan</forename><surname>Pyarali</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Marina</forename><surname>Spivak</surname></persName>
+							<email>marina@cs.wustl.edu</email>
+						</author>
+						<author>
+							<persName><forename type="first">Ron</forename><surname>Cytron</surname></persName>
+							<email>cytrong@cs.wustl.edu</email>
+						</author>
+						<author>
+							<persName><forename type="first">Douglas</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+							<email>schmidt@uci.edu</email>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<orgName type="department">Department of Computer Science Electrical and Computer Engineering Dept</orgName>
+								<orgName type="institution">Washington University</orgName>
+								<address>
+									<postCode>63130</postCode>
+									<settlement>St. Louis</settlement>
+									<region>MO</region>
+									<country key="US">USA</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<postCode>92697</postCode>
+									<settlement>Irvine</settlement>
+									<region>CA</region>
+									<country key="US">USA</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Evaluating and Optimizing Thread Pool Strategies for Real-Time CORBA</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:34+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Strict control over the scheduling and execution of processor resources is essential for many fixed-priority real-time applications. To facilitate this common requirement, the Real-Time CORBA (RT-CORBA) specification defines standard middleware features that support end-to-end predictability for operations in such applications. One of the most important features in RT-CORBA is thread pools, which allow application developers and end-users to configure and control processor resources.</p><p>This paper provides two contributions to the evaluation of techniques for improving the quality of implementation of RT-CORBA thread pools. First, we describe the key patterns underlying common strategies for implementing RT-CORBA thread pools. Second, we evaluate each thread pool strategy in terms of its consequences on (1) feature support, such as request buffering and thread borrowing, (2) scalability in terms of endpoints and event demultiplexers required, (3) efficiency in terms of data movement, context switches, memory allocations, and synchronizations required, (4) optimizations in terms of stack and thread specific storage memory allocations, and (5) bounded and unbounded priority inversion incurred in each implementation. This paper also provides results that illustrate empirically how different thread pool implementation strategies perform in different ORB configurations.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>The maturation of the CORBA specification <ref type="bibr" target="#b0">[1]</ref> and standardsbased CORBA implementations has simplified the development of distributed systems with complex functional requirements. However, next-generation distributed real-time and embedded (DRE) systems, such as command and control systems, manufacturing process control systems, videoconferencing, large-scale distributed interactive simulations, and testbeam data acquisition systems, have complex quality of service (QoS) requirements, such as stringent bandwidth, latency, jitter, and dependability needs. Historically, DRE sys-tems were not well served by middleware like CORBA due to its lack of QoS support.</p><p>The recent Real-time CORBA (RT-CORBA) 1.0 specification <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b2">3]</ref> in the CORBA 2.4 standard is an important step towards defining standards-based, commercial-off-theshelf (COTS) middleware that can deliver end-to-end QoS support at multiple levels in DRE systems. As shown in Figure <ref type="figure">1</ref>, RT-CORBA ORB endsystems<ref type="foot" target="#foot_0">1</ref> define standard capa-Figure <ref type="figure">1</ref>: Standard Features in Real-Time CORBA ORB Endsystems bilities that support end-to-end predictability for operations in fixed-priority CORBA applications. RT-CORBA features allow applications to configure and control the following resources:</p><p>Processor resources via thread pools, priority mechanisms, and intraprocess mutexes Communication resources via protocol properties and explicit bindings with non-multiplexed connections and Memory resources via buffering requests in queues and bounding the size of thread pools. <ref type="bibr" target="#b2">[3]</ref> presents an overview of the RT-CORBA features and <ref type="bibr" target="#b3">[4]</ref> explains how communication resources are configured and controlled efficiently in TAO <ref type="bibr" target="#b4">[5]</ref>, which is our highperformance, real-time implementation of CORBA.</p><p>There are two general strategies for implementing RT-CORBA thread pools. The first strategy uses the Half-Sync/Half-Async pattern <ref type="bibr" target="#b5">[6]</ref>, where I/O thread(s) buffer the incoming requests in a queue and a different set of worker threads then process the requests. The second strategy uses the Leader/Followers pattern <ref type="bibr" target="#b5">[6]</ref> to demultiplex I/O events into threads in a pool without requiring additional I/O threads. Each strategy is optimal for certain application domains, e.g.:</p><p>Internet servers may use the Half-Sync/Half-Async pattern to improve scalability, at the expense of increased average-and worst-case latency. Telecom servers may tolerate some degree of priority inversion when using the Half-Sync/Half-Async pattern to support buffering and borrowing across different priority bands. Embedded avionics control system may trade resource duplication to avoid any priority inversions by using the Leader/Followers pattern.</p><p>The remainder of this paper is organized as follows: Section 2 describes the key features in RT-CORBA thread pools; Section 3 illustrates how patterns can be applied to implement different RT-CORBA thread pool strategies; Section 4 provides empirical results that compare different thread pool implementation strategies; Section 5 compares our work on TAO's thread pools with related work; and Section 6 presents concluding remarks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">An Overview of RT-CORBA Thread Pools</head><p>Many real-time systems use multi-threading to 1. Distinguish between different types of service, such as high-priority vs. low-priority tasks [7] 2. Support thread preemption to prevent unbounded priority inversion and deadlock and 3. Support complex object implementations that run for variable and/or long durations.</p><p>To allow real-time ORB endsystems and applications to leverage these benefits of multi-threading, while controlling the amount of memory and processor resources they consume, the RT-CORBA specification defines a server thread pool model <ref type="bibr" target="#b7">[8]</ref>. There are two types of thread pools in RT-CORBA:</p><p>Thread pool without lanes -In this basic thread pool model all threads have the same assigned priority. This model is illustrated in Figure <ref type="figure">2</ref>. To create thread pools without and with lanes, developers of real-time applications can configure thread pools in an RT-CORBA server by using either the create threadpool or create threadpool with lanes methods, respectively, which are defined in the standard RTORB interface. Each thread pool is then associated with one or more POA via the RTCORBA::ThreadPoolPolicy. The threads in a pool perform processing of client requests targeted at its associated POA(s). While a thread pool can be associated with more than one POA, a POA can be associated with only one thread pool. Figure <ref type="figure">4</ref> illustrates the creation and association of thread pools in a server. When created via the create threadpool* methods outlined above, thread pools can be configured with the following properties:</p><p>Static threads, which defines the number of pool threads pre-allocated at thread pool creation time.</p><p>Dynamic threads, which defines the maximum number of threads that can be created on-demand. If a request arrives when all existing threads are busy, a new thread is created to handle the request if the number of dynamic threads in the pool have not exceeded the dynamic value specified by the user.</p><p>The ability to configure the number of threads allows developers to bound the processing resources. Also, de-  Thread borrowing, which controls whether a lane with higher priority is allowed to "borrow" threads from a lane with lower priority when it exhausts its maximum number of threads (both static and dynamic) and requires an additional thread to service a new invocation. The borrowed thread has its priority raised to that of the lane that requires it. When the thread is no longer required, its priority is lowered once again to its previous value, and it is returned to the lower priority lane. Naturally, this property applies only to thread pools with lanes.</p><p>Static threads, dynamic threads, and priority are per-lane properties in thread pool with lanes model.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Alternative Patterns for Designing Optimal RT-CORBA Thread Pool Strategies</head><p>Although RT-CORBA defines a standard set of interfaces and policy types, it intentionally "underspecifies" many quality of implementation details, such as the ORB's memory management and connection management strategies. Though this approach maximizes the freedom of RT-CORBA ORB developers, it requires that application developers and end-users understand how that an ORB is designed and how its design affects the schedulability, scalability, and predictability of their application.</p><p>The thread pool architecture is an essential dimension of an RT-CORBA ORB that also falls into the category of quality of implementation detail. There are two general strategies for implementing RT-CORBA thread pools: Half-Sync/Half-Async and Leader/Followers. In this section, we use patterns to describe these two strategies in detail, outlining their structure, dynamics, implementation, and consequences for selecting optimal RT-CORBA thread pools for particular types of applications. <ref type="foot" target="#foot_1">2</ref> We focus on patterns in this paper to generalize the applicability of our work. Pattern descriptions help application developers and end-users understand the schedulability, scalability, and predictability consequences of a particular thread pool implementation used by their RT-CORBA ORB.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Half-Sync/Half-Async</head><p>The Half-Sync/Half-Async architectural pattern decouples asynchronous and synchronous service processing in concurrent systems, to simplify programming without unduly reducing performance. The pattern introduces two intercommunicating layers, one for asynchronous and one for synchronous service processing.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.1">Problem</head><p>Concurrent systems often contain a mixture of asynchronous and synchronous processing. For example, asynchronous events that an RT-CORBA server must react to include network messages and software signals. However, there are several components of an RT-CORBA server that require synchronous processing, such as execution of application-specific servant code.</p><p>Synchronous programming is usually less complex compared to asynchronous programming because the thread of control can block awaiting the completion of operations. Blocking operations allow programs to maintain state information and execution history in their run-time activation record stack. If all tasks are processed synchronously within separate threads of control, however, thread management overhead can be excessive. Each thread contains resources that must be created, stored, retrieved, synchronized, and destroyed by a thread manager.</p><p>Conversely, asynchronous programming is generally more efficient. In particular, interrupt-driven asynchronous systems may incur less context switching overhead <ref type="bibr" target="#b8">[9]</ref> than synchronous threaded systems because the amount of information necessary to maintain program state can be reduced. In addition, asynchronous services can be mapped directly onto OS asynchrony mechanisms, such as WinNT I/O completion ports <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b5">6]</ref>. However, asynchronous programs are harder to develop, debug, and maintain. Asynchronous programs must manage additional data structures that contain state information and execution history, which must be saved and restored when a thread of control is preempted by an interrupt handler.</p><p>Two forces must therefore be resolved when specifying an RT-CORBA threading architecture that executes services both synchronously and asynchronously:</p><p>The architecture should be designed so parts of the ORB that can benefit from the simplicity of synchronous processing need not address the complexities of asynchrony. Similarly, ORB services that must maximize performance should not need to address the inefficiencies of synchronous processing.</p><p>The architecture should enable the synchronous and asynchronous processing services to communicate without complicating their programming model or unduly degrading their performance.</p><p>Although the need for both programming simplicity and high performance may seem contradictory, it is essential that both these forces be resolved in scalable RT-CORBA implementations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.2">Solution</head><p>An RT-CORBA ORB endsystem can be decomposed into two layers <ref type="bibr" target="#b10">[11]</ref>, synchronous and asynchronous; a queueing layer is introduced to mediate the communication between services in the asynchronous and synchronous layers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.3">Structure and Collaboration</head><p>The structure of the Half-Sync/Half-Async pattern is illustrated in Figure <ref type="figure" target="#fig_2">6</ref>. This design follows the Layers pattern <ref type="bibr" target="#b10">[11]</ref> and includes the following participants: Synchronous service layer: This layer performs high-level processing services. Services in the synchronous layer run in separate threads that can block while performing operations. In an RT-CORBA server, this layer 1. Dequeues a request from the queueing layer 2. Finds the target servant for the request 3. Demarshal the request 4. Perform upcalls into application-specific code by calling into the target servant registered in the POA by the application 5. Marshals the reply (if any) to the client and 6. Enqueues the reply (if any) in the queueing layer. Asynchronous service layer: This layer performs lowerlevel processing services, which typically emanate from one or more external event sources. Services in the asynchronous layer cannot block while performing operations without unduly degrading the performance of other services. In an RT-CORBA server, this layer 1. Reads the incoming request from the network 2. Find the target thread pool that will handle this request and 3. Adds the request to the thread pool's queue that has the appropriate priority.</p><p>Queueing layer: This layer provides the mechanism for communicating between services in the synchronous and asynchronous layers. For example, messages containing data and control information are produced by asynchronous services, then buffered at the queueing layer for subsequent retrieval by synchronous services, and vice versa. The queueing layer is responsible for notifying services in one layer when messages are passed to them from the other layer. The queueing layer therefore enables the asynchronous and synchronous layers to interact in a "producer/consumer" manner, similar to the structure defined by the Pipes and Filters pattern <ref type="bibr" target="#b10">[11]</ref>.</p><p>For an RT-CORBA server, this layer queues incoming requests from and outgoing replies to clients.</p><p>External event sources: These sources generate events that are received and processed by the asynchronous service layer.  For an RT-CORBA server, common sources of external events include sensors, network interfaces, disk controllers, and enduser terminals. Figure <ref type="figure" target="#fig_3">7</ref> illustrates these collaborations among participants in the Half-Sync/Half-Async pattern. Acceptor -An Acceptor <ref type="bibr" target="#b5">[6]</ref> is used to service connection requests from clients. The client establishes multiple connections to the server, one for every range of priorities that will be used by the client when making requests. After a connection has been established, it is moved to the Reactor with the corresponding priority during the first request.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.4">Implementation Synopsis</head><p>Reactors -Each priority supported by the server has a corresponding Reactor <ref type="bibr" target="#b5">[6]</ref>, which is used to demultiplex and dispatch incoming client requests.</p><p>Threads -The Acceptor is serviced by a thread running at an ORB-defined priority. Each Reactor is serviced by thread(s) at the appropriate priority.</p><p>To avoid priority inversion, the queueing layer consists of multiple queues, one for every thread pool lane. I/O threads read the incoming request, determine their target thread pool, and deposit the request into the right queue for processing. The synchronous layer consists of the threads in thread pool lanes. These threads block on a condition variable, waiting for requests to show up in their queue. After dequeueing the request, the target servant is found in the target POA, the request is demarshaled and application-level servant code is then executed.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.5">Consequences</head><p>The Half-Sync/Half-Async implementation of RT-CORBA thread pools has the following benefits: Simplified programming. The programming of the synchronous phase is simplified without degrading the performance of the asynchronous phase. Distributed systems based on RT-CORBA often have a larger quantity and variety of high-level processing services than lower-level services. Decoupling higher-level synchronous services from lower-level asynchronous processing services can therefore simplify ORB development because complex concurrency control, interrupt handling, and timing services can be localized within the asynchronous service layer. The asynchronous layer can also handle low-level details that are difficult to program robustly and can manage the interaction with hardware-specific components, such as DMA, memory management, and network I/O.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Support for request buffering and thread borrowing.</head><p>Since a request remains in the queueing layer until a thread is available to service it, the queueing layer can be used to buffer requests by bursty clients. Thread borrowing can also be implemented relatively easily by buffering the request in a queue that has threads available to process the request.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Sharing of I/O resources.</head><p>ORB resources, such as reactors and acceptors, are per-priority resources in the I/O layer. Therefore, if a server is configured with many thread pools that have similar lane priorities, I/O layer resources are shared by these lanes.</p><p>Easier piece-by-piece integration into the ORB. Ease of implementation and integration are important practical considerations in any project. Due to its layered structure, this approach is easier to design, implement, integrate, and test in a incrementally.</p><p>The Half-Sync/Half-Async implementation of RT-CORBA thread pools also has the following liabilities: Data exchange overhead. When exchanging data between the synchronous and asynchronous layers, the queueing layer can incur a significant performance overhead due to context switching, synchronization, cache coherency management, and data-copying overhead <ref type="bibr" target="#b8">[9]</ref>.</p><p>No memory management optimizations. Since a request is handed off from an I/O thread in the asynchronous layer to a thread pool thread in the synchronous layer, stack and thread-specific storage (TSS) <ref type="bibr" target="#b5">[6]</ref> cannot be used to optimize memory management for clients requests. Instead, a shared memory pool must be used to allocate storage for the requests. Unfortunately, synchronization for this shared memory pool can lead to extra overhead. Moreover, if the memory pool is shared between threads of different priorities, it can lead to priority inversion. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Leader/Followers</head><p>The Leader/Followers architectural pattern provides an efficient concurrency strategy where multiple threads take turns sharing a set of event sources in order to detect, demultiplex, dispatch, and process service requests that occur on the event sources.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.1">Problem</head><p>Mission-critical RT-CORBA servers often process a high volume of requests that arrive simultaneously. To process these requests efficiently, the following three forces must be resolved:</p><p>Associating a thread for each connected client may be infeasible due to the scalability limitations of applications or the underlying OS and hardware platforms.</p><p>Allocating memory dynamically for each request passed between multiple threads incurs significant overhead on conventional multiprocessor operating systems.</p><p>Multiple threads that demultiplex events on a shared set of event sources must coordinate to prevent race conditions. Race conditions can occur if multiple threads try to access or modify certain types of event sources simultaneously.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.2">Solution</head><p>A pool of threads is structured to share incoming client requests by taking turns demultiplexing the requests and synchronously dispatching the associated servant code that processes the request.</p><p>More specifically, this thread pool mechanism allows multiple threads to coordinate themselves and protect critical sections while detecting, demultiplexing, dispatching, and processing requests. In this mechanism, one thread at a time-the leader-waits for a request to arrive from the set of connected clients. Meanwhile, other threads-the followers-can queue up waiting their turn to become the leader. After the current leader thread detects a new client request, it first promotes a follower thread to become the new leader. It then plays the role of a processing thread, which demultiplexes and dispatches the request to application-specific code in the processing thread. Multiple processing threads can handle requests concurrently while the current leader thread waits for new requests. After handling its request, a processing thread reverts to a follower role and waits to become the leader thread again.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.3">Structure and Collaboration</head><p>The key participants in the Leader/Followers pattern are shown in Figure <ref type="figure" target="#fig_6">9</ref>  Event Handlers. The ORB event handler dispatches the incoming request to the target servant. This process includes 1. Reading the request from the network 2. Finding the target servant for the request 3. Demarshaling the request 4. Performing the upcall into application-specific code by calling into the target servant registered in the POA by the application 5. Marshaling the reply (if any) to the client and 6. Sending the reply (if any) back to the client. Thread Pool. At the heart of the Leader/Followers pattern is a thread pool, which is a group of threads that share a synchronizer, such as a semaphore or condition variable, and implement a protocol for coordinating their transition between various roles. A thread's transitions between states is shown in Figure <ref type="figure">10</ref>.</p><p>The collaborations in the Leader/Followers pattern are illustrated in Figure <ref type="figure">11</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.4">Implementation Synopsis</head><p>In this design, each RT-CORBA thread pool lane has an integrated I/O layer, i.e., there is one acceptor and one reactor for every lane. Clients connect to the acceptor endpoint with the desired priority and as shown in Figure <ref type="figure">12</ref>, all client request processing (as described in Section 3.2.3) is performed by the thread of desired priority from very beginning. Thus, there are no context switches and priority inversions are minimized.</p><p>In addition, the ORB does not create any internal I/O threads. This allows application programmers full control  over the number and properties of all the threads with the RT-CORBA thread pool APIs. In contrast, the Half-Sync/Half-Async implementation has I/O layer threads, so either a proprietary API must be added or application programmer will not have full control over all the thread resources.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.5">Consequences</head><p>The Leader/Followers pattern provides several benefits:</p><p>Performance enhancements. Compared with the Half-Sync/Half-Async thread pool strategy described in Section 3.1, the Leader/Followers pattern can improve performance as follows:</p><p>It enhances CPU cache affinity and eliminates the need for dynamic memory allocation and data buffer sharing between threads. For example, a processing thread can read the request into buffer space allocated on its run-time stack or by using the thread-specific storage (TSS) <ref type="bibr" target="#b5">[6]</ref> to allocate memory.</p><p>It minimizes locking overhead by not exchanging data between threads, thereby reducing thread synchronization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>It can minimize priority inversion because no extra</head><p>queueing is introduced in the server. When combined with real-time I/O subsystems <ref type="bibr" target="#b11">[12]</ref>, the Leader/Followers thread pool implementation can reduce sources of nondeterminism in server request processing significantly.</p><p>It does not require a context switch to handle each request, reducing the request dispatching latency. Note that promoting a follower thread to fulfill the leader role does require a context switch. If two events arrive simultaneously this increases the dispatching latency for the second event, but the performance is no worse than Half-Sync/Half-Async thread pool implementations.</p><p>However, the Leader/Followers pattern has the following liabilities:</p><p>Implementation complexity. The advanced variants of the Leader/Followers pattern are harder to implement than Half-Sync/Half-Async thread pools. A thorough discussion of these variants appears in <ref type="bibr" target="#b5">[6]</ref>.</p><p>Lack of flexibility. The queueing layer in the Half-Sync/Half-Async thread pool implementation makes it easy to support features like request buffering and thread borrowing.</p><p>In the Leader/Followers implementation, however, it is harder to implement these features because there is no explicit queue.  As shown in the figure, the Leader/Followers strategy outperformed the Half-Sync/Half-Async approach for all combinations of threads and application workload. The largest improvement, 2,800%, occurred for a small number of threads and a small amount of work-per-request. As the number of threads and the amount of work-per-request increased the percentage improvement decreased to 8%. These results illustrate that the Half-Sync/Half-Async thread pool strategy incurs a higher amount of overhead for memory allocation, locking, and data movement than the Leader/Followers strategy.</p><p>Note that on a lightly loaded real-time system, using a small number of threads will generally yield better throughput than a higher number of threads. This difference stems from the higher context switching and locking overhead incurred by threading. As workloads increase, however, addition threads may help improve server throughput, particularly when the server runs on a multi-processor.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Related Work</head><p>Real-time middleware is an emerging field of study. An increasing number of research efforts are focusing on integrating QoS and real-time scheduling into distribution middleware, such as CORBA. Our previous work on TAO has examined many dimensions of ORB middleware design, including static <ref type="bibr" target="#b4">[5]</ref> and dynamic <ref type="bibr" target="#b12">[13]</ref> operation scheduling, event processing <ref type="bibr" target="#b6">[7]</ref>, I/O subsystem <ref type="bibr" target="#b11">[12]</ref> and pluggable protocol <ref type="bibr" target="#b13">[14]</ref> integration, synchronous <ref type="bibr" target="#b7">[8]</ref> and asynchronous <ref type="bibr" target="#b14">[15]</ref> ORB Core architectures, IDL compiler features <ref type="bibr" target="#b15">[16]</ref> and optimizations <ref type="bibr" target="#b16">[17]</ref>, systematic benchmarking of multiple ORBs <ref type="bibr" target="#b17">[18]</ref>, patterns for ORB extensibility <ref type="bibr" target="#b5">[6]</ref> and ORB performance <ref type="bibr" target="#b18">[19]</ref>. In this section, we compare our work on TAO's RT-CORBA thread pools with related work on CORBA. URI TDMI. Wolfe et al. developed a real-time CORBA system at the US Navy Research and Development Laboratories (NRaD) and the University of Rhode Island (URI) <ref type="bibr" target="#b19">[20]</ref>. The system supports expression and enforcement of dynamic end-to-end timing constraints through timed distributed operation invocations (TDMIs) <ref type="bibr" target="#b20">[21]</ref>. A difference between TAO and the URI approaches is that TDMIs express required timing constraints, e.g., deadlines relative to the current time, whereas TAO's threading strategies are based on the fixedpriority scheduling features defined in the RT-CORBA specification.</p><p>BBN QuO. The Quality Objects (QuO) distributed object middleware is developed at BBN Technologies <ref type="bibr" target="#b21">[22]</ref>. QuO is based on CORBA and provides the following support for QoSenabled applications:</p><p>Run-time performance tuning and configuration through the specification of operating regions, behavior alternatives, and reconfiguration strategies that allows the QuO run-time to adaptively trigger reconfiguration as system conditions change (represented by transitions between operating regions); and Feedback across software and distribution boundaries based on a control loop in which client applications and server objects request levels of service and are notified of changes in service.</p><p>The QuO model employs several QoS definition languages (QDLs) that describe the QoS characteristics of various objects, such as expected usage patterns, structural details of objects, and resource availability. QuO's QDLs are based on the separation of concerns advocated by Aspect-Oriented Programming (AoP) <ref type="bibr" target="#b22">[23]</ref>. The QuO middleware adds significant value to adaptive real-time ORBs such as TAO. We are currently collaborating <ref type="bibr" target="#b23">[24]</ref> with the BBN QuO team to integrate the TAO and QuO middleware as part of the DARPA Quorum project <ref type="bibr" target="#b24">[25]</ref>.</p><p>UCI TMO. The Time-triggered Message-triggered Objects (TMO) project <ref type="bibr" target="#b25">[26]</ref> at the University of California, Irvine, supports the integrated design of distributed OO systems and realtime simulators of their operating environments. The TMO model provides structured timing semantics for distributed real-time object-oriented applications by extending conventional invocation semantics for object methods, i.e., CORBA operations, to include (1) invocation of time-triggered operations based on system times and (2) invocation and time bounded execution of conventional message-triggered operations.</p><p>TAO differs from TMO in that TAO provides a complete CORBA ORB, as well as CORBA ORB services and real-time extensions. Timer-based invocation capabilities are provided through TAO's Real-Time Event Service <ref type="bibr" target="#b6">[7]</ref>. Where the TMO model creates new ORB services to provide its time-based invocation capabilities <ref type="bibr" target="#b26">[27]</ref>, TAO provides a subset of these capabilities by extending the standard CORBA COS Event Service. We believe TMO and TAO are complementary technologies because (1) TMO extends and generalizes TAO's existing time-based invocation capabilities and (2) TAO provides a configurable and dependable connection infrastructure needed by the TMO CNCM service. We are currently collaborating with the UCI TMO team to integrate the TAO and TMO middleware as part of the DARPA NEST project.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Concluding Remarks</head><p>Thread pools are an important RT-CORBA capability since they allow application developers and end-users to control and bound the amount of resources dedicated to concurrency and queueing. There are various strategies for implementing thread pools in the RT-CORBA. Since certain strategies are optimal for certain application domains, users of RT-CORBA middleware must understand the trade-offs between the different strategies. This paper describes the Half-Sync/Half-Async and the Leader/Followers strategies for implementing RT-CORBA thread pools. We evaluate these strategies using several different factors and present results that illustrate empirically how different thread pool implementation strategies perform in different ORB configurations. Our pattern-based descriptions are intended to help application developers and end-users understand the schedulability, scalability, and predictability consequences of a particular thread pool implementation used by their RT-CORBA ORB.</p><p>All the source code, documentation, examples, and tests for TAO and its RT-CORBA mechanisms are open-source and can be downloaded from www.cs.wustl.edu/˜schmidt/ TAO.html.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 : 3 . 10 Figure 3 :</head><label>23103</label><figDesc>Figure 2: Thread Pool without Lanes Thread pool with lanes -In this more advanced model a pool consists of subsets of threads (called lanes) that are assigned different priorities. This model is illustrated in Figure 3.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Buffering Requests in RT-CORBA Thread Pools</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: The Structure of Participants in the Half-Sync/Half-Async Pattern</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Collaboration between Layers in the Half-Sync/Half-Async Pattern</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 8</head><label>8</label><figDesc>Figure 8 illustrates the architecture of a RT-CORBA ORB where thread pools are designed using the Half-Sync/Half-Async pattern. The asynchronous layer performs I/O processing, demultiplexing of incoming requests, and multiplexing of outgoing replies. It consists of the following components:</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Implementing an RT-CORBA Thread Pool Using the Half-Sync/Half-Async Pattern</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: The Structure of Participants in the Leader/Followers Pattern</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head></head><label></label><figDesc>Figure 10: A Thread's State Transitions in the Leader/Followers Pattern</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 11 :Figure 12 :</head><label>1112</label><figDesc>Figure 11: Collaboration Among Participants in the Leader/Followers Pattern</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 13 :</head><label>13</label><figDesc>Figure 13: Performance of Half-Sync/Half-Async vs. the Leader/Followers thread pool implementations</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 1</head><label>1</label><figDesc>summaries the evaluation for Half-Sync/Half-Async implementation of RT-CORBA thread pools.</figDesc><table><row><cell>Criteria</cell><cell>Evaluation</cell></row><row><cell>Feature Support</cell><cell>Good: supports request buffering</cell></row><row><cell></cell><cell>and thread borrowing</cell></row><row><cell>Scalibility</cell><cell>Good: I/O layer resources shared</cell></row><row><cell>Efficiency</cell><cell>Poor: high overhead for data movement,</cell></row><row><cell></cell><cell>context switches, memory allocations, and</cell></row><row><cell></cell><cell>synchronizations</cell></row><row><cell>Optimizations</cell><cell>Poor: stack and TSS memory not supported</cell></row><row><cell cols="2">Priority Inversion Poor: some unbounded, many bounded</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 1 :</head><label>1</label><figDesc>Evaluation of Half-Sync/Half-Async thread pools</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2</head><label>2</label><figDesc>summaries the evaluation for Leader/Followers implementation of RT-CORBA thread pools.</figDesc><table><row><cell>Criteria</cell><cell>Evaluation</cell></row><row><cell>Feature Support</cell><cell>Poor: not easy to support request</cell></row><row><cell></cell><cell>buffering or thread borrowing</cell></row><row><cell>Scalibility</cell><cell>Poor: I/O layer resources not shared</cell></row><row><cell>Efficiency</cell><cell>Good: little or no overhead for data</cell></row><row><cell></cell><cell>movement, memory allocations, or</cell></row><row><cell></cell><cell>synchronizations</cell></row><row><cell>Optimizations</cell><cell>Good: stack and TSS memory supported</cell></row><row><cell cols="2">Priority Inversion Good: little or no priority inversion</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 2 :</head><label>2</label><figDesc>Evaluation of Leader/Followers thread pools Figure13compares the performance of the Half-Sync/Half-Async vs. the Leader/Followers thread pool implementations. These benchmarks were conducted using TAO version 1.0 on a quad-CPU 400 MHz Pentium II Xeon, with 1 GByte RAM, 512 Kb cache on each CPU, running Debian Linux release 2.2.5, and g++ version egcs-2.91.66. Our benchmarks</figDesc><table><row><cell>4 Empirical results</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">An ORB endsystem consists of network interfaces, I/O subsystem and other OS mechanisms, and ORB middleware capabilities.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">For completeness, this paper contains abbreviated descriptions of the Half-Sync/Half-Async and Leader/Followers patterns, focusing on the implementation of thread pools in RT-CORBA. A thorough discussion of these patterns appears in<ref type="bibr" target="#b5">[6]</ref>.</note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">The Common Object Request Broker: Architecture and Specification</title>
+		<imprint>
+			<date type="published" when="2000-10">Oct. 2000</date>
+		</imprint>
+		<respStmt>
+			<orgName>Object Management Group</orgName>
+		</respStmt>
+	</monogr>
+	<note>2.4 ed.</note>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Realtime CORBA Joint Revised Submission</title>
+		<idno>OMG Document orbos/99-02-12</idno>
+		<imprint>
+			<date type="published" when="1999-03">March 1999</date>
+		</imprint>
+		<respStmt>
+			<orgName>Object Management Group</orgName>
+		</respStmt>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">An Overview of the Real-time CORBA Specification</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Kuhns</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer Magazine, Special Issue on Objectoriented Real-time Computing</title>
+		<imprint>
+			<date type="published" when="2000-06">June 2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Evaluating Policies and Mechanisms for Supporting Embedded, Real-Time Applications with CORBA 3.0</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>O'ryan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Kuhns</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Spivak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Parsons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Pyarali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Levine</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 6 th IEEE Real-Time Technology and Applications Symposium</title>
+				<meeting>the 6 th IEEE Real-Time Technology and Applications Symposium<address><addrLine>Washington DC</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2000-05">May 2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">The Design and Performance of Real-Time Object Request Brokers</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">L</forename><surname>Levine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mungee</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computer Communications</title>
+		<imprint>
+			<biblScope unit="volume">21</biblScope>
+			<biblScope unit="page" from="294" to="324" />
+			<date type="published" when="1998-04">Apr. 1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Pattern-Oriented Software Architecture: Patterns for Concurrent and Networked Objects</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Rohnert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Buschmann</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+			<publisher>Wiley &amp; Sons</publisher>
+			<biblScope unit="volume">2</biblScope>
+			<pubPlace>New York, NY</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">The Design and Performance of a Real-time CORBA Event Service</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">H</forename><surname>Harrison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">L</forename><surname>Levine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of OOPSLA &apos;97</title>
+				<meeting>OOPSLA &apos;97<address><addrLine>Atlanta, GA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1997-10">October 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Software Architectures for Reducing Priority Inversion and Non-determinism in Real-time Object Request Brokers</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mungee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Flores-Gaitan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gokhale</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Journal of Real-time Systems, special issue on Real-time Computing in the Age of the Web and the Internet</title>
+				<imprint>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="volume">21</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Measuring the Performance of Parallel Message-based Process Architectures</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Suda</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Conference on Computer Communications (INFOCOM)</title>
+				<meeting>the Conference on Computer Communications (INFOCOM)<address><addrLine>Boston, MA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1995-04">April 1995</date>
+			<biblScope unit="page" from="624" to="633" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Advanced Windows, Third Edition</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Richter</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1997">1997</date>
+			<publisher>Microsoft Press</publisher>
+			<pubPlace>Redmond, WA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Pattern-Oriented Software Architecture -A System of Patterns</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Buschmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Meunier</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Rohnert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sommerlad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stal</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1996">1996</date>
+			<publisher>Wiley and Sons</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Supporting Highperformance I/O in QoS-enabled ORB Middleware</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Kuhns</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>O'ryan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Levine</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Cluster Computing: the Journal on Networks</title>
+		<imprint>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">The Design and Performance of a Real-Time CORBA Scheduling Service</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">D</forename><surname>Gill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">L</forename><surname>Levine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">The International Journal of Time-Critical Computing Systems, special issue on Real-Time Middleware</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<date type="published" when="2001-03">March 2001</date>
+		</imprint>
+	</monogr>
+	<note>Real-Time Systems</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">The Design and Performance of a Pluggable Protocols Framework for Realtime Distributed Object Computing Middleware</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>O'ryan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Kuhns</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Othman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Parsons</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Middleware 2000 Conference</title>
+				<meeting>the Middleware 2000 Conference</meeting>
+		<imprint>
+			<publisher>ACM/IFIP</publisher>
+			<date type="published" when="2000-04">Apr. 2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">The Design and Performance of a Scalable ORB Architecture for CORBA Asynchronous Messaging</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">B</forename><surname>Arulanthu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>O'ryan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kircher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Middleware 2000 Conference</title>
+				<meeting>the Middleware 2000 Conference</meeting>
+		<imprint>
+			<publisher>ACM/IFIP</publisher>
+			<date type="published" when="2000-04">Apr. 2000</date>
+		</imprint>
+	</monogr>
+	<note>Parsons</note>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Applying C++, Patterns, and Components to Develop an IDL Compiler for CORBA AMI Callbacks</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">B</forename><surname>Arulanthu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>O'ryan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kircher</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">C++ Report</title>
+		<imprint>
+			<biblScope unit="volume">12</biblScope>
+			<date type="published" when="2000-03">Mar. 2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Optimizing a CORBA IIOP Protocol Engine for Minimal Footprint Multimedia Systems</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gokhale</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal on Selected Areas in Communications special issue on Service Enabling Platforms for Networked Multimedia Systems</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<date type="published" when="1999-09">Sept. 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Measuring the Performance of Communication Middleware on High-Speed Networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gokhale</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of SIGCOMM &apos;96</title>
+				<meeting>SIGCOMM &apos;96<address><addrLine>Stanford, CA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1996-08">August 1996</date>
+			<biblScope unit="page" from="306" to="317" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Using Principle Patterns to Optimize Real-time ORBs</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Pyarali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>O'ryan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Kachroo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gokhale</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Concurrency Magazine</title>
+		<imprint>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Real-Time CORBA</title>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">F</forename><surname>Wolfe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">C</forename><surname>Dipippo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ginis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Squadrito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Wohlever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Zykh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Johnston</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Third IEEE Real-Time Technology and Applications Symposium</title>
+				<meeting>the Third IEEE Real-Time Technology and Applications Symposium<address><addrLine>Montréal, Canada</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1997-06">June 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Realtime Method Invocations in Distributed Environments</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Fay-Wolfe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">K</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Thuraisingham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Krupp</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+		</imprint>
+		<respStmt>
+			<orgName>University of Rhode Island, Department of Computer Science and Statistics</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Tech. Rep. 95-244</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Architectural Support for Quality of Service for CORBA Objects</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Zinky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">E</forename><surname>Bakken</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Schantz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Theory and Practice of Object Systems</title>
+		<imprint>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="1997">1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Aspect-Oriented Programming</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Kiczales</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 11th European Conference on Object-Oriented Programming</title>
+				<meeting>the 11th European Conference on Object-Oriented Programming</meeting>
+		<imprint>
+			<date type="published" when="1997-06">June 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Comparing and Contrasting Adaptive Middleware Support in Wide-Area and Embedded Distributed Object Applications</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Loyall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gossett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Gill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Schantz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zinky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Pal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Shapiro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Rodrigues</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Atighetchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Karr</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 21st International Conference on Distributed Computing Systems (ICDCS-21)</title>
+				<meeting>the 21st International Conference on Distributed Computing Systems (ICDCS-21)</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2001-04">April 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">The Quorum Program</title>
+		<ptr target="www.darpa.mil/ito/research/quorum/index.html" />
+		<imprint>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+	<note>DARPA</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Object Structures for Real-Time Systems and Simulators</title>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">H K</forename><surname>Kim</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer</title>
+		<imprint>
+			<biblScope unit="page" from="62" to="70" />
+			<date type="published" when="1997-08">Aug. 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Two CORBA Services Enabling TMO Network Programming</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Shokri</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Fourth International Workshop on Object-Oriented, Real-Time Dependable Systems</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1999-01">January 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

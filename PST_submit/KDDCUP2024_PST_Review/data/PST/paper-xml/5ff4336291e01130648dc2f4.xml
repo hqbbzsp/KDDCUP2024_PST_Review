@@ -1,0 +1,1557 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Prefix-Tuning: Optimizing Continuous Prompts for Generation</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2021-01-01">1 Jan 2021</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Lisa</forename><surname>Xiang</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Stanford University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><surname>Li</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Stanford University</orgName>
+							</affiliation>
+						</author>
+						<author role="corresp">
+							<persName><forename type="first">Percy</forename><surname>Liang</surname></persName>
+							<email>pliang@cs.stanford.edu</email>
+							<affiliation key="aff1">
+								<orgName type="institution">Stanford University</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Prefix-Tuning: Optimizing Continuous Prompts for Generation</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2021-01-01">1 Jan 2021</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2101.00190v1[cs.CL]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:04+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Fine-tuning is the de facto way to leverage large pretrained language models to perform downstream tasks. However, it modifies all the language model parameters and therefore necessitates storing a full copy for each task. In this paper, we propose prefix-tuning, a lightweight alternative to fine-tuning for natural language generation tasks, which keeps language model parameters frozen, but optimizes a small continuous task-specific vector (called the prefix). Prefix-tuning draws inspiration from prompting, allowing subsequent tokens to attend to this prefix as if it were "virtual tokens". We apply prefix-tuning to GPT-2 for table-to-text generation and to BART for summarization. We find that by learning only 0.1% of the parameters, prefix-tuning obtains comparable performance in the full data setting, outperforms fine-tuning in low-data settings, and extrapolates better to examples with topics unseen during training.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Fine-tuning is the prevalent paradigm for using large pretrained language models (LMs) <ref type="bibr" target="#b26">(Radford et al., 2019;</ref><ref type="bibr" target="#b5">Devlin et al., 2019)</ref> to perform downstream tasks (e.g., summarization), but it requires updating and storing all the parameters of the LM. Consequently, to build and deploy NLP systems that rely on large pretrained LMs, one currently needs to store a modified copy of the LM parameters for each task. This can be prohibitively expensive, given the large size of current LMs; for example, GPT-2 has 774M parameters <ref type="bibr" target="#b26">(Radford et al., 2019)</ref> and GPT-3 has 175B parameters <ref type="bibr">(Brown et al., 2020)</ref>.</p><p>A natural approach to this problem is lightweight fine-tuning, which freezes most of the pretrained parameters and augments the model with small trainable modules. For example, adapter-tuning Figure <ref type="figure">1</ref>: Fine-tuning (top) updates all Transformer parameters (the red Transformer box) and requires storing a full model copy for each task. We propose prefix-tuning (bottom), which freezes the Transformer parameters and only optimizes the prefix (the red prefix blocks). Consequently, we only need to store the prefix for each task, making prefix-tuning modular and space-efficient. Note that each vertical block denote transformer activations at one time step. <ref type="bibr" target="#b29">(Rebuffi et al., 2017;</ref><ref type="bibr" target="#b7">Houlsby et al., 2019)</ref> inserts additional task-specific layers between the layers of pretrained language models. Adapter-tuning has promising performance on natural language understanding and generation benchmarks, attaining comparable performance with fine-tuning while adding only around 2-4% task-specific parameters <ref type="bibr" target="#b7">(Houlsby et al., 2019;</ref><ref type="bibr" target="#b15">Lin et al., 2020)</ref>.</p><p>On the extreme end, GPT-3 <ref type="bibr">(Brown et al., 2020</ref>) can be deployed without any task-specific tuning. Instead, users prepend a natural language task instruction (e.g., TL;DR for summarization) and a few examples to the task input; then generate the output from the LM. This approach is known as in-context learning or prompting.</p><p>In this paper, we propose prefix-tuning, a lightweight alternative to fine-tuning for natural language generation (NLG) tasks, inspired by prompting. Consider the task of generating a textual de-scription of a data table, as shown in Figure <ref type="figure">1</ref>, where the task input is a linearized table (e.g., "name: Starbucks | type: coffee shop") and the output is a textual description (e.g., "Starbucks serves coffee."). Prefix-tuning prepends a sequence of continuous task-specific vectors to the input, which we call a prefix, depicted by red blocks in Figure <ref type="figure">1</ref> (bottom). For subsequent tokens, the Transformer can attend to the prefix as if it were a sequence of "virtual tokens", but unlike prompting, the prefix consists entirely of free parameters which do not correspond to real tokens. In contrast to fine-tuning in Figure <ref type="figure">1</ref> (top), which updates all Transformer parameters and thus requires storing a tuned copy of the model for each task, prefix-tuning only optimizes the prefix. Consequently, we only need to store one copy of the large Transformer and a learned task-specific prefix, yielding a very small overhead for each additional task (e.g., 250K parameters for table-to-text).</p><p>In contrast to fine-tuning, prefix-tuning is modular: we train an upstream prefix which steers a downstream LM, which remains unmodified. Thus, a single LM can support many tasks at once. In the context of personalization where the tasks correspond to different users <ref type="bibr" target="#b34">(Shokri and Shmatikov, 2015;</ref><ref type="bibr" target="#b20">McMahan et al., 2016)</ref>, we could have a separate prefix for each user trained only on that user's data, thereby avoiding data cross-contamination. Moreover, the prefix-based architecture enables us to even process examples from multiple users/tasks in a single batch, something that is not possible with other lightweight fine-tuning approaches.</p><p>We evaluate prefix-tuning on table-to-text generation using GPT-2 and abstractive summarization using BART. In terms of storage, prefix-tuning stores 1000x fewer parameters than fine-tuning. In terms of performance when trained on full datasets, prefix-tuning and fine-tuning are comparable for table-to-text ( §6.1), while prefix-tuning suffers a small degradation for summarization ( §6.2). In lowdata settings, prefix-tuning on average outperforms fine-tuning on both tasks ( §6.3). Prefix-tuning also extrapolates better to tables (for table-to-text) and articles (for summarization) with unseen topics ( §6.4).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Related Work</head><p>Fine-tuning for natural language generation. Current state-of-the-art systems for natural language generation are based on fine-tuning pre-trained LMs. For table-to-text generation, Kale (2020) fine-tunes a sequence-to-sequence model (T5; <ref type="bibr" target="#b28">Raffel et al., 2020)</ref>. For extractive and abstractive summarization, researchers fine-tune masked language models (e.g., BERT; <ref type="bibr" target="#b5">Devlin et al., 2019)</ref> and encode-decoder models (e.g., BART; <ref type="bibr" target="#b13">Lewis et al., 2020)</ref> respectively <ref type="bibr" target="#b46">(Zhong et al., 2020;</ref><ref type="bibr" target="#b16">Liu and Lapata, 2019;</ref><ref type="bibr" target="#b28">Raffel et al., 2020)</ref>. For other conditional NLG tasks such as machine translation and dialogue generation, fine-tuning is also the prevalent paradigm <ref type="bibr" target="#b43">(Zhang et al., 2020c;</ref><ref type="bibr" target="#b36">Stickland et al., 2020;</ref><ref type="bibr" target="#b47">Zhu et al., 2020;</ref><ref type="bibr" target="#b17">Liu et al., 2020)</ref>. In this paper, we focus on table-to-text using GPT-2 and summarization using BART, but prefix-tuning can be applied to other generation tasks and pretrained models.</p><p>Lightweight fine-tuning. Lightweight finetuning freezes most of the pretrained parameters and modifies the pretrained model with small trainable modules. The key challenge is to identify high-performing architectures of the modules and the subset of pretrained parameters to tune. One line of research considers removing parameters: some model weights are ablated away by training a binary mask over model parameters <ref type="bibr" target="#b44">(Zhao et al., 2020;</ref><ref type="bibr" target="#b27">Radiya-Dixit and Wang, 2020)</ref>. Another line of research considers inserting parameters. For example, <ref type="bibr" target="#b41">Zhang et al. (2020a)</ref> trains a "side" network that is fused with the pretrained model via summation; adapter-tuning inserts task-specific layers (adapters) between each layer of the pretrained LM <ref type="bibr" target="#b7">(Houlsby et al., 2019;</ref><ref type="bibr" target="#b15">Lin et al., 2020;</ref><ref type="bibr" target="#b29">Rebuffi et al., 2017;</ref><ref type="bibr" target="#b24">Pfeiffer et al., 2020)</ref>. Compared to this line of work, which tunes around 3.6% of the LM parameters, our method obtains a further 30x reduction in task-specific parameters, tuning only 0.1% while maintaining comparable performance.</p><p>Prompting. Prompting means prepending instructions and a few examples to the task input and generating the output from the LM. GPT-3 <ref type="bibr">(Brown et al., 2020)</ref> uses manually designed prompts to adapt its generation for different tasks, and this framework is termed in-context learning. However, since Transformers can only condition on a bounded-length context (e.g., 2048 tokens for GPT-3), in-context learning is unable to fully exploit training sets longer than the context window. Sun and Lai (2020) also prompt by keywords to control for sentiment or topic of the generated sentence. In natural language understanding tasks, prompt engineering has been explored in prior works for models like BERT and RoBERTa <ref type="bibr">(Liu et al., 2019;</ref><ref type="bibr" target="#b8">Jiang et al., 2020;</ref><ref type="bibr" target="#b30">Schick and Schütze, 2020)</ref>. For example, AutoPrompt <ref type="bibr" target="#b33">(Shin et al., 2020)</ref> searches for a sequence of discrete trigger words and concatenates it with each input to elicit sentiment or factual knowledge from a masked LM. In contrast with AutoPrompt, our method optimizes continuous prefixes, which are more expressive ( §7.2); moreover, we focus on language generation tasks.</p><p>Continuous vectors have been used to steer language models; for example, <ref type="bibr" target="#b37">Subramani et al. (2020)</ref> showed that a pretrained LSTM language model can reconstruct arbitrary sentences by optimizing a continuous vector for each sentence, making the vector input-specific. In contrast, prefix-tuning optimizes a task-specific prefix that applies to all instances of that task. As a result, unlike the previous work whose application is limited to sentence reconstruction, prefix-tuning can be applied to NLG tasks.</p><p>Controllable generation. Controllable generation aims to steer a pretrained language model to match a sentence level attribute (e.g., positive sentiment or topic on sports). Such control can happen at training time: <ref type="bibr" target="#b10">Keskar et al. (2019)</ref> pretrains the language model (CTRL) to condition on metadata such as keywords or URLs. Additionally, the control can happen at decoding time, by weighted decoding (GeDi, <ref type="bibr" target="#b11">Krause et al., 2020)</ref> or iteratively updating the past activations (PPLM, <ref type="bibr" target="#b4">Dathathri et al., 2020)</ref>. However, there is no straightforward way to apply these controllable generation techniques to enforce fine-grained control over generated contents, as demanded by tasks like table-to-text and summarization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Problem Statement</head><p>Consider a conditional generation task where the input is a context x and the output y is a sequence of tokens. We focus on two tasks, shown in <ref type="bibr">Figure 2 (right)</ref>: In table-to-text, x corresponds to a linearized data table and y is a textual description; in summarization, x is an article and y is a short summary.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Autoregressive LM</head><p>Assume we have an autoregressive language model p φ (y | x) based on the Transformer <ref type="bibr" target="#b38">(Vaswani et al., 2017)</ref> architecture (e.g., GPT-2; <ref type="bibr" target="#b26">Radford et al., 2019)</ref> and parametrized by φ. As shown in <ref type="bibr">Figure 2 (top)</ref>, let z = [x; y] be the concatenation of x and y; let X idx denote the sequence of indices that corresponds to x, and Y idx denote the same for y.</p><p>The activation at time step i is h i ∈ R d , where</p><formula xml:id="formula_0">h i = [h (1) i ; • • • ; h (n)</formula><p>i ] is a concatenation of all activation layers at this time step, and h (j) i is the activation of the j-th Transformer layer at time step i. <ref type="foot" target="#foot_0">1</ref>The autoregressive Transformer model computes h i as a function of z i and the past activations in its left context, as follows:</p><formula xml:id="formula_1">h i = LM φ (z i , h &lt;i ),<label>(1)</label></formula><p>where the last layer of h i is used to compute the distribution for the next token:</p><formula xml:id="formula_2">p φ (z i+1 | h ≤i ) = softmax(W φ h (n) i ) and W φ is a pretrained matrix that map h (n) i</formula><p>to logits over the vocabulary.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Encoder-Decoder Architecture</head><p>We can also use an encoder-decoder architecture (e.g., BART; <ref type="bibr" target="#b13">Lewis et al., 2020)</ref> to model p φ (y | x), where x is encoded by the bidirectional encoder, and the decoder predicts y autoregressively (conditioned on the encoded x and its left context). We use the same indexing and activation notation, as shown in Figure <ref type="figure" target="#fig_0">2</ref> (bottom). h i for all i ∈ X idx is computed by the bidirectional Transformer encoder; h i for all i ∈ Y idx is computed by the autoregressive decoder using the same equation (1).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Method: Fine-tuning</head><p>In the fine-tuning framework, we initialize with the pretrained parameters φ. Here p φ is a trainable language model distribution and we perform gradient updates on the following log-likelihood objective:</p><formula xml:id="formula_3">max φ log p φ (y | x) = i∈Y idx log p φ (z i | h &lt;i ). (2)</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Prefix-Tuning</head><p>We propose prefix-tuning as an alternative to fine-tuning for conditional generation tasks. We first provide intuition in §4.1 before defining our method formally in §4.2. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Intuition</head><p>Based on intuition from prompting, we believe that having a proper context can steer the LM without changing its parameters. For example, if we want the LM to generate a word (e.g., Obama), we can prepend its common collocations as context (e.g., Barack), and the LM will assign much higher probability to the desired word. Extending this intuition beyond generating a single word or sentence, we want to find a context that steers the LM to solve an NLG task. Intuitively, the context can influence the encoding of x by guiding what to extract from x; and can influence the generation of y by steering the next token distribution. However, it's non-obvious whether such a context exists. Natural language task instructions (e.g., "summarize the following table in one sentence") might guide an expert annotator to solve the task, but fail for most pretrained LMs.<ref type="foot" target="#foot_1">2</ref> Data-driven optimization over the discrete instructions might help, but discrete optimization is computationally challenging.</p><p>Instead of optimizing over discrete tokens, we can optimize the instruction as continuous word embeddings, whose effects will be propagated upward to all Transformer activation layers and rightward to subsequent tokens. This is strictly more expressive than a discrete prompt which requires matching the embedding of a real word. Meanwhile, this is less expressive than intervening all layers of the activations ( §7.2), which avoids long-range dependencies and includes more tunable parameters. Prefix-tuning, therefore, optimizes all layers of the prefix.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Method</head><p>Prefix-tuning prepends a prefix for an autoregressive LM to obtain z = [PREFIX; x; y], or prepends prefixes for both encoder and encoder to obtain z = [PREFIX; x; PREFIX ; y], as shown in Figure <ref type="figure" target="#fig_0">2</ref>. Here, P idx denotes the sequence of prefix indices, and we use |P idx | to denote the length of the prefix.</p><p>We follow the recurrence relation in equation (1), except that the prefix are free parameters. Prefix-tuning initializes a trainable matrix P θ (parametrized by θ) of dimension |P idx | × dim(h i ) to store the prefix parameters.</p><formula xml:id="formula_4">h i = P θ [i, :], if i ∈ P idx , LM φ (z i , h &lt;i ), otherwise.</formula><p>(3)</p><p>The training objective is the same as equation ( <ref type="formula">2</ref>), but the set of trainable parameters changes: the language model parameters φ are fixed and the prefix parameters θ are the only trainable parameters.</p><p>Here, h i (for all i) is a function of the trainable P θ . When i ∈ P idx , this is clear because h i copies directly from P θ . When i ∈ P idx , h i still depends on P θ , because the prefix activations are always in the left context and will therefore affect any activations to its right.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Parametrization of P θ</head><p>Empirically, directly updating the P θ parameters leads to unstable optimization and a slight drop in performance. 3 So we reparametrize the matrix P θ [i, :] = MLP θ (P θ [i, :]) by a smaller matrix (P θ ) composed with a large feedforward neural network (MLP θ ). Note that P θ and P θ has the same rows dimension (i.e. the prefix length), but different columns dimension. <ref type="foot" target="#foot_3">4</ref> Once training is complete, these reparametrization parameters can be dropped, and only the prefix (P θ ) needs to be saved.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Experimental Setup</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Datasets and Metrics</head><p>We evaluate on three standard neural generation datasets for the table-to-text task: E2E <ref type="bibr" target="#b22">(Novikova et al., 2017)</ref>, WebNLG <ref type="bibr" target="#b6">(Gardent et al., 2017)</ref>, and DART <ref type="bibr" target="#b25">(Radev et al., 2020)</ref>. The datasets are ordered by increasing complexity and size. E2E only has 1 domain (i.e. restaurant reviews); WebNLG has 14 domains, and DART is open-domain, using open-domain tables from Wikipedia.</p><p>The E2E dataset contains approximately 50K examples with 8 distinct fields; it contains multiple test references for one source table, and the average output length is 22.9. We use the official evaluation script, which reports BLEU <ref type="bibr" target="#b23">(Papineni et al., 2002)</ref>, NIST <ref type="bibr" target="#b1">(Belz and Reiter, 2006)</ref>, METEOR <ref type="bibr" target="#b12">(Lavie and Agarwal, 2007)</ref>, ROUGE-L <ref type="bibr" target="#b14">(Lin, 2004), and</ref><ref type="bibr">CIDEr (Vedantam et al., 2015)</ref>.</p><p>The WebNLG <ref type="bibr" target="#b6">(Gardent et al., 2017)</ref> dataset consists of 22K examples, and the input x is a sequence of (subject, property, object) triples. The average output length is 22.5. In the training and validation splits, the input describes entities from 9 distinct DBpedia categories (e.g., Monument). The test split consists of two parts: the first half contains DB categories seen in training data, and the second half contains 5 unseen categories. These unseen categories are used to evaluate extrapolation. We use the official evaluation script, which reports BLEU, METEOR and TER <ref type="bibr" target="#b35">(Snover et al., 2006)</ref>.</p><p>DART <ref type="bibr" target="#b25">(Radev et al., 2020)</ref> is an open domain table-to-text dataset, with similar input format (entity-relation-entity triples) as WebNLG. The average output length is 21.6. It consists of 82K examples from WikiSQL, WikiTableQuestions, E2E, and WebNLG and applies some manual or automated conversion. We use the official evaluation script and report BLEU, METEOR, TER, Mover-Score <ref type="bibr" target="#b45">(Zhao et al., 2019)</ref>, BERTScore <ref type="bibr" target="#b42">(Zhang et al., 2020b)</ref> and BLEURT <ref type="bibr" target="#b31">(Sellam et al., 2020)</ref>.</p><p>For the summarization task, we use the XSUM <ref type="bibr" target="#b21">(Narayan et al., 2018)</ref> dataset, which is an abstrac-tive summarization dataset on news articles. There are 225K examples. The average length of the articles is 431 words and the average length of the summaries is 23.3. We report ROUGE-1, ROUGE-2 and ROUGE-L.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Methods</head><p>For table-to-text generation, we compare prefixtuning with three other methods: fine-tuning (FINE-TUNE), fine-tuning only the top 2 layers (FT-TOP2), and adapter-tuning (ADAPTER). <ref type="foot" target="#foot_5">5</ref> We also report the current state-of-the-art results on these datasets: On E2E, <ref type="bibr" target="#b32">Shen et al. (2019)</ref> uses a pragmatically informed model without pretraining. On WebNLG, Kale (2020) fine-tunes T5-large. On DART, no official models trained on this dataset version are released. <ref type="foot" target="#foot_6">6</ref> For summarization, we compare against fine-tuning BART <ref type="bibr" target="#b13">(Lewis et al., 2020)</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Architectures and Hyperparameters</head><p>For table-to-text, we use GPT-2 MEDIUM and GPT-2 LARGE ; the source tables are linearized. <ref type="foot" target="#foot_7">7</ref> For summarization, we use BART LARGE ,<ref type="foot" target="#foot_8">8</ref> and the source articles are truncated to 512 BPE tokens.</p><p>Our implementation is based on the Hugging Face Transformer models <ref type="bibr" target="#b40">(Wolf et al., 2020)</ref>.</p><p>At training time, we use the AdamW optimizer <ref type="bibr" target="#b19">(Loshchilov and Hutter, 2019</ref>) and a linear learning rate scheduler, as suggested by the Hugging Face default setup. The hyperparameters we tune include the number of epochs, batch size, learning rate, and prefix length. Hyperparameter details are in the appendix. A default setting trains for 10 epochs, using a batch size of 5, a learning rate of 5 • 10 −5 and a prefix length of 10. The table-to-text models are trained on TITAN Xp or GeForce GTX TITAN X machines. Prefix-tuning takes 0.2 hours per epochs to train on 22K examples , whereas finetuning takes around 0.3 hours. The summarization models are trained on Tesla V100 machines, taking 1.25h per epoch on the XSUM dataset.</p><p>At decoding time, for the three table-to-text datasets, we use beam search with a beam size of 5. For summarization, we use a beam size of 6 and length normalization of 0.8. Decoding takes 1.2 seconds per sentence (without batching) for table-to-text, and 2.6 seconds per batch (using a batch size of 10) for summarization.</p><p>6 Main Results</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Table-to-text Generation</head><p>We find that adding only 0.1% task-specific parameters,<ref type="foot" target="#foot_9">9</ref> prefix-tuning is effective in table-to-text generation, outperforming other lightweight baselines (ADAPTER and FT-TOP2) and achieving a comparable performance with fine-tuning. This trend is true across all three datasets: E2E, WebNLG,<ref type="foot" target="#foot_10">10</ref> and DART.</p><p>For a fair comparison, we match the number of parameters for prefix-tuning and adapter-tuning to be 0.1%. Table <ref type="table" target="#tab_1">1</ref> shows that prefix-tuning is significantly better than ADAPTER (0.1%), attaining 4.1 BLEU improvement per dataset on average. Even when we compare with fine-tuning (100%) and adapter-tuning (3.0%), which update significantly more parameters than prefix-tuning, prefixtuning still achieves results comparable or better than those two systems. This demonstrates that prefix-tuning is more Pareto efficient than adaptertuning, significantly reducing parameters while improving generation quality.</p><p>Additionally, attaining good performance on DART suggests that prefix-tuning can generalize to tables with diverse domains and a large pool of relations. We will delve deeper into extrapolation performance (i.e. generalization to unseen categories or topics) in §6.4.</p><p>Overall, prefix-tuning is an effective and spaceefficient method to adapt GPT-2 to table-to-text generation. The learned prefix is expressive enough to steer GPT-2 in order to correctly extract contents from an unnatural format and generate a textual description. Prefix-tuning also scales well from GPT-2 MEDIUM to GPT-2 LARGE , suggesting it has the potential to scale to even larger models with a similar architecture, like GPT-3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Summarization</head><p>As shown in Table <ref type="table">2</ref>, with 2% parameters, prefixtuning obtains slightly lower performance than fine-tuning (36.05 vs. 37.25 in ROUGE-L). With only 0.1% parameters, prefix-tuning underperforms full fine-tuning (35.05 vs. 37.25). There are several differences between XSUM and the three table-totext datasets which could account for why prefixtuning has comparative advantage in table-to-text:</p><p>(1) XSUM contains 4x more examples than the three table-to-text datasets on average; (2) the input articles are 17x longer than the linearized table input of table-to-text datasets on average; (3) summarization might be more complex than table-totext because it requires reading comprehension and identifying key contents from an article.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Low-data Setting</head><p>Based on the results from table-to-text ( §6.1) and summarization ( §6.2), we observe that prefixtuning has a comparative advantage when the number of training examples is smaller. To construct low-data settings, we subsample the full dataset (E2E for table-to-text and XSUM for summarization) to obtain small datasets of size {50, 100, 200, 500}. For each size, we sample 5 different datasets and average over 2 training random seeds. Thus, we average over 10 models to get an estimate for each low-data setting. <ref type="foot" target="#foot_11">11</ref>Figure <ref type="figure">3</ref> (right) shows that prefix-tuning outperforms fine-tuning in low-data regimes by 2.9 BLEU on average, in addition to requiring many fewer parameters, but the gap narrows as the dataset size increases.</p><p>Qualitatively, Figure <ref type="figure">3</ref> (left) shows 8 examples generated by both prefix-tuning and fine-tuning models trained on different data levels. While both methods tend to undergenerate (missing table contents) in low data regimes, prefix-tuning tends to be more faithful than fine-tuning. For example, finetuning (100, 200)<ref type="foot" target="#foot_12">12</ref> falsely claims a low customer rating while the true rating is average, whereas prefix-tuning (100, 200) generates a description that is faithful to the table.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4">Extrapolation</head><p>We now investigate extrapolation performance to unseen topics for both table-to-text and summarization. In order to construct an extrapolation setting, we split the existing datasets so that training and test cover different topics. For In news-to-sports, we train on news articles, 13 XSUM dataset is drawn from BBC news, and we identify the topic of each article based on their URLs. Since "news" and "sports" are the two domains with the most articles, we create our first train/test split. Additionally, "news" has subdomains such as "UK", "world", and "technology". Consequently, we create a second data split, using the top 3 news subdomains as training data and the rest as test data.  Table <ref type="table">3</ref>: Extrapolation performance on XSUM. Prefixtuning outperforms fine-tuning on both news-to-sports and within-news splits.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>news-to-sports within-news</head><formula xml:id="formula_5">R-1 ↑ R-2 ↑ R-L ↑ R-1 ↑ R-2 ↑ R-L ↑</formula><p>and test on sports articles. In within-news, we train on {world, UK, business} news, and test on the remaining news categories (e.g., health, technology).</p><p>On both table-to-text and summarization, prefixtuning has better extrapolation than fine-tuning under all metrics, as shown in Table <ref type="table">3</ref> and the 'U' columns of Table <ref type="table" target="#tab_1">1</ref> </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>(middle).</head><p>We also find that adapter-tuning achieves good extrapolation performance, comparable with prefixtuning, as shown in Table <ref type="table" target="#tab_1">1</ref>. This shared trend suggests that preserving LM parameters indeed has a positive impact on extrapolation. However, the  <ref type="bibr">-to-text (right)</ref>. Performance increases as the prefix length increases up to a threshold (200 for summarization and 10 for table-to-text) and then a slight performance drop occurs. Each plot reports two metrics (on two vertical axes).</p><p>reason for such gains is an open question and we will discuss further in §8.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Intrinsic Evaluation</head><p>We compare different variants of prefix-tuning.</p><p>§7.1 studies the impact of the prefix length. §7.2 studies tuning only the embedding layer, which is more akin to tuning a discrete prompt. §7.3 compares prefixing and infixing, which inserts trainable activations between x and y. §7.4 studies the impact of various prefix initialization strategies.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.1">Prefix Length</head><p>A longer prefix means more trainable parameters, and therefore more expressive power. Figure <ref type="figure" target="#fig_1">4</ref> shows that performance increases as the prefix length increases up to a threshold (200 for summarization, 10 for table-to-text) and then a slight performance drop occurs. 14  Empirically, longer prefixes have a negligible impact on inference speed, because attention computation over the entire prefix is parallellized on GPUs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.2">Full vs Embedding-only</head><p>Recall in §4.1, we discuss the option of optimizing the continuous embeddings of the "virtual tokens." We instantiate that idea and call it embedding-only ablation. The word embeddings are free parameters, and the upper activation layers are computed by the Transformer. Table <ref type="table">4</ref> (top) shows that the performance drops significantly, suggesting that tuning only the embedding layer is not sufficiently expressive.</p><p>The embedding-only ablation upper bounds the performance of discrete prompt optimization (Shin   14 Prefixes longer than the threshold lead to lower training loss, but slightly worse test performance, suggesting that they tend to overfit the training data.  et al., 2020), because discrete prompt restricts the embedding layer to exactly match the embedding of a real word. Consequently, we have this chain of increasing expressive power: discrete prompting &lt; embedding-only ablation &lt; prefix-tuning.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.3">Prefixing vs Infixing</head><p>We also investigate how the trainable activations' position in the sequence affects performance. In prefix-tuning, we place them at the beginning [PREFIX; x; y]. We can also place the trainable activations between x and y (i.e. [x; INFIX; y]) and call this infix-tuning. Table <ref type="table">4</ref> (bottom) shows that infix-tuning slightly underperforms prefix-tuning. We believe this is because prefix-tuning can affect the activations of x and y whereas infix-tuning can only influence the activations of y.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.4">Initialization</head><p>We find that how the prefix is initialized has a large impact in low-data settings. Random initialization leads to low performance with high variance.</p><p>Initializing the prefix with activations of real words significantly improves generation, as shown in Figure <ref type="figure" target="#fig_2">5</ref>. In particular, initializing with task relevant words such as "summarization" and "table-to-text" obtains slightly better performance than task irrelevant words such as "elephant" and "divide", but using real words is still better than random.</p><p>Since we initialize the prefix with activations of real words computed by the LM, this initialization strategy is concordant with preserving the pretrained LM as much as possible.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">Discussion</head><p>In this section, we will discuss several favorable properties of prefix-tuning and some open problems.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.1">Personalization</head><p>As we note in §1, prefix-tuning is advantageous when there are a large number of tasks that needs to be trained independently. One practical setting is user privacy <ref type="bibr" target="#b34">(Shokri and Shmatikov, 2015;</ref><ref type="bibr" target="#b20">McMahan et al., 2016)</ref>. In order to preserve user privacy, each user's data needs to be separated and a personalized model needs to be trained independently for each user. Consequently, each user can be regarded as an independent task. If there are millions of users, prefix-tuning can scale to this setting and maintain modularity, enabling flexible addition or deletion of users by adding or deleting their prefixes without cross-contamination.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.2">Batching Across Users</head><p>Under the same personalization setting, prefixtuning allows batching different users' queries even though they are backed by different prefixes. When multiple users query a cloud GPU device with their inputs, it is computationally efficient to put these users in the same batch. Prefix-tuning keeps the shared LM intact; consequently, batching requires a simple step of prepending the personalized prefix to user input, and all the remaining computation is unchanged. In contrast, we can't batch across different users in adapter-tuning, which has personalized adapters between shared Transformer layers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.3">Inductive Bias of Prefix-tuning</head><p>Recall that fine-tuning updates all pretrained parameters, whereas prefix-tuning and adapter-tuning preserve them. Since the language models are pretrained on general purpose corpus, preserving the LM parameters might help generalization to domains unseen during training. In concordance with this intuition, we observe that both prefix-tuning and adapter-tuning have significant performance gain in extrapolation settings ( §6.4); however, the reason for such gain is an open question.</p><p>While prefix-tuning and adapter-tuning both freeze the pretrained parameters, they tune different sets of parameters to affect the activation layers of the Transformer. Recall that prefix-tuning keeps the LM intact and uses the prefix and the pretrained attention blocks to affect the subsequent activations; adapter-tuning inserts trainable modules between LM layers, which directly add residual vectors to the activations. Moreover, we observe that prefixtuning requires vastly fewer parameters compared to adapter-tuning while maintaining comparable performance. We think this gain in parameter efficiency is because prefix-tuning keeps the pretrained LM intact as much as possible, and therefore exploits the LM more than adapter-tuning.</p><p>Concurrent work by <ref type="bibr" target="#b0">Aghajanyan et al. (2020)</ref> uses intrinsic dimension to show that there exists a low dimension reparameterization that is as effective for fine-tuning as the full parameter space. This explains why good accuracy on downstream task can be obtained by updating only a small number of parameters. Our work echoes the finding by showing that good generation performance can be attained by updating a very small prefix.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9">Conclusion</head><p>We have proposed prefix-tuning, a lightweight alternative to fine-tuning that prepends a trainable continuous prefix for NLG tasks. We discover that despite learning 1000x fewer parameters than finetuning, prefix-tuning can maintain a comparable performance in a full data setting and outperforms fine-tuning in both low-data and extrapolation settings.  A Supplementary Material</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.1 Hyperparameters</head><p>In Table <ref type="table" target="#tab_4">5</ref>, we report the hyperparameters used to train the models documented in the experiment section.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.2 Additional Results for Low-data Settings</head><p>Figure <ref type="figure">6</ref> supplements the low-data performance curves in Figure <ref type="figure">3</ref> by plotting the relationship between training size and generation metrics for both prefix-tuning and fine-tuning.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.3 Additional Results for the Initialization Experiment</head><p>Figure <ref type="figure">7</ref> supplements Figure <ref type="figure">3</ref> by plotting additional metrics for our initialization technique §7.4. It validates that random initialization (from a uniform (0,1) distirbution) significantly underperforms initializing with real words; Additionally, initializing with task-relevant words (e.g., "summarization" and "table-to-text") attains slightly better generation scores than initializing with task-irrelevant words (e.g., "elephant" and "banana").  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.4 Qualitative Examples for Extrapolation</head></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: An annotated example of prefix-tuning using an autoregressive LM (top) and an encoder-decoder model (bottom). The prefix activations ∀i ∈ P idx , h i are drawn from a trainable matrix P θ . The remaining activations are computed by the Transformer.</figDesc><graphic url="image-2.png" coords="4,72.00,62.81,453.53,153.00" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 4 :</head><label>4</label><figDesc>Figure4: Prefix length vs. performance on summerization (left) and table-to-text (right). Performance increases as the prefix length increases up to a threshold (200 for summarization and 10 for table-to-text) and then a slight performance drop occurs. Each plot reports two metrics (on two vertical axes).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Initializing the prefix with activations of real words significantly outperforms random initialization, in low-data settings.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>table -</head><label>-</label><figDesc></figDesc><table><row><cell></cell><cell>E2E</cell><cell></cell><cell></cell><cell></cell><cell>WebNLG</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>DART</cell></row><row><cell></cell><cell>BLEU NIST MET R-L CIDEr</cell><cell>BLEU</cell><cell></cell><cell></cell><cell>MET</cell><cell></cell><cell></cell><cell>TER ↓</cell><cell></cell><cell>BLEU MET TER ↓ Mover BERT BLEURT</cell></row><row><cell></cell><cell>S</cell><cell>U</cell><cell>A</cell><cell>S</cell><cell>U</cell><cell>A</cell><cell>S</cell><cell>U</cell><cell>A</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">GPT-2 MEDIUM</cell><cell></cell><cell></cell></row><row><cell>FINE-TUNE</cell><cell cols="10">68.2 8.62 46.2 71.0 2.47 64.2 27.7 46.5 0.45 0.30 0.38 0.33 0.76 0.53 46.2 0.39 0.46</cell><cell>0.50</cell><cell>0.94</cell><cell>0.39</cell></row><row><cell>FT-TOP2</cell><cell cols="10">68.1 8.59 46.0 70.8 2.41 53.6 18.9 36.0 0.38 0.23 0.31 0.49 0.99 0.72 41.0 0.34 0.56</cell><cell>0.43</cell><cell>0.93</cell><cell>0.21</cell></row><row><cell>ADAPTER(3%)</cell><cell cols="10">68.9 8.71 46.1 71.3 2.47 60.4 48.3 54.9 0.43 0.38 0.41 0.35 0.45 0.39 45.2 0.38 0.46</cell><cell>0.50</cell><cell>0.94</cell><cell>0.39</cell></row><row><cell cols="11">ADAPTER(0.1%) 66.3 8.41 45.0 69.8 2.40 54.5 45.1 50.2 0.39 0.36 0.38 0.40 0.46 0.43 42.4 0.36 0.48</cell><cell>0.47</cell><cell>0.94</cell><cell>0.33</cell></row><row><cell>PREFIX(0.1%)</cell><cell cols="10">69.7 8.81 46.1 71.4 2.49 62.9 45.6 55.1 0.44 0.38 0.41 0.35 0.49 0.41 46.4 0.38 0.46</cell><cell>0.50</cell><cell>0.94</cell><cell>0.39</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">GPT-2 LARGE</cell><cell></cell><cell></cell></row><row><cell>FINE-TUNE</cell><cell cols="10">68.5 8.78 46.0 69.9 2.45 65.3 43.1 55.5 0.46 0.38 0.42 0.33 0.53 0.42 47.0 0.39 0.46</cell><cell>0.51</cell><cell>0.94</cell><cell>0.40</cell></row><row><cell>Prefix</cell><cell cols="10">70.3 8.85 46.2 71.7 2.47 63.4 47.7 56.3 0.45 0.39 0.42 0.34 0.48 0.40 46.7 0.39 0.45</cell><cell>0.51</cell><cell>0.94</cell><cell>0.40</cell></row><row><cell>SOTA</cell><cell cols="7">68.6 8.70 45.3 70.8 2.37 63.9 52.8 57.1 0.46 0.41 0.44 -</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>to-text, the</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 :</head><label>1</label><figDesc>Metrics (higher is better, except for TER) for table-to-text generation on E2E (left), WebNLG (middle) and DART (right). With only 0.1% parameters, Prefix-tuning outperforms other lightweight baselines and achieves a comparable performance with fine-tuning. The best score is boldfaced for both GPT-2 MEDIUM and GPT-2 LARGE . The Eagle is a cheap coffee shop located in the riverside near Burger King. It has average customer ratings. Prefix (200) The Eagle is a cheap Chinese coffee shop located in the riverside area near Burger King. It has average customer ratings. Prefix (500) The Eagle is a coffee shop that serves Chinese food. It is located in the riverside area near Burger King. It has an average customer rating and is not family friendly.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>15</cell></row><row><cell>Source Prefix (50) Prefix (100) FT (50) FT (100) FT (200)</cell><cell cols="3">name : The Eagle | type : coffee shop | food : Chinese | price : cheap | customer rating : average | area : riverside | family friendly : no | near : Burger King The Eagle is a cheap Chinese coffee shop located near Burger King. rouge-1 The Eagle coffee shop is located in the riverside area near Burger King. The Eagle is a cheap coffee shop near Burger King in the riverside area. It has a low customer rating and is not family friendly. 0.55 32 34 36 0.60 BLEU The Eagle is a cheap Chinese coffee shop with a low customer rating. It is</cell><cell>100 200 300 400 500 training_data_size method FT PT method FT PT</cell><cell>ROUGE</cell><cell>14 10 11 12 13 0.66 rouge-2 0.62 0.64</cell><cell>100 200 300 400 500 training_data_size method FT PT method</cell></row><row><cell>FT (500)</cell><cell cols="2">located near Burger King in the riverside area. The Eagle is a cheap Chinese coffee shop with average customer ratings. It is</cell><cell>0.50</cell><cell></cell><cell></cell><cell>0.60</cell><cell>FT PT</cell></row><row><cell></cell><cell cols="2">located in the riverside area near Burger King.</cell><cell></cell><cell>100 200 300 400 500 training_data_size</cell><cell></cell><cell>100 200 300 400 500 training_data_size</cell></row><row><cell></cell><cell></cell><cell>R-1 ↑ R-2 ↑ R-L ↑</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">FINE-TUNE(Lewis et al., 2020) 45.14 22.27 37.25</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="2">PREFIX(2%)</cell><cell>43.80 20.93 36.05</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="2">PREFIX(0.1%)</cell><cell>42.92 20.03 35.05</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">Table 2: Metrics for summarization on XSUM. Prefix-</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">tuning slightly underperforms fine-tuning.</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">WebNLG dataset is labeled with table topics. There</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">are 9 categories that appear in training and dev, de-</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">noted as SEEN and 5 categories that only appear at</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">test time, denoted as UNSEEN. So we evaluate ex-</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">trapolation by training on the SEEN categories and</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">testing on the UNSEEN categories. For summariza-</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">tion, we construct two extrapolation data splits 13 :</cell><cell></cell><cell></cell><cell></cell></row></table><note>Figure 3: (Left) qualitative examples in lowdata settings.(Right) prefix-tuning (orange) outperforms fine-tuning (blue) in low-data regimes in addition to requiring many fewer parameters. The top two plots correspond to summarization, measured by ROUGE-1 and ROUGE-2. The bottom two plots correspond to table-to-text, measured by BLEU and ROUGE-L. The x-axis is the training size and the y-axis is the evaluation metric (higher is better).</note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 5 :</head><label>5</label><figDesc>Hyperparameter settings for our method and baseline methods.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc>Table6contains qualitative examples from both seen and unseen categories in WebNLG. We find that for unseen categories, both prefix-tuning and fine-tuning tend to undergenerate (generated output do not cover full table contents) or generate untruthfully (generated output is inconsistent with table contents). In particular, prefix-tuning tends to undergenerate whereas fine-tuning tends to generate untruthfully. For seen categories, both perform fairly well in terms of coverage and truthfulness. Prefix-tuning (orange) outperforms fine-tuning (blue) in low-data regimes in addition to requiring many fewer parameters. The top three plots correspond to summarization, measured by ROUGE-1, ROUGE-2, and ROUGE-L. The bottom three plots correspond to table-to-text, measured by NIST, METEOR, and CIDEr. The x-axis is the training size and the y-axis is the evaluation metric (higher is better). Al Kharaitiyat SC, club, Alaa Abdul-Zahra), (Al Khor, ground, Al Kharaitiyat SC), (Shabab Al-Ordon Club, club, Alaa Abdul-Zahra) (Amar Osim, manager, Al Kharaitiyat SC) Prefix-tuning Al Kharaitiyat SC are managed by Amar Osim and play at their ground at Al Khor. Al Kharaitiyat SC are also the club for which Alaa Abdul-Zahra is a player. Fine-tuning Alaa Abdul-Zahra plays for Al-Kharaitiyat SC and Shabab Al-Ordon Club. He also plays for Al-Khor and manages Al-Kharaitiyat SC. Reference Alaa Abdul Zahra plays for Al Kharaitiyat SC which is located at Al Khor and managed by Amar Osim. The Shabab Al-Ordon club is associated with Alaa Abdul-Zahra. Cruises, is located in Genoa and is owned by the Costa Rican government. Reference Costa Crociere is the owner of the AIDAstella and are based in Genoa. The operator of AIDAstella is AIDA Cruises. Netherlands), (Stellendam, birthPlace, Ab ), (Netherlands, nationality, Ab Klink) Prefix-tuning Ab Klink was born in Stellendam and is a national of the Netherlands where the currency is the Euro. Fine-tuning Ab Klink is a national of the Netherlands where the currency is the Euro. He was born in Stellendam. Reference Ab Klink was born in Stellendam in the Netherlands, where the national currency is the euro. Source [Unseen, Politician] (Robert E, Lee, commander, Battle of Salem Church), (American Civil War, isPartOfMilitaryConflict, Battle of Salem Church), (Battle of Salem Church, battles, Aaron S. Daggett) Prefix-tuning Robert E. Lee was the commander of the Battle of Salem Church which was part of the military conflict in the American Civil war. Fine-tuning The Battle of Salem Church is part of the American Civil War and was commanded by Robert E. Lee. Reference Robert E Lee was a commander in the Battle of Salem Church, which was one of the military conflicts in the American Civil War. Aaron S Daggett fought in the same battle. Source [Unseen, Artist] (Christian alternative rock, musicSubgenre, Alternative rock), (Alternative rock, genre, Andrew White (musician)) Prefix-tuning Andrew White is a Christian alternative rock musician. Fine-tuning Andrew White, a Christian alternative rocker, performs. Reference The musician Andrew White's genre is alternative rock, the genre which has the sub genre Christian alternative rock. ComicsCharacter] (Americans, nationality, Ducan Rouleau), (Ducan Rouleau, creator, Baymax),(Alan Tudyk, starring, Big Hero 6 (film)), (Steven T Segle, creator, Baymax), (Big Hero 6 (film), serires, Baymax) Prefix-tuning Baymax is a character in Big Hero 6 which stars Alan Tudyk. He was created by Steven T. Seagle and the American, Duncan Rouleau. Fine-tuning Alan Tudyk stars in the film Big Hero 6 in which Baymax is a character created by Steven T. Seagle and the American, Duncan Rouleau. Reference Baymax is a character who appeared in Big Hero 6 starring Alan Tudyk. It was created by Steven T Seagle and the American, Duncan Rouleau. Source [Seen, City] (Washington, D.C., capital, United States), (White Americans, ethnicGroup, United States), (United States, country, New Jersey), (New York City, largest City, United States), (New Jersy, isPartOf, Atlantic City) Prefix-tuning Washington D.C. is the capital of the United States where the largest city is New York City and the White Americans are an ethnic group. Atlantic City, New Jersey is also part of the United States. Fine-tuning Atlantic City, New Jersey is part of New Jersey in the United States. The capital city is Washington D.C. and one of the ethnic groups is White Americans. Reference New York City (NYC) is the largest U.S. city. Atlantic City, New Jersey are also part of the United States with its capital as Washington, DC and home to White Americans.</figDesc><table><row><cell cols="4">training_data_size 100 200 300 400 500 method FT PT training_data_size Source [Unseen, Athelete] 32 34 36 rouge-1 3 4 5 6 (Source [Unseen, Transportation] (Genoa, location, Costa Crociere), (AIDA Cruises, operator, AIDAstella), (Costa Crociere, owner, AIDAstella) 100 200 300 400 500 training_data_size 10 11 12 13 14 15 rouge-2 method FT PT 100 200 300 400 500 training_data_size 24 26 28 rouge-L method FT PT 7 NIST method FT PT 100 200 300 400 500 training_data_size 0.32 0.34 0.36 0.38 METEOR Prefix-tuning AID Astella is operated by Aida Cruises and is owned by the Costa Rican tourist resort of Genoa. method FT PT 100 200 300 400 500 training_data_size 1.2 1.4 1.6 1.8 CIDEr method FT PT "a c ti v e " "e le p h a n t" "s u m m a ri ze " "t a b le -t o -t e x t: " "b a n a n a " "b e a u ti fu l" "d iv id e " "k e e p " 2 ra n d o m in it "a ct iv e " "e le p h a n t" "s u m m a ri ze " "t a b le -t o -t e x t: " "b a n a n a " "b e a u ti fu l" "d iv id e " "k e e p " 0.30 Fine-tuning AID Astella, operated by AIDA-Source [Unseen, Politician] (Euro, currency, Source [Unseen, Artist] (Hip hop music, genre, Allen Forrest), (solo singer, background, Allen Forrest) Prefix-tuning Allen Forrest is a solo singer. Fine-tuning Born in Figure 6: ra n d o m in it 0.32 3 4 NIST 0.34 METEOR 5 7 0.36 Reference Allen Forrest is a solo singer whose genre is Hip Hop music. 0.38 6 Source [Seen,</cell></row><row><cell></cell><cell>0.66</cell><cell></cell><cell>1.8</cell></row><row><cell></cell><cell>0.64</cell><cell></cell><cell>1.6</cell></row><row><cell>ROUGE</cell><cell>0.60 0.62</cell><cell>CIDEr</cell><cell>1.2 1.4</cell></row><row><cell></cell><cell>0.58</cell><cell></cell><cell>1.0</cell></row><row><cell></cell><cell>ra n d o m in it "a ct iv e " "e le p h a n t" "s u m m a ri ze " "t a b le -t o -t e x t: " "b a n a n a " "b e a u ti fu l" "d iv id e " "k e e p "</cell><cell></cell><cell>ra n d o m in it "a c ti v e " "e le p h a n t" "s u m m a ri ze " "t a b le -t o -t e x t: " "b a n a n a " "b e a u ti fu l" "d iv id e " "k e e p "</cell></row><row><cell cols="4">Figure 7: Initializing the prefix with activations of real words significantly outperforms random initialization, in a</cell></row><row><cell cols="2">low-data setting with 100 training data.</cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 6 :</head><label>6</label><figDesc>Qualitative examples from WebNLG. The first 6 examples are from the unseen categories, labeled next to source; the last two examples are from the seen categories. For unseen categories, both prefix-tuning and finetuning tend to undergenerate (generated output do not cover full table contents) or generate untruthfully (generated output is inconsistent with table contents). In particular, prefix-tuning tends to undergenerate more often than generate untruthfully whereas fine-tuning tends to generate untruthfully. For seen categories, both perform fairly well in terms of coverage and truthfulness.</figDesc><table /></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">h (n) iis composed of a key-value pair. In GPT-2, the dimension of each key and value is 1024.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">In our preliminary experiments, GPT-2 and BART fail in this setting; the only exception is GPT-3.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">We find in preliminary experiments that directly optimizing the prefix is very sensitive to the learning rate and initialization.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3">P θ has a dimension of |P idx | × dim(hi) while P θ has a dimension of |P idx | × k, where we choose k =</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="512" xml:id="foot_4">for table-to-text and 800 for summarization. MLP θ maps from dimension k to dim(hi)</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_5">Same implementation as<ref type="bibr" target="#b15">Lin et al. (2020)</ref>.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="6" xml:id="foot_6">The official benchmark model is trained on v.1.0.0 while the release dataset is v1.1.1.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="7" xml:id="foot_7">In comparison with natural language utterances, the linearized table is in an unnatural format, which might be challenging for pretrained</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="8" xml:id="foot_8">LMs.  8  We didn't include GPT-2 results for summarization because in our preliminary experiment, fine-tuning GPT-2 significantly underperforms fine-tuning BART on XSUM.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="9" xml:id="foot_9">250K for E2E, 250K for WebNLG, and 500K for DART vs. 345M GPT-2 parameters.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="10" xml:id="foot_10">The S,U,A columns in WebNLG represents SEEN, UN-SEEN, and ALL respectively; SEEN categories appear at training time; UNSEEN categories only appears at test time; and ALL is the combination of the two.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="11" xml:id="foot_11">We also sample a dev split (with dev size = 30% × training size ) for each training set. We use the dev split to choose hyperparameters and do early stopping.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="12" xml:id="foot_12">  12  The number in the parenthesis refers to the training size.</note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Intrinsic dimensionality explains the effectiveness of language model fine-tuning</title>
+		<author>
+			<persName><forename type="first">Armen</forename><surname>Aghajanyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sonal</forename><surname>Gupta</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Comparing automatic and human evaluation of NLG systems</title>
+		<author>
+			<persName><forename type="first">Anja</forename><surname>Belz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ehud</forename><surname>Reiter</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">11th Conference of the European Chapter</title>
+				<meeting><address><addrLine>Trento, Italy</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Tom</forename><forename type="middle">B</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Melanie</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prafulla</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arvind</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pranav</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Girish</forename><surname>Sastry</surname></persName>
+		</author>
+		<imprint>
+			<pubPlace>Amanda</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<author>
+			<persName><forename type="first">Sandhini</forename><surname>Askell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ariel</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gretchen</forename><surname>Herbert-Voss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tom</forename><surname>Krueger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rewon</forename><surname>Henighan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><forename type="middle">M</forename><surname>Ramesh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Ziegler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Clemens</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Winter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Hesse</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mateusz</forename><surname>Sigler</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Litwin</surname></persName>
+		</author>
+		<title level="m">Ilya Sutskever, and Dario Amodei</title>
+				<meeting><address><addrLine>Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam Mc-Candlish, Alec Radford</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note>Language models are few-shot learners</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Plug and play language models: A simple approach to controlled text generation</title>
+		<author>
+			<persName><forename type="first">Sumanth</forename><surname>Dathathri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Madotto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Janice</forename><surname>Lan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jane</forename><surname>Hung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Frank</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piero</forename><surname>Molino</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Yosinski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rosanne</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">BERT: Pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenton</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kristina</forename><surname>Toutanova</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/N19-1423</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</title>
+		<title level="s">Long and Short Papers</title>
+		<meeting>the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies<address><addrLine>Minneapolis, Minnesota</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="4171" to="4186" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">The WebNLG challenge: Generating text from RDF data</title>
+		<author>
+			<persName><forename type="first">Claire</forename><surname>Gardent</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anastasia</forename><surname>Shimorina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shashi</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Laura</forename><surname>Perez-Beltrachini</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/W17-3518</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 10th International Conference on Natural Language Generation</title>
+				<meeting>the 10th International Conference on Natural Language Generation<address><addrLine>Santiago de Compostela, Spain</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="124" to="133" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Parameter-efficient transfer learning for NLP</title>
+		<author>
+			<persName><forename type="first">Neil</forename><surname>Houlsby</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrei</forename><surname>Giurgiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stanislaw</forename><surname>Jastrzebski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bruna</forename><surname>Morrone</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quentin</forename><surname>De Laroussilhe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Gesmundo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mona</forename><surname>Attariyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sylvain</forename><surname>Gelly</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 36th International Conference on Machine Learning</title>
+				<meeting>the 36th International Conference on Machine Learning<address><addrLine>Long Beach, California, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>PMLR</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">97</biblScope>
+			<biblScope unit="page" from="2790" to="2799" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">How can we know what language models know? Transactions of the</title>
+		<author>
+			<persName><forename type="first">Zhengbao</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><forename type="middle">F</forename><surname>Xu</surname></persName>
+		</author>
+		<idno type="DOI">10.1162/tacl_a_00324</idno>
+		<imprint>
+			<date type="published" when="2020-06">Jun Araki, and Graham Neubig. 2020</date>
+			<publisher>Association for Computational Linguistics</publisher>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="page" from="423" to="438" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Text-to-text pre-training for data-totext tasks</title>
+		<author>
+			<persName><forename type="first">Mihir</forename><surname>Kale</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Ctrl: A conditional transformer language model for controllable generation</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Keskar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Mccann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">R</forename><surname>Varshney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Caiming</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Socher</surname></persName>
+		</author>
+		<idno>ArXiv, abs/1909.05858</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<author>
+			<persName><forename type="first">Ben</forename><surname>Krause</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akhilesh</forename><surname>Deepak Gotmare</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bryan</forename><surname>Mc-Cann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nitish</forename><surname>Shirish Keskar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shafiq</forename><surname>Joty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nazneen</forename><surname>Fatema</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajani</forename></persName>
+		</author>
+		<idno type="arXiv">arXiv:2009.06367</idno>
+		<title level="m">GeDi: Generative Discriminator Guided Sequence Generation</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Meteor: An automatic metric for mt evaluation with high levels of correlation with human judgments</title>
+		<author>
+			<persName><forename type="first">Alon</forename><surname>Lavie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhaya</forename><surname>Agarwal</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Second Workshop on Statistical Machine Translation, StatMT &apos;07</title>
+				<meeting>the Second Workshop on Statistical Machine Translation, StatMT &apos;07<address><addrLine>Stroudsburg, PA, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="228" to="231" />
+		</imprint>
+	</monogr>
+	<note>Association for Computational Linguistics</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">BART: Denoising sequence-to-sequence pretraining for natural language generation, translation, and comprehension</title>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yinhan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal ; Abdelrahman Mohamed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Veselin</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.acl-main.703</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 58th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">Marjan Ghazvininejad,. 2020</date>
+			<biblScope unit="page" from="7871" to="7880" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">ROUGE: A package for automatic evaluation of summaries</title>
+		<author>
+			<persName><forename type="first">Chin-Yew</forename><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Text Summarization Branches Out</title>
+				<meeting><address><addrLine>Barcelona, Spain</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page" from="74" to="81" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Exploring versatile generative language model via parameter-efficient transfer learning</title>
+		<author>
+			<persName><forename type="first">Zhaojiang</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Madotto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pascale</forename><surname>Fung</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.findings-emnlp.41</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Findings of the Association for Computational Linguistics: EMNLP 2020</title>
+				<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="441" to="459" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Text summarization with pretrained encoders</title>
+		<author>
+			<persName><forename type="first">Yang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mirella</forename><surname>Lapata</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/D19-1387</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)</title>
+				<meeting>the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)<address><addrLine>Hong Kong, China</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="3730" to="3740" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Multilingual denoising pre-training for neural machine translation</title>
+		<author>
+			<persName><forename type="first">Yinhan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiatao</forename><surname>Gu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xian</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Edunov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marjan</forename><surname>Ghazvininejad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Roberta: A robustly optimized BERT pretraining approach</title>
+		<author>
+			<persName><forename type="first">Yinhan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Myle</forename><surname>Ott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jingfei</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mandar</forename><surname>Joshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Danqi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Veselin</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<idno>CoRR, abs/1907.11692</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Decoupled weight decay regularization</title>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Loshchilov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Hutter</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Federated learning of deep networks using model averaging</title>
+		<author>
+			<persName><forename type="first">H</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brendan</forename><surname>Mcmahan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eider</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Ramage</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Blaise</forename><surname>Agüera Y Arcas</surname></persName>
+		</author>
+		<idno>2017, abs/1602.05629</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 20 th International Conference on Artificial Intelligence and Statistics</title>
+				<meeting>the 20 th International Conference on Artificial Intelligence and Statistics</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Don&apos;t give me the details, just the summary! Topic-aware convolutional neural networks for extreme summarization</title>
+		<author>
+			<persName><forename type="first">Shashi</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shay</forename><forename type="middle">B</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mirella</forename><surname>Lapata</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing</title>
+				<meeting>the 2018 Conference on Empirical Methods in Natural Language Processing<address><addrLine>Brussels, Belgium</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<title level="m" type="main">The E2E dataset: New challenges for end-toend generation</title>
+		<author>
+			<persName><forename type="first">Jekaterina</forename><surname>Novikova</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ondrej</forename><surname>Dusek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Verena</forename><surname>Rieser</surname></persName>
+		</author>
+		<idno>CoRR, abs/1706.09254</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Bleu: A method for automatic evaluation of machine translation</title>
+		<author>
+			<persName><forename type="first">Kishore</forename><surname>Papineni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Salim</forename><surname>Roukos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todd</forename><surname>Ward</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei-Jing</forename><surname>Zhu</surname></persName>
+		</author>
+		<idno type="DOI">10.3115/1073083.1073135</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 40th Annual Meeting on Association for Computational Linguistics, ACL &apos;02</title>
+				<meeting>the 40th Annual Meeting on Association for Computational Linguistics, ACL &apos;02<address><addrLine>Stroudsburg, PA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2002">2002</date>
+			<biblScope unit="page" from="311" to="318" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Adapterfusion: Non-destructive task composition for transfer learning</title>
+		<author>
+			<persName><forename type="first">Jonas</forename><surname>Pfeiffer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aishwarya</forename><surname>Kamath</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Rücklé</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyunghyun</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Iryna</forename><surname>Gurevych</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Dart: Open-domain structured data record to text generation</title>
+		<author>
+			<persName><forename type="first">Dragomir</forename><surname>Radev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rui</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amrit</forename><surname>Rau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhinand</forename><surname>Sivaprasad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chiachun</forename><surname>Hsieh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nazneen</forename><surname>Fatema Rajani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangru</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aadit</forename><surname>Vyas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Neha</forename><surname>Verma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pranav</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yangxiaokang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nadia</forename><surname>Irwanto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jessica</forename><surname>Pan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Faiaz</forename><surname>Rahman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ahmad</forename><surname>Zaidi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Murori</forename><surname>Mutuma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yasin</forename><surname>Tarabar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankit</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tao</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yi</forename><surname>Chern Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xi</forename><surname>Victoria Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Caiming</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Socher</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<title level="m" type="main">Language models are unsupervised multitask learners</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Luan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dario</forename><surname>Amodei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">How fine can fine-tuning be? learning efficient language models</title>
+		<author>
+			<persName><forename type="first">Evani</forename><surname>Radiya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">-Dixit</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty Third International Conference on Artificial Intelligence and Statistics</title>
+				<meeting>the Twenty Third International Conference on Artificial Intelligence and Statistics</meeting>
+		<imprint>
+			<publisher>Online. PMLR</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="volume">108</biblScope>
+			<biblScope unit="page" from="2435" to="2443" />
+		</imprint>
+	</monogr>
+	<note>of Proceedings of Machine Learning Research</note>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Exploring the limits of transfer learning with a unified text-totext transformer</title>
+		<author>
+			<persName><forename type="first">Colin</forename><surname>Raffel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Roberts</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katherine</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sharan</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Matena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanqi</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><forename type="middle">J</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Machine Learning Research</title>
+		<imprint>
+			<biblScope unit="volume">21</biblScope>
+			<biblScope unit="issue">140</biblScope>
+			<biblScope unit="page" from="1" to="67" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Learning multiple visual domains with residual adapters</title>
+		<author>
+			<persName><forename type="first">Hakan</forename><surname>Sylvestre-Alvise Rebuffi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Bilen</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Vedaldi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="page" from="506" to="516" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<title level="m" type="main">Exploiting cloze questions for few shot text classification and natural language inference</title>
+		<author>
+			<persName><forename type="first">Timo</forename><surname>Schick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hinrich</forename><surname>Schütze</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">BLEURT: Learning robust metrics for text generation</title>
+		<author>
+			<persName><forename type="first">Thibault</forename><surname>Sellam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dipanjan</forename><surname>Das</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankur</forename><surname>Parikh</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.acl-main.704</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 58th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="7881" to="7892" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Pragmatically informative text generation</title>
+		<author>
+			<persName><forename type="first">Sheng</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Fried</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Andreas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/N19-1410</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</title>
+		<title level="s">Long and Short Papers</title>
+		<meeting>the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies<address><addrLine>Minneapolis, Minnesota</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="4060" to="4067" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">Autoprompt: Eliciting knowledge from language models with automatically generated prompts</title>
+		<author>
+			<persName><forename type="first">Taylor</forename><surname>Shin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yasaman</forename><surname>Razeghi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><forename type="middle">L</forename><surname>Logan Iv Au2</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Wallace</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sameer</forename><surname>Singh</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Privacypreserving deep learning</title>
+		<author>
+			<persName><forename type="first">Reza</forename><surname>Shokri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vitaly</forename><surname>Shmatikov</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2810103.2813687</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 22nd ACM SIGSAC Conference on Computer and Communications Security, CCS &apos;15</title>
+				<meeting>the 22nd ACM SIGSAC Conference on Computer and Communications Security, CCS &apos;15<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1310" to="1321" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">A study of translation error rate with targeted human annotation</title>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Snover</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bonnie</forename><surname>Dorr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Schwartz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Linnea</forename><surname>Micciulla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ralph</forename><surname>Weischedel</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Association for Machine Transaltion in the Americas</title>
+				<meeting>the Association for Machine Transaltion in the Americas</meeting>
+		<imprint>
+			<publisher>AMTA</publisher>
+			<date type="published" when="2006">2006. 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">Recipes for adapting pre-trained monolingual and multilingual models to machine translation</title>
+		<author>
+			<persName><forename type="first">Asa</forename><surname>Cooper Stickland</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xian</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marjan</forename><surname>Ghazvininejad</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">Can unconditional language models recover arbitrary sentences? Fan-Keng Sun and Cheng-I Lai. 2020. Conditioned natural language generation using only unconditioned language model: An exploration</title>
+		<author>
+			<persName><forename type="first">Nishant</forename><surname>Subramani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Samuel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyunghyun</forename><surname>Bowman</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Cho</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aidan</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ł</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Illia</forename><surname>Polosukhin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="page" from="5998" to="6008" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Cider: Consensus-based image description evaluation</title>
+		<author>
+			<persName><surname>Ramakrishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">Lawrence</forename><surname>Vedantam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Devi</forename><surname>Zitnick</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Parikh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="4566" to="4575" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Transformers: State-of-the-art natural language processing</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Wolf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lysandre</forename><surname>Debut</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Victor</forename><surname>Sanh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julien</forename><surname>Chaumond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Clement</forename><surname>Delangue</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anthony</forename><surname>Moi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pierric</forename><surname>Cistac</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Rault</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rémi</forename><surname>Louf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Morgan</forename><surname>Funtowicz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joe</forename><surname>Davison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Shleifer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Clara</forename><surname>Patrick Von Platen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yacine</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julien</forename><surname>Jernite</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Canwen</forename><surname>Plu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Teven</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sylvain</forename><surname>Le Scao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mariama</forename><surname>Gugger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quentin</forename><surname>Drame</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexander</forename><forename type="middle">M</forename><surname>Lhoest</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Rush</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing: System Demonstrations</title>
+				<meeting>the 2020 Conference on Empirical Methods in Natural Language Processing: System Demonstrations</meeting>
+		<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="38" to="45" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<title level="m" type="main">Sidetuning: A baseline for network adaptation via additive side networks</title>
+		<author>
+			<persName><forename type="first">Alexander</forename><surname>Jeffrey O Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Sax</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Leonidas</forename><surname>Zamir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jitendra</forename><surname>Guibas</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Malik</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020a</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">BERTScore: Evaluating text generation with bert</title>
+		<author>
+			<persName><forename type="first">Tianyi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Varsha</forename><surname>Kishore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kilian</forename><forename type="middle">Q</forename><surname>Weinberger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yoav</forename><surname>Artzi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2020">2020b</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">DIALOGPT : Largescale generative pre-training for conversational response generation</title>
+		<author>
+			<persName><forename type="first">Yizhe</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Siqi</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michel</forename><surname>Galley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yen-Chun</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Brockett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiang</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianfeng</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jingjing</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bill</forename><surname>Dolan</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.acl-demos.30</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics: System Demonstrations</title>
+				<meeting>the 58th Annual Meeting of the Association for Computational Linguistics: System Demonstrations</meeting>
+		<imprint>
+			<date type="published" when="2020">2020c</date>
+			<biblScope unit="page" from="270" to="278" />
+		</imprint>
+	</monogr>
+	<note>Association for Computational Linguistics</note>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<title level="m" type="main">Masking as an efficient alternative to finetuning for pretrained language models</title>
+		<author>
+			<persName><forename type="first">Mengjie</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tao</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fei</forename><surname>Mi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Jaggi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hinrich</forename><surname>Schütze</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">MoverScore: Text generation evaluating with contextualized embeddings and earth mover distance</title>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maxime</forename><surname>Peyrard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fei</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yang</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christian</forename><forename type="middle">M</forename><surname>Meyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steffen</forename><surname>Eger</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/D19-1053</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)</title>
+				<meeting>the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)<address><addrLine>Hong Kong, China</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="563" to="578" />
+		</imprint>
+	</monogr>
+	<note>Association for Computational Linguistics</note>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Extractive summarization as text matching</title>
+		<author>
+			<persName><forename type="first">Ming</forename><surname>Zhong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pengfei</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiran</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Danqing</forename><surname>Wang</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.acl-main.552</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 58th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="6197" to="6208" />
+		</imprint>
+	</monogr>
+	<note>Xipeng Qiu, and Xuanjing Huang</note>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Incorporating bert into neural machine translation</title>
+		<author>
+			<persName><forename type="first">Jinhua</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yingce</forename><surname>Xia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lijun</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Di</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tao</forename><surname>Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wengang</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Houqiang</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tieyan</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,1139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Woodpecker-DL: Accelerating Deep Neural Networks via Hardware-Aware Multifaceted Optimizations</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2020-08-11">11 Aug 2020</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Yongchao</forename><surname>Liu</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Yue</forename><surname>Jin</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Yong</forename><surname>Chen</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Teng</forename><surname>Teng</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Hang</forename><surname>Ou</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Rui</forename><surname>Zhao</surname></persName>
+						</author>
+						<author role="corresp">
+							<persName><forename type="first">Yao</forename><surname>Zhang</surname></persName>
+							<email>yao.zhang@antgroup.com</email>
+						</author>
+						<title level="a" type="main">Woodpecker-DL: Accelerating Deep Neural Networks via Hardware-Aware Multifaceted Optimizations</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2020-08-11">11 Aug 2020</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2008.04567v1[cs.DC]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:22+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Accelerating deep model training and inference is crucial in practice. Existing deep learning frameworks usually concentrate on optimizing training speed and pay fewer attentions to inference-specific optimizations. Actually, model inference differs from training in terms of computation, e.g. parameters are refreshed each gradient update step during training, but kept invariant during inference. These special characteristics of model inference open new opportunities for its optimization. In this paper, we propose a hardware-aware optimization framework, namely Woodpecker-DL (WPK), to accelerate inference by taking advantage of multiple joint optimizations from the perspectives of graph optimization, automated searches, domain-specific language (DSL) compiler techniques and system-level exploration. In WPK, we investigated two new automated search approaches based on genetic algorithm and reinforcement learning, respectively, to hunt the best operator code configurations targeting specific hardware. A customized DSL compiler is further attached to these search algorithms to generate efficient codes. To create an optimized inference plan, WPK systematically explores high-speed operator implementations from third-party libraries besides our automatically generated codes and singles out the best implementation per operator for use. Extensive experiments demonstrated that on a Tesla P100 GPU, we can achieve the maximum speedup of 5.40 over cuDNN and 1.63 over TVM on individual convolution operators, and run up to 1.18 times faster than TensorRT for end-to-end model inference.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Convolutional neural network (CNN) models <ref type="bibr" target="#b0">[1]</ref><ref type="bibr" target="#b1">[2]</ref><ref type="bibr" target="#b2">[3]</ref><ref type="bibr" target="#b3">[4]</ref> usually have high computational cost subject to batch size, number of weight parameters and image size. Hence, graphics processing units (GPUs) have been playing a central role in CNN model training and inference, owing to its high compute power exposed by massive parallelism. Popular deep learning frameworks such as Caffe <ref type="bibr" target="#b4">[5]</ref>, TensorFlow <ref type="bibr" target="#b5">[6]</ref>, Mxnet <ref type="bibr" target="#b6">[7]</ref> and PyTorch <ref type="bibr" target="#b7">[8]</ref> all provide built-in support for GPUs. However, these frameworks mainly focus on improving programming productivity and training performance. Under such circumstances, a few model-inference optimization works have been proposed. They generally work as follows: (i) taking as input a trained model from the aforementioned deep learning frameworks, and (ii) generating an optimized implementation for deployment in production. Typical works include XLA <ref type="bibr" target="#b8">[9]</ref> (applicable to training as well), TVM <ref type="bibr" target="#b9">[10]</ref>, Glow <ref type="bibr" target="#b10">[11]</ref>, Tensor Comprehensions <ref type="bibr" target="#b11">[12]</ref>, nGraph <ref type="bibr" target="#b12">[13]</ref>, OpenVINO <ref type="bibr" target="#b13">[14]</ref>, and TensorRT <ref type="bibr" target="#b14">[15]</ref>.</p><p>The architecture of a deep neural network (DNN) can be abstracted as a computational graph with operators as nodes and tensors representing data movement as edges. In practice, computation within operators often dominates the whole execution, in contrast to data movement between operators. In this case, faster execution of individual operators would lead to prominent acceleration of model inference. Therefore, hardware vendors devote considerable efforts to manually tuning the performance of key primitive functions that are widely used by deep learning applications. These primitives are commonly offered as a collection of libraries, allowing for practitioners to leverage the latest architectural features and refinement in primitive implementations. Existing deep learning frameworks heavily rely on these highly engineered libraries such as MKL-DNN <ref type="bibr" target="#b15">[16]</ref> on CPUs and cuDNN <ref type="bibr" target="#b16">[17]</ref> on GPUs. Although these libraries are usually very efficient, there may still be significant room for performance improvement. This is because given a specific primitive, manual tuning is usually unable to explore the whole optimization space, thus possibly missing better implementations. Moreover, these libraries do not implement the full set of primitives needed by deep learning models, leaving the implementation and optimization of those unsupported ones to users. As a matter of fact, implementing high-performance novel primitives is essentially challenging even for experts. This motivated the development of domain-specific language (DSL) compilers to lower programming barrier and thereby allow for non-expert users to write high-performance primitives with no need of deep knowledge of hardware and associated parallel programming models. Typical DSL compilers include Halide <ref type="bibr" target="#b17">[18]</ref>, DLVM <ref type="bibr" target="#b18">[19]</ref>, Diesel <ref type="bibr" target="#b19">[20]</ref>, TIRAMISU <ref type="bibr" target="#b20">[21]</ref> and Triton <ref type="bibr" target="#b21">[22]</ref>.</p><p>In principle, accelerating primitives intends to optimize the inference at the operator level. However, after examining popular deep learning models, existing works further observed optimization opportunities from patterned subgraphs that allow for fusing consecutive operators to reduce or even eliminate data movement between the operators fused. Note that implementing a fused operator by invoking primitive functions of component operators one after another is actually unable to reduce data movement overhead between operator calls, making operator fusion ineffective at all. Taking GPU as an example, one effective approach is to write one CUDA <ref type="bibr" target="#b22">[23]</ref> kernel function for the fused operator and complete the whole computation within only one kernel launch to eliminate the intermediate data movement overhead mentioned above. The benefits gained from this in-placed implementation inspired us to perform global optimizations at the graph level. Typical optimizations include fusing operators, removing redundant operations (e.g. identify and dropout), functionally equivalent subgraph substitution <ref type="bibr" target="#b23">[24]</ref> and etc. Similar to writing primitives unsupported by vendorspecific libraries, implementing efficient kernels for fused operators is also challenging to users. One promising approach is to resort to DSL compilers.</p><p>Have examined existing works on model inference acceleration, we observed that none of them has ever made attempts on leveraging system-level exploration to identify best-performing operator functions additionally from third-party implementations. In this situation, we propose Woodpecker-DL (WPK), a hardware-aware optimization framework that leverages multifaceted optimizations based on local and global graph optimization, automated searches with genetic algorithm <ref type="bibr" target="#b24">[25]</ref> and reinforcement learning(RL) <ref type="bibr" target="#b25">[26]</ref>, automatic high-quality code generation by a customized DSL compiler, and system-level exploration to exploit third-party superiorities. Our contributions can be summarized from the following two aspects. On one hand, we proposed an automated optimization framework for model inference acceleration by taking advantage of an ensemble of systematic optimizations coming from computational graph, automated searches, DSL compilers and third-party libraries. This framework allows for non-expert users to achieve high-speed model inference with no need of deep understanding of the underlying hardware architectures and parallel programming models. On the other hand, we developed an automated hardware-aware search method based on RL, named RL-search, besides genetic algorithm. These automated searches free users from the tedious and laborious exploration of the vast search spaces exposed by device-specific primitives.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Methods</head><p>In principle, WPK consists of four components: graph optimization, automated search, runtime engine, and custom operators bound to third-party engines. The graph optimization component takes a graph model as input, then performs functionally equivalent transformations to simplify graph structures, and finally outputs the specification that guides automatic code generation per operator in the optimized graph. The automated search component accepts the specifications exported by the graph optimization component and couples genetic search and RL-search with our customized Halide compiler to generate efficient codes for each operator. Our runtime engine collects the operator functions generated by automated searches, and drives the data flow expressed by the optimized graph Figure <ref type="figure">1</ref>: Architectural overview of (a) WPK, and (b) RL-search to complete inference. In addition to our proprietary runtime engine, WPK allows for encapsulating our generated operator functions into custom operators that comply with the standards defined by existing deep learning frameworks (e.g. TensorRT, TensorFlow and PyTorch). Figure <ref type="figure">1a</ref> shows the architectural overview of WPK.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Graph optimization</head><p>Computational graph optimization has become a standard procedure in accelerating deep neural networks. Most approaches apply pre-defined rules to identify sub-graphs that can be equivalently simplified and substituted. In WPK, we have used the following approaches: constant folding, operator fusion and data layout transformations. Constant folding applies to sub-graphs whose output values can be computed statically beforehand. Operator fusion aims to compress the computation with a sub-graph into one equivalent novel operator in order to reduce the communication overhead between operators in the sub-graph as well as improve hardware usage efficiency due to the increase of compute intensiveness within the novel operator. Data layout transformations aims to identify the better data layouts for the inputs to a given operator in order to get faster execution on the target hardware. It needs to be stressed that for operator fusion and data layout transformations, we must compose the corresponding implementations of those novel operators newly created in the optimization process. In WPK, we employed rule-based optimizations and defined pattern-based specifications to guide the generation of operator functions accordingly.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Automated Searches</head><p>Our automated searches intend to identity most efficient codes per operator according to codegeneration specifications tailored for a specific architecture. Instead of merely searching handengineered libraries, we choose to take advantage of a customized Halide compiler to generate codes just-in-time under the guidance of our search algorithms. Since Halide can support a wide spectrum of processors including x86/ARM CPUs and GPUs, WPK naturally supports these architectures as well. Nonetheless, our paper will merely investigate optimization techniques on CUDA-enabled GPUs <ref type="bibr" target="#b22">[23]</ref>.</p><p>Halide compiler Halide is a DSL compiler based on the concept of functional programming. A Halide program is actually C++ code written using the functions (Func type), variables (Var type) and other types (e.g. Expr) defined in Halide library. These functions and expression definitions are embedded in C++ syntax by means of operator overloading on the corresponding types. Halide is defined based on the concept of separating algorithm from schedule, where algorithm declares what to compute and schedule represents the decisions about how to map and run the algorithm efficiently on a target device. The following code snippet gives a simple convolution implementation in Halide C++ syntax. Generating codes As mentioned above, we employ Halide to generate codes for operator functions. Intuitively, given an algorithm description, we could make attempts to find an optimal schedule by enumerating all possible configurations in the whole schedule space exposed by Halide. However, this approach will incur huge computation and could result in prohibitively long runtimes, thus inapplicable to practical use. In our implementation, we adopted a semi-automatic approach based on schedule templates. This approach pre-defines one or more schedule templates for a given algorithm, then exposes a set of tunable hyper-parameters to let practitioners instantiate, and finally exploits automated search in the tunable parameter space to identify specific parameter values that are capable of directing optimal code generation. For instance, x_size and y_size are tunable parameters in the code snippet shown above. Moreover, due to its confined search spaces, this semi-automatic approach is obviously advantageous to whole-space search approaches in terms of speed. In our implementation, schedule templates are all composed by domain-specific experts, and are fed into Halide at the runtime to generate codes with the assistance of our automated searches.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Genetic search</head><p>Genetic algorithms are a family of meta-heuristic optimization algorithms inspired by the principles of natural selection and genetics. These algorithms mimic evolutionary processes by performing crossover, mutation and selection operations. In practice, they are capable of advancing, with high robustness, to optimal solutions to complicated optimization problems.</p><p>Search space In WPK, genetic search is used to identify an optimal configuration for code generation per operator on the target hardware. A configuration is encoded as a parameterized vector (or chromosome in the parlance of genetics) s = {c 0 , c 1 , ..., c n−1 } of n elements with each element c i (0 ≤ i &lt; n) corresponding to a numerical parameter (or gene with respect to chromosomes) having a finite range. The full set of all configurations {s} constitute the search space S of our genetic search. A configuration is hardware-dependent in some sense and is used to instantiate a schedule template.</p><p>Implementation Our implementation follows the typical procedure of genetic algorithms, which generally consists of four steps: (i) Step1 initializes a population a of |a| configurations that are randomly generated, (ii) Step2 calculates the fitness value for each configuration in the population, (iii) Step3 performs genetic operations including crossover, mutation and selection, and (iv) Step4 repeats Step2 and Step3 until the convergence condition is met. In Step1, any randomly generated configuration will be verified first in order to meet certain constraints. For instance, the total number of threads in a thread block cannot exceed 1024 on a CUDA-enabled GPU. In this case, we must ensure that the product of all dimension values is positive and ≤ 1024 for a thread block. In Step2, for each individual a i , we first compile the generated codes just-in-time as per the hardware configuration, then execute them to get the runtime, and finally set the function of runtime, denoted as f (a i ), as its fitness value.</p><p>Step3 first calculates the selection probability p(a i ) (refer to Equation ( <ref type="formula" target="#formula_0">1</ref>)) for a i , and sorts the population in decreasing order of selection probability.</p><formula xml:id="formula_0">p(a i ) = f (a i ) |a| i=1 f (a i )<label>(1)</label></formula><p>Subsequently, we select top k (1 ≤ k ≤ |a|) elites with the highest probabilities. These elites are always selected and passed to the next generation. In addition to these elites, we will further reproduce some off-springs from individuals with less fitness in order for more exploration. Assuming the expected next-generation population size is |a | (|a | ≥ k), we employ a roulette wheel selection approach to randomly select parents for any of the remaining |a | − k children and crossover to reproduce off-springs. This selection first computes the cumulative probabilities from the selection probabilities of the m (m ≤ |a|) individuals that will participate in the crossover. In this case, the cumulative probability P (a i ) (1 ≤ i ≤ m) of the i-th individual is calculated by Equation <ref type="bibr" target="#b1">(2)</ref>.</p><formula xml:id="formula_1">P (a i ) = i j=1 p(a j )<label>(2)</label></formula><p>Based on this equation, we used an inverse sampling approach to select candidates. More specifically, after getting P (a i ), we generate a random number v, which is uniformly distributed in [0, 1], and compare v with P (a i ) to select individuals. If P (a i−1 ) &lt; v ≤ P (a i ), the i-th individual will be selected. In sum, the core idea of our selection is to make more healthy individuals breed more and less healthy ones to breed fewer or even nothing.</p><p>Step4 will stop the evolutionary process as long as the convergence condition is reached, i.e. the runtimes of all individuals in the current generation are close enough. Additionally, note that the population size from generation to generation may vary in our implementation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.4">Reinforcement learning search</head><p>Besides genetic search described in 2.3, we have developed RL-search, an automated search algorithm based on RL. Given an operator, we model schedule template parameter optimization as a RL problem, and adopt the proximal policy optimization (PPO) <ref type="bibr" target="#b25">[26]</ref> approach to predict one action only, i.e. instantiating the schedule template with a concrete parameter configuration. PPO is a new family of policy gradient methods for RL. Unlike standard policy gradient methods <ref type="bibr" target="#b26">[27]</ref> performing one gradient update per data sample, PPO enables training with mini-batch updates. In addition, RLlib <ref type="bibr" target="#b27">[28]</ref> is used to implement our search algorithm (see Figure <ref type="figure">1b</ref>).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>State space</head><p>We introduced a feature vector O to represent our observation, where all possible values of O form our state space. For different operators, we could use distinct observation representation. For 2D convolutions that are basically most time-consuming in CNN models <ref type="bibr" target="#b28">[29]</ref>, the observation O conv is 17-dimensional and defined as</p><formula xml:id="formula_2">O conv = (N, C in , C out , K h , K w , H, W, Stride, P adding, T x , T y , T z , T ile x , T ile y , T ile z , T ile rz , α t )</formula><p>where N is the batch size, C in (and C out ) is the number of input (and output) channels, K h (and K w ) is the number of rows (and columns) in a filter matrix, H (and W ) is the image height (and width), Stride is the stride and P adding is the padding mode (i.e. SAME or VALID in our case). T x , T y , and T z denote the number of CUDA threads in the x, y and z coordinate direction of a thread block, respectively, while T ile x , T ile y and T ile z are the tile sizes that will be processed by a single CUDA thread in the x, y and z coordinate direction, respectively. T ile rz represents the split and unroll size in a reduce domain, α t (t ≥ 1) is the runtime moving average of the operator at time step t. In our implementation, α t is empirically calculated as follows:</p><formula xml:id="formula_3">α t = α t−1 × 0.8 + β t t (<label>3</label></formula><formula xml:id="formula_4">)</formula><p>where β t denotes the runtime of the operator at time step t, and α 0 is initialized to be zero.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Action space</head><p>We used a discrete action space and developed a DNN to predict actions from observations. The DNN is composed of four fully-connected (FC) layers (with 512, 1024, 1024 and 512 hidden sizes in order) associated with an activation function (tahn, tahn, selu and selu functions in order) each, followed by a dropout layer with a keep probability of 15%, and a FC layer with a linear activation. The output of the network is fed into a multinomial distribution to sample actions. The output of the multinomial distribution is used as actions to update the parameter values (e.g. T ile x in O conv ) in our state space, where an action updates one parameter at a time and multiple rounds of action predictions are required in order to perform the same number of parameter updates. Network We adopted a model-free method which obtains the runtime of the operator by directly interacting with the target hardware. In our implementation, the reward r t at time step t is defined as:</p><formula xml:id="formula_5">r t = α t−1 − min{β t , 2α t−1 }<label>(4)</label></formula><p>The rationale behind r t is that if β t is less than the historical moving average α t−1 , we return a positive reward calculated from the runtime difference, and otherwise, a negative reward. If β t is considerably large, say β t &gt; 2α t−1 in our implementation, we will clamp its value to 2α t−1 , resulting in the reward of −α t−1 .</p><p>As mentioned above, our RL agent employs the PPO algorithm, whose computation requires computing an estimator of the policy gradient and plugging the estimator into a stochastic gradient ascent algorithm. We adopted the generalized advantage estimator proposed in <ref type="bibr" target="#b25">[26]</ref>, defining the estimator Āt of advantage function at time step t as</p><formula xml:id="formula_6">Āt = δ t + (γµ)δ t+1 + • • • + (γµ) T −t+1 δ T −1<label>(5)</label></formula><p>where</p><formula xml:id="formula_7">δ t = r t + γV (s t+1 ) − V (s t )<label>(6)</label></formula><p>and V (s t ) is the score returned by a learned state-value function at time step t.</p><p>Our loss function L t (θ) combines the policy surrogate loss L clip t (θ) with a value function loss L V F t (θ), and is further augmented with the addition of an entropy bonus to ensure sufficient exploration, as done in <ref type="bibr" target="#b25">[26]</ref>. Therefore, we defined the final loss function as</p><formula xml:id="formula_8">L t (θ) = Ēt [L clip t (θ) − c 1 L V F t (θ) + c 2 S[π θ ](s t )]<label>(7)</label></formula><p>where c 1 and c 2 are coefficients and are set to 0.15 and 20 in our implementation, respectively. S denotes an entropy bonus and</p><formula xml:id="formula_9">L V F t the square-error loss V θ (s t ) − V target t</formula><p>. Please refer to RLlib <ref type="bibr" target="#b27">[28]</ref> for more implementation details.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.5">Integration with TensorRT</head><p>TensorRT is a state-of-the-art inference platform on CUDA-enabled GPUs. One special feature of TensorRT is that it allows for users to customize operators via plugins. Based on this feature, we can conveniently integrate WPK-generated codes with TensorRT. (see Figure <ref type="figure" target="#fig_0">2a</ref>). As mentioned in 1, WPK performs system-level exploration to further use high-performance third-party implementations per operator additionally. This means that we not only take advantage of efficient codes generated by our DSL compiler, but also fully exploit the implementations from third-party libraries (e.g. cuDNN or TensorRT) that outperform ours. Taking TensorRT as an example, for some operator, if its TensorRT implementation is superior to ours, we will use this TensorRT implementation in our optimized inference plan. This type of system-level exploration significantly distinguishes WPK from all existing compiler frameworks including XLA, TVM and nGraph. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Experiments</head><p>We used ResNet-18 <ref type="bibr" target="#b29">[30]</ref> to evaluate WPK and its counterparts on a Tesla P100 GPU. ResNet-18 is an image classification model trained with Caffe and accepts inputs with NCHW data layout format. In terms of end-to-end inference, given an operator, we used both genetic search and RL-search to identify optimal code generation configurations and single out the best for use. WPK was integrated with TensorRT as described in 2.5 for inference performance assessment. Additionally, the input shape has N = 1, C = 3, H = 224 and W = 244.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Individual convolution operators</head><p>Firstly, we compared WPK to TVM and cuDNN using the individual convolution operators extracted from ResNet-18. In this test, we categorize convolution operators into distinct groups under the following criterion: two convolution operators are considered computationally identical if they have the same input/output shape, filter matrix size, stride and padding. In this test, we directly used the well-optimized ResNet-18 model built-in TVM for fair comparison. By using the performance of cuDNN as the baseline, Figure <ref type="figure" target="#fig_0">2b</ref> shows the speedups of WPK and TVM relative to cuDNN. From the figure, we can observe that WPK and TVM run 2.54× and 2.06× faster than cuDNN on average, as well as 5.40× (on convolution c5) and 3.89× (on convolution c11) at the maximum, respectively. Interestingly, neither WPK nor TVM is always superior to cuDNN. In comparison with TVM, WPK outperforms the former by a factor of 1.24 on average and 1.63 at the maximum. However, we did not compare with TensorRT, because the overall runtime of TensorRT cannot be broken down as per operator, due to the more complex graph optimizations applied to the model by itself.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">RL search performance</head><p>Secondly, we compared RL-search with genetic search. RL-search failed to perform better than genetic search on individual convolutions of ResNet-18. Furthermore, the former was observed to have much higher randomness than the latter, in terms of search time and best operator speed. Nonetheless, we fortunately found that the former yielded superior performance on some convolution operators in another CNN model used in production. Table <ref type="table" target="#tab_2">1</ref> gives the information of the convolutions on which RL-search outperforms genetic search, while Figure <ref type="figure" target="#fig_1">3a</ref> shows the speedups of random search, genetic search and RL-search, relative to cuDNN <ref type="bibr" target="#b16">[17]</ref>. From the figure, both RL-search and genetic search consistently outperform random search. In particular, RL-search performs better than genetic search for each case, with speedups ranging from 1.09 to 1.66.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Genetic search speed</head><p>Thirdly, we evaluated the search speed of our genetic search on individual operators of ResNet-18 (see Figure <ref type="figure" target="#fig_1">3b</ref>). In our implementation, we employed multi-threading to accelerate code compilation as well as generation, and introduced a caching mechanism to reuse search results. The average search time is 8.9 minutes, with the minimum and maximum times of 1.4 and 27.9 minutes respectively. These times are reasonably acceptable in our production, since the search process is normally conducted offline. In addition, our caching mechanism can further expedite the search process for a family of models that are composed from the same backbone model (e.g. ResNet).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4">End-to-end inference</head><p>Finally, we used ResNet-18 to assess the end-to-end inference speed of WPK, TVM and TensorRT. As mentioned in 2.5, WPK can exploit system-level exploration to take advantage of TensorRT operator implementations that run faster than the codes generated by our own compiler. Performance evaluation revealed that WPK is neck-by-neck with TVM, while TensorRT performs worst. WPK runs 1.18× faster than TensorRT. Note that WPK was observed to have selected some TensorRT operators that outperform WPK-generated codes. Excluding these TensorRT operators incorporated only results in very marginal performance loss of 2%.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Related Work</head><p>Compiler-based inference acceleration frameworks have been becoming more popular recently. XLA <ref type="bibr" target="#b8">[9]</ref> is the first work in this research direction, which was initially specialized to TensorFlow models and currently can be applied to optimize PyTorch models as well. XLA lowers operators into primitive linear algebra operations and calls into backend-specific libraries for execution on different backends. TVM <ref type="bibr" target="#b9">[10]</ref> is an end-to-end compiler framework with Halide at the core, which first optimizes a computational graph, then converts the optimized graph into intermediate representations and finally compiles to executable codes on a specific target device. This work was further enhanced by AutoTVM <ref type="bibr" target="#b30">[31]</ref> to enable automatic optimization of tensor operators. Compared to TVM, WPK provides broader capability by enabling system-level exploration as described before, i.e. we aim to achieve fastest speed by singling out operator implementations not only from ours but also from third-party libraries. NeoCPU <ref type="bibr" target="#b31">[32]</ref> is built upon TVM and aims to optimize CNN inference on CPUs by taking advantage of wide SIMD instructions. nGraph <ref type="bibr" target="#b12">[13]</ref> adopts a similar workflow to TVM, but was further extended to support encypted data with homomorphic encryption <ref type="bibr" target="#b32">[33]</ref>. Some other compiling frameworks (e.g. Tensor Comprehensions <ref type="bibr" target="#b11">[12]</ref>, and Glow <ref type="bibr" target="#b10">[11]</ref>) were also developed.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Conclusion</head><p>WPK is part of Woodpecker that is an efficient compiler framework for heterogeneous computing based on software-hardware co-design, and targets to accelerate deep learning applications by taking advantage of multiple joint optimizations from graph optimization, automated searches, compiling technique and system-level exploration. In this paper, we have presented two automated search methods based on genetic and RL algorithms, respectively. In comparison with cuDNN, TVM and TensorRT, our performance evaluation demonstrated the superiority of WPK in terms of both accelerating individual convolution operators and end-to-end inference. More specifically, on a Tesla P100 GPU, we can achieve the maximum speedup of 5.40 over cuDNN and 1.63 over TVM in terms of individual convolutions, and run up to 1.18× faster than TensorRT with respect to end-to-end model inference. Although we have merely investigated the capability of WPK in accelerating inference in this paper, WPK can actually be applied to accelerate training and we plan to conduct this research as part of our future work. In the end, we would like to note that optimizing device placement of operators in a multi-device environment <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b34">35]</ref> is also an interesting research direction.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: (a) diagram illustrating the integration of WPK into TensorRT, and (b) speedups of WPK and TVM relative to cuDNN.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: (a) performance comparison among three search methods, and (b) genetic search speed on individual convolution operators.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 1 :</head><label>1</label><figDesc>Convolutions on which RL-search outperforms genetic search. Name H W C in C out K h × K w Stride</figDesc><table><row><cell cols="3">conv1a 112 96 3</cell><cell>64</cell><cell>3 × 3</cell><cell>1</cell></row><row><cell cols="3">conv1b 110 94 64</cell><cell>96</cell><cell>3 × 3</cell><cell>2</cell></row><row><cell>conv2</cell><cell>54</cell><cell>46 96</cell><cell>128</cell><cell>3 × 3</cell><cell>2</cell></row><row><cell>conv3</cell><cell>26</cell><cell cols="2">22 128 256</cell><cell>3 × 3</cell><cell>2</cell></row><row><cell>conv4</cell><cell>12</cell><cell cols="2">10 256 512</cell><cell>3 × 3</cell><cell>1</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" xml:id="foot_0">// Express the algorithm.</note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Imagenet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="1097" to="1105" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Faster r-cnn: Towards real-time object detection with region proposal networks</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="91" to="99" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Tsm: Temporal shift module for efficient video understanding</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Computer Vision</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Mask r-cnn</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Gkioxari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dollár</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Girshick</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE international conference on computer vision</title>
+				<meeting>the IEEE international conference on computer vision</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="2961" to="2969" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Caffe: Convolutional architecture for fast feature embedding</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Shelhamer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Donahue</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Karayev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Long</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Guadarrama</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Darrell</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 22nd ACM international conference on Multimedia</title>
+				<meeting>the 22nd ACM international conference on Multimedia</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="675" to="678" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Tensorflow: A system for large-scale machine learning</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">12th USENIX Symposium on Operating Systems Design and Implementation</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="265" to="283" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Mxnet: A flexible and efficient machine learning library for heterogeneous distributed systems</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Neural Information Processing Systems Workshop on Machine Learning Systems</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Pytorch: An imperative style, high-performance deep learning library</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Paszke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gross</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Massa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lerer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Chanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Killeen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Gimelshein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Antiga</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="8024" to="8035" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Xla is a compiler-based linear algebra execution engine</title>
+		<author>
+			<persName><forename type="first">G</forename></persName>
+		</author>
+		<ptr target="https://www.tensorflow.org/xla" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Tvm: An automated end-to-end optimizing compiler for deep learning</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Cowan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">13th USENIX Symposium on Operating Systems Design and Implementation</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="578" to="594" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Glow: Graph lowering compiler techniques for neural networks</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Rotem</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fix</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Abdulrasool</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Catron</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Dzhabarov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Gibson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hegeman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lele</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Levenstein</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.00907</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">Tensor comprehensions: Framework-agnostic high-performance machine learning abstractions</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vasilache</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Zinenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Theodoridis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Devito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">S</forename><surname>Moses</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Verdoolaege</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Cohen</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1802.04730</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Intel ngraph: An intermediate representation, compiler, and executor for deep learning</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Cyphers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">K</forename><surname>Bansal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bhiwandiwalla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bobba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Brookhart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Chakraborty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Constable</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Convey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Cook</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Kanawi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Conference on Systems and Machine Learning</title>
+				<meeting>the Conference on Systems and Machine Learning</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Intel openvino toolkit</title>
+		<author>
+			<persName><forename type="first">I</forename></persName>
+		</author>
+		<ptr target="https://software.intel.com/en-us/openvino-toolkit" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">Nvidia tensorrt programmable inference accelerator</title>
+		<author>
+			<persName><forename type="first">N</forename></persName>
+		</author>
+		<ptr target="https://developer.nvidia.com/tensorrt" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Intel R math kernel library for deep learning networks</title>
+		<author>
+			<persName><forename type="first">I</forename></persName>
+		</author>
+		<ptr target="https://software.intel.com/en-us/articles/intel-mkl-dnn-part-1-library-overview-and-installation" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chetlur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Woolley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Vandermersch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Catanzaro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Shelhamer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1410.0759</idno>
+		<title level="m">cudnn: Efficient primitives for deep learning</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Halide: a language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ragan-Kelley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Barnes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Paris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Durand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="s">Acm Sigplan Notices</title>
+		<imprint>
+			<biblScope unit="volume">48</biblScope>
+			<biblScope unit="page" from="519" to="530" />
+			<date type="published" when="2013">2013</date>
+			<publisher>ACM</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Dlvm: A modern compiler infrastructure for deep learning systems</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Schwartz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Adve</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">31st Conference on Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Diesel: Dsl for linear algebra and neural net computations on gpus</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Elango</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Rubin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ravishankar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Sandanagobalane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Grover</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2nd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages</title>
+				<meeting>the 2nd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="42" to="51" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Tiramisu: A polyhedral compiler for expressing fast and portable code</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Baghdadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">B</forename><surname>Romdhane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Del Sozzo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Akkas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Suriana</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kamil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 IEEE/ACM International Symposium on Code Generation and Optimization</title>
+				<meeting>the 2019 IEEE/ACM International Symposium on Code Generation and Optimization</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="193" to="205" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Triton: an intermediate language and compiler for tiled neural network computations</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tillet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Cox</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages</title>
+				<meeting>the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="10" to="19" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Nvidia tesla: A unified graphics and computing architecture</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Lindholm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Nickolls</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Oberman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Montrym</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE micro</title>
+		<imprint>
+			<biblScope unit="volume">28</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="39" to="55" />
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Taso: Optimizing deep learning computation with automatic generation of graph substitutions</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Padon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Thomas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Warszawski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Aiken</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The 27th ACM Symposium on Operating Systems Principles, ACM</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Adaptation in natural and artificial systems: an introductory analysis with applications to biology, control, and artificial intelligence</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">H</forename><surname>Holland</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+			<publisher>MIT press</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><surname>Schulman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Wolski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Klimov</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1707.06347</idno>
+		<title level="m">Proximal policy optimization algorithms</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Asynchronous methods for deep reinforcement learning</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Mnih</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">P</forename><surname>Badia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mirza</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Graves</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Lillicrap</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Harley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Silver</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kavukcuoglu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International conference on machine learning</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1928" to="1937" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Rllib: Abstractions for distributed reinforcement learning</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Liaw</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Moritz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Nishihara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Fox</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Goldberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">E</forename><surname>Gonzalez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">I</forename><surname>Jordan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Stoica</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 35th International Conference on Machine Learning</title>
+				<meeting>the 35th International Conference on Machine Learning</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Performance analysis of gpu-based convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">H</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Zheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 45th International Conference on Parallel Processing</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="67" to="76" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Deep residual learning for image recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE conference on computer vision and pattern recognition</title>
+				<meeting>the IEEE conference on computer vision and pattern recognition</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="770" to="778" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Learning to optimize tensor programs</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Guestrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="3389" to="3400" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Optimizing cnn model inference on cpus</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sharma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 USENIX Annual Technical Conference</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1025" to="1040" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">ngraph-he: a graph compiler for deep learning on homomorphically encrypted data</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Boemer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Cammarota</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wierzynski</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 16th ACM International Conference on Computing Frontiers</title>
+				<meeting>the 16th ACM International Conference on Computing Frontiers</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="3" to="13" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">A hierarchical model for device placement</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mirhoseini</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Goldie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Pipedream: Generalized pipeline parallelism for dnn training</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Narayanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Harlap</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Phanishayee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Seshadri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">R</forename><surname>Devanur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">R</forename><surname>Ganger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">27th ACM Symposium on Operating Systems Principles</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

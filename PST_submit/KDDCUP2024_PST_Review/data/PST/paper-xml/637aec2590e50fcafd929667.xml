@@ -1,0 +1,1419 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Guangxuan</forename><surname>Xiao</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Massachusetts Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+							<email>jilin@mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Massachusetts Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Mickael</forename><surname>Seznec</surname></persName>
+							<email>mseznec@nvidia.com</email>
+							<affiliation key="aff1">
+								<orgName type="institution">NVIDIA</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Julien</forename><surname>Demouth</surname></persName>
+							<email>jdemouth@nvidia.com</email>
+							<affiliation key="aff1">
+								<orgName type="institution">NVIDIA</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+							<email>songhan@mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Massachusetts Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:35+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Large language models (LLMs) show excellent performance but are compute-and memory-intensive. Quantization can reduce memory and accelerate inference. However, for LLMs beyond 100 billion parameters, existing methods cannot maintain accuracy or do not run efficiently on hardware. We propose SmoothQuant, a training-free, accuracypreserving, and general-purpose post-training quantization (PTQ) solution to enable 8-bit weight, 8-bit activation (W8A8) quantization for LLMs that can be implemented efficiently. We observe that systematic outliers appear at fixed activation channels. Based on the fact that weights are easy to quantize while activations are not, SmoothQuant smooths the activation outliers by migrating the quantization difficulty from activations to weights with a mathematically equivalent transformation. SmoothQuant enables an INT8 quantization of both weights and activations for all the GEMMs in LLMs including OPT-175B, BLOOM-176B and GLM-130B. SmoothQuant has better hardware efficiency than existing techniques using mixed-precision activation quantization or weight-only quantization. We demonstrate up to 1.56× speedup and 2× memory reduction for LLMs with negligible loss in accuracy. Thanks to the hardware-friendly design, we integrate SmoothQuant into FasterTransformer, a state-of-the-art LLM serving framework, and achieve faster inference speed with half the number of GPUs compared to FP16. Our work offers a turn-key solution that reduces hardware costs and democratizes LLMs. Code will be released at: https://github.com/mit-han-lab/ smoothquant. * Equal contributions. Order determined by a coin toss. LLM (100B+) Accuracy Hardware Efficiency ZeroQuant Outlier Suppression LLM.int8() SmoothQuant * https://github.com/EleutherAI/lm-evaluation-harness †</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Large-scale language models (LLMs) show excellent performance on various tasks <ref type="bibr" target="#b4">(Brown et al., 2020a;</ref><ref type="bibr" target="#b38">Zhang et al., 2022)</ref>. However, serving LLMs is budget and energy-consuming due to the gigantic model size. For example, the GPT-3 <ref type="bibr" target="#b4">(Brown et al., 2020a</ref>) model contains 175B parameters, which will consume at least 350GB of memory to store and run in FP16, requiring 8×48GB A6000 GPUs or 5×80GB A100 GPUs just for inference. The latency may also be unacceptable to real-world applications due to the huge computation and communication overhead. Quantization is a promising way to reduce the cost of LLMs <ref type="bibr" target="#b7">(Dettmers et al., 2022;</ref><ref type="bibr" target="#b35">Yao et al., 2022)</ref>. By quantizing the weights and activations with lowbit integers, we can reduce GPU memory requirements, in size and bandwidth, as well as accelerate compute-intensive operations (i.e., GEMM in linear layers, BMM in attention). For instance, INT8 quantization of weights and activations can halve the GPU memory requirements and nearly double the throughput of matrix multiplications compared to FP16.</p><p>However, unlike CNN models or smaller transformer models like BERT <ref type="bibr" target="#b8">(Devlin et al., 2019)</ref>, the activations of LLMs are difficult to quantize. When we scale up LLMs beyond 6.7B parameters, systematic outliers with large magnitude will emerge in activations <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref>, leading to large quantization errors and accuracy degradation. ZeroQuant <ref type="bibr" target="#b35">(Yao et al., 2022)</ref> applies dynamic per-token activation quantization and group-wise weight quantization (defined in Figure <ref type="figure">2</ref>  can be implemented efficiently and delivers good accuracy for GPT-3-350M and GPT-J-6B. However, it can not maintain the accuracy for the large OPT model with 175 billion parameters (see Section 4.2). LLM.int8() <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref> addresses that accuracy issue by further introducing a mixed-precision decomposition (i.e., it keeps outliers in FP16 and uses INT8 for the other activations). However, it is hard to implement the decomposition efficiently on hardware accelerators. Therefore, deriving an efficient, hardware-friendly, and preferably training-free quantization scheme for LLMs that would use INT8 for all the computeintensive operations remains an open challenge.</p><p>We propose SmoothQuant, an accurate and efficient post-training quantization (PTQ) solution for LLMs. SmoothQuant relies on a key observation: even if activations are much harder to quantize than weights due to the presence of outliers <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref>, different tokens exhibit similar variations across their channels. Based on this observation, SmoothQuant migrates the quantization difficulty from activations to weights (Figure <ref type="figure" target="#fig_0">1</ref>). SmoothQuant proposes a mathematically equivalent per-channel scaling transformation that significantly smooths the magnitude across the channels, making the model quantization-friendly. Since SmoothQuant is compatible with various quantization schemes, we implement three efficiency levels of quantization settings for SmoothQuant (see Table <ref type="table">3</ref>, O1-O3). Experiments show that SmoothQuant is hardware-efficient: it can maintain the performance of OPT-175B <ref type="bibr" target="#b38">(Zhang et al., 2022)</ref>, <ref type="bibr">BLOOM-176B (Scao et al., 2022)</ref> , and GLM-130B <ref type="bibr" target="#b37">(Zeng et al., 2022)</ref> using the most efficient quantization scheme (i.e., per-tensor static), leading up to 1.51× speed up and 1.96× memory saving on PyTorch. SmoothQuant is easy to implement. We integrate SmoothQuant into Faster-Transformer, the state-of-the-art transformer serving framework, achieving up to 1.56× speedup and halving the memory usage compared with FP16. Remarkably, SmoothQuant allows serving large models like OPT-175B using only half number of GPUs compared to FP16 while being faster. Our work democratizes the use of LLMs by offering a turnkey solution to reduce the serving cost. We hope SmoothQuant can inspire greater use of LLMs in the future.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Preliminaries</head><p>Quantization maps a high-precision value into discrete levels. In this work, we study integer uniform quantization <ref type="bibr" target="#b13">(Jacob et al., 2018</ref>) (specifically INT8) for better hardware support and efficiency. The quantization process can be expressed as:</p><formula xml:id="formula_0">XINT8 = X FP16 ∆ , ∆ = max(|X|) 2 N −1 − 1 , (<label>1</label></formula><formula xml:id="formula_1">)</formula><p>where X is the floating-point tensor, X is the quantized counterpart, ∆ is the quantization step size,</p><p>• is the rounding function, and N is the number of bits (8 in our case). Here we assume the tensor is symmetric at 0 for simplicity; the discussion is similar for asymmetric cases (e.g., after ReLU) by adding a zero-point <ref type="bibr" target="#b13">(Jacob et al., 2018)</ref>.</p><p>Such quantizer uses the maximum absolute value to calculate ∆ so that it preserves the outliers in activation, which are found to be important for accuracy <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref>. We can calculate ∆ offline with the activations of some calibration samples, which refers to the static quantization. We can also use the runtime statistics of activations to get ∆, what we call the dynamic quantization.</p><p>As shown in Figure <ref type="figure">2</ref>, quantization has different granularity levels. The per-tensor quantization uses a single step size for the entire matrix. We can further enable finer-grained quantization by using different quantization step sizes for each token of activations (per-token quantization) or each output channel of weights (per-channel quantization). A coarse-grained version of per-channel quantization</p><formula xml:id="formula_2">X * W T C i C o C i Δ W [1] Δ X [1]</formula><p>per-tensor quant.</p><p>per-tensor quant.</p><p>(a) per-tensor quantization Δ</p><formula xml:id="formula_3">X [T×1] X * W T C i C o C i Δ W [1×C 0 ]</formula><p>per-token quant.</p><p>per-channel quant. (b) per-token + per-channel quantization Figure <ref type="figure">2</ref>: Definition of per-tensor, per-token, and perchannel quantization. Per-tensor quantization is the most efficient to implement. For vector-wise quantization to efficiently utilize the INT8 GEMM kernels, we can only use scaling factors from the outer dimensions (i.e., token dimension T and out channel dimension C o ) but not inner dimension (i.e., in channel dimension C i ).</p><p>is to use different quantization steps for different groups of channels, called group-wise quantization <ref type="bibr" target="#b27">(Shen et al., 2020;</ref><ref type="bibr" target="#b35">Yao et al., 2022)</ref>.</p><p>For a linear layer in transformers <ref type="bibr" target="#b30">(Vaswani et al., 2017</ref></p><formula xml:id="formula_4">) Y = X • W, Y ∈ R T ×Co , X ∈ R T ×C i , W ∈ R C i ×Co</formula><p>, where T is the number of tokens, C i is the input channel, and C o is the output channel (see Figure <ref type="figure">2</ref>, we omit the batch dimension for simplicity), we can reduce the storage by half compared to FP16 by quantizing the weights to INT8. However, to speed up the inference, we need to quantize both weights and activations into INT8 (i.e., W8A8) to utilize the integer kernels (e.g., INT8 GEMM), which are supported by a wide range of hardware (e.g., NVIDIA GPUs, Intel CPUs, Qualcomm DSPs, etc.).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">SmoothQuant</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Dissecting the Quantization Difficulty</head><p>The outliers in LLM's activations make quantization difficult <ref type="bibr" target="#b7">(Dettmers et al., 2022;</ref><ref type="bibr" target="#b33">Wei et al., 2022)</ref>. We first study the difficulties caused by the quantization of activations and look for a pattern amongst outliers. We visualize the input activations and the weights of a linear layer that has a large quantization error in Figure <ref type="figure" target="#fig_1">3</ref> (left). We can find several patterns that motivate our method:</p><p>1. Activations are harder to quantize than weights. The weight distribution is quite uniform and flat, which is easy to quantize. Previous work  has shown that quantizing the weights of LLMs with INT8 or even with INT4 does not degrade accuracy <ref type="bibr" target="#b7">(Dettmers et al., 2022;</ref><ref type="bibr" target="#b35">Yao et al., 2022;</ref><ref type="bibr" target="#b37">Zeng et al., 2022)</ref>, which echoes our observation.</p><p>2. Outliers make activation quantization difficult. The scale of outliers is ∼ 100× larger than most of the activation values. In the case of pertensor quantization (Equation <ref type="formula" target="#formula_0">1</ref>), the large outliers dominate the maximum magnitude measurement, leading to low effective quantization bits/levels (Figure <ref type="figure" target="#fig_0">1</ref>) for non-outlier channels: suppose the maximum magnitude of channel i is m i , and the maximum value of the whole matrix is m, the effective quantization levels of channel i is 2 8 • m i /m. For non-outlier channels, the effective quantization levels would be very small (2-3), leading to large quantization errors.</p><p>3. Outliers persist in fixed channels. Outliers appear in a small fraction of the channels. If one channel has an outlier, it persistently appears in all tokens <ref type="bibr">(Figure 3,</ref><ref type="bibr">red)</ref>. The variance amongst the channels for a given token is large (some channels are very large, but most are small), but the variance between the magnitudes of a given channel across tokens is small (outlier channels are consistently large).</p><p>Due to the persistence of outliers and the small variance inside each channel, if we could perform per-channel quantization of the activation (i.e., using a different quantization step for each channel), the quantization error would be much smaller compared to per-tensor quantization, while per-token quantization helps little. In Table <ref type="table" target="#tab_2">2</ref>, we verify the assumption that simulated per-channel activation quantization successfully bridges the accuracy with the FP16 baseline.</p><p>However, per-channel activation quantization does not map well to hardware-accelerated GEMM kernels, that rely on a sequence of operations ex- ecuted at a high throughput (e.g., Tensor Core MMAs) and do not tolerate the insertion of instructions with a lower throughput (e.g., conversions or CUDA Core FMAs) in that sequence. In those kernels, scaling can only be performed along the outer dimensions of the matrix multiplication (i.e., token dimension of activations T , output channel dimension of weights C o , see Figure <ref type="figure">2</ref>), which can be applied after the matrix multiplication finishes:</p><formula xml:id="formula_5">Y = diag(∆ FP16 X ) • ( XINT8 • WINT8 ) • diag(∆ FP16 W )</formula><p>(2) Therefore, previous works all use per-token activation quantization for linear layers <ref type="bibr" target="#b7">(Dettmers et al., 2022;</ref><ref type="bibr" target="#b35">Yao et al., 2022)</ref>, although they cannot address the difficulty of activation quantization (only slightly better than per-tensor).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Activation Smoothing</head><p>Instead of per-channel activation quantization (which is infeasible), we propose to "smooth" the activations by dividing the input activations by a per-channel smoothing factor s ∈ R C i . To keep the mathematical equivalence of a linear layer, we need to scale the weights accordingly in the reversed direction:</p><formula xml:id="formula_6">Y = (Xdiag(s) −1 ) • (diag(s)W) = X Ŵ (3)</formula><p>Considering input X is usually produced from previous linear operations (e.g., linear layers, layer norms, etc.), we can easily fuse the smoothing factor into previous layers' parameters offline, which doe not incur kernel call overhead from an extra scaling. For some other cases, when the input is from a residual add, we can add an extra scaling to the residual branch similar to <ref type="bibr" target="#b33">Wei et al. (2022)</ref>.</p><p>Migrate the quantization difficulty from activations to weights. We aim to choose a per-channel smoothing factor s such that X = Xdiag(s) −1 is easy to quantize. To reduce the quantization error, we should increase the effective quantization bits for all the channels. The total effective quantization bits would be largest when all the channels have the same maximum magnitude. Therefore, a straight-forward choice is s j = max(|X j |), j = 1, 2, ..., C i , where j corresponds to j-th input channel. It ensures that after the division, all the activation channels will have the same maximum value, which is easy to quantize. Note that the range of activations is dynamic; it varies for different input samples. Here, we estimate the scale of activations channels using the calibration samples from the pre-training dataset <ref type="bibr" target="#b13">(Jacob et al., 2018)</ref>. However, this formula pushes all the quantization difficulties to the weights. We find that, in this case, the quantization errors would be large for the weights (outlier channels are migrated to weights now), leading to a large accuracy degradation (see Figure <ref type="figure">9</ref>). On the other hand, we can also push all the quantization difficulty from weights to activations by choosing s j = 1/ max(|W j |). Similarly, the model performance is bad due to the activation quantization errors. Therefore, we need to split the quantization difficulty between weights and activations so that they are both easy to quantize.</p><p>Here we introduce a hyper-parameter, migration strength α, to control how much difficulty we want to migrate from activation to weights, using the following equation: We find that for most of the models, e.g., all OPT <ref type="bibr" target="#b38">(Zhang et al., 2022)</ref> and BLOOM (Scao et al., 2022) models, α = 0.5 is a well-balanced point to evenly split the quantization difficulty, especially when we are using the same quantizer for weights and activations (e.g., per-tensor, static quantization). The formula ensures that the weights and activations at the corresponding channel share a similar maximum value, thus sharing the same quantization difficulty. Figure <ref type="figure">4</ref> illustrates the smoothing transformation when we take α = 0.5. For some other models where activation outliers are more significant (e.g., GLM-130B <ref type="bibr" target="#b37">(Zeng et al., 2022)</ref> has ∼30% outliers, which are more difficult for activation quantization), we can choose a larger α to migrate more quantization difficulty to weights (like 0.75).</p><formula xml:id="formula_7">s j = max(|X j |) α / max(|W j |) 1−α (4)</formula><p>Applying SmoothQuant to Transformer blocks. Linear layers take up most of the parameters and computation of LLM models. By default, we perform scale smoothing for the input activations of all linear layers in transformers and quantize the linear layers with W8A8. We also enable quantization of BMM operators in the attention computation.</p><p>We also design a quantization flow for transformer blocks in Figure <ref type="figure">5</ref>. We quantize the inputs and weights of compute-heavy operators like linear layers and BMM in attention layers with INT8, while keeping the activation as FP16 for other lightweight element-wise operations like Softmax and Layer-Norm. Such a design helps us to balance accuracy and inference efficiency.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Experiments</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Setups</head><p>Baselines. We compare with four baselines in the INT8 post-training quantization setting, i.e., without re-training of the model parameters: W8A8 naive quantization, ZeroQuant <ref type="bibr" target="#b35">(Yao et al., 2022)</ref>, LLM.int8() <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref>, and Outlier Suppression <ref type="bibr" target="#b33">(Wei et al., 2022)</ref>. Since SmoothQuant is orthogonal to the quantization schemes, we provide gradually aggressive and efficient quantization levels from O1 to O3. The detailed quantization schemes of the baseline methods and SmoothQuant are shown in Table <ref type="table">3</ref>. Models and datasets. We choose three families of LLMs to evaluate SmoothQuant: OPT <ref type="bibr" target="#b38">(Zhang et al., 2022)</ref>, <ref type="bibr">BLOOM (Scao et al., 2022)</ref>, and GLM-130B <ref type="bibr" target="#b37">(Zeng et al., 2022)</ref>. We use seven zero-shot evaluation tasks: LAMBADA <ref type="bibr" target="#b21">(Paperno et al., 2016)</ref>, HellaSwag <ref type="bibr" target="#b36">(Zellers et al., 2019)</ref>, PIQA <ref type="bibr" target="#b3">(Bisk et al., 2020)</ref>, WinoGrande <ref type="bibr" target="#b25">(Sakaguchi et al., 2019)</ref>, OpenBookQA <ref type="bibr" target="#b19">(Mihaylov et al., 2018)</ref>, RTE <ref type="bibr" target="#b31">(Wang et al., 2018)</ref>, COPA <ref type="bibr" target="#b24">(Roemmele et al., 2011)</ref>, and one language modeling dataset Wiki-Text <ref type="bibr" target="#b18">(Merity et al., 2016)</ref> to evaluate the OPT and BLOOM models. We use MMLU <ref type="bibr" target="#b12">(Hendrycks et al., 2020)</ref>, MNLI <ref type="bibr" target="#b34">(Williams et al., 2018)</ref>, QNLI <ref type="bibr" target="#b31">(Wang et al., 2018)</ref>   <ref type="table">3</ref>). We extensively benchmark the performance on 7 zero-shot benchmarks (by reporting the average accuracy) and 1 language modeling benchmark (perplexity). *For Zero-Quant, we also tried leaving the input activation of self-attention in FP16 and quantizing the rest to INT8, which is their solution to the GPT-NeoX-20B. But this does not solve the accuracy degradation of OPT-175B.  set of GLM-130B. We use lm-eval-harness * to evaluate OPT and BLOOM models, and GLM-130B's official repo † for its own evaluation. Note that we focus on the relative performance change before and after quantization but not the absolute value.</p><p>Activation smoothing. The migration strength α = 0.5 is a general sweet spot for all the OPT and BLOOM models, and α = 0.75 for GLM-130B since its activations are more difficult to quantize <ref type="bibr" target="#b37">(Zeng et al., 2022)</ref>. We get a suitable α by running a quick grid search on a subset of the Pile <ref type="bibr" target="#b10">(Gao et al., 2020)</ref> validation set. To get the statistics of activations, we calibrate the smoothing factors and the static quantization step sizes once with 512 ran-dom sentences from the pre-training dataset Pile, and apply the same smoothed and quantized model for all downstream tasks. In this way, we can benchmark the generality and zero-shot performance of the quantized LLMs.</p><p>Implementation. We implement SmoothQuant with two backends: (1) PyTorch Huggingface ‡ for the proof of concept, and (2) FasterTransformer § , as an example of a high-performance framework used in production environments. In both PyTorch Huggingface and FasterTransformer frameworks, we implement INT8 linear modules and the batched matrix multiplication (BMM) function with CUT-LASS INT8 GEMM kernels. We simply replace the original floating point (FP16) linear modules and the bmm function with our INT8 kernels as the INT8 model.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Accurate Quantization</head><p>Results of OPT-175B. SmoothQuant can handle the quantization of very large LLMs, whose activations are more difficult to quantize. We study quantization on OPT-175B. As shown in Table <ref type="table" target="#tab_3">4</ref>, SmoothQuant can match the FP16 accuracy on all evaluation datasets with all quantization schemes. LLM.int8() can match the floating point accuracy because they use floating-point values to represent outliers, which leads to a large latency overhead (Table <ref type="table">6</ref>). The W8A8, ZeroQuant, and Outlier Suppression baselines produce nearly random results, indicating that naively quantizing the activation of LLMs will destroy the model performance. Results of different LLMs. SmoothQuant can be applied to various LLM designs. In Table <ref type="table" target="#tab_5">5</ref>, we show SmoothQuant can losslessly quantize all existing open LLMs beyond 100B parameters. Compared with the OPT-175B model, the BLOOM-176B model is easier to quantize: none of the baselines completely destroys the model; even the naive W8A8 per-tensor dynamic quantization only degrades the accuracy by 4%. The O1 and O2 levels of SmoothQuant successfully maintain the floating point accuracy, while the O3 level (pertensor static) degrades the average accuracy by 0.8%, which we attribute to the discrepancy between the statically collected statistics and the real evaluation samples' activation statistics. On the contrary, the GLM-130B model is more difficult to quantize (which echos <ref type="bibr">Zeng et al.)</ref>. Nonetheless, SmoothQuant-O1 can match the FP16 accuracy, while SmoothQuant-O3 only degrades the accuracy by 1%, which significantly outperforms the baselines. Note that we clip the top 2% tokens when calibrating the static quantization step sizes for GLM-130B following <ref type="bibr" target="#b33">Wei et al. (2022)</ref>. It is interesting to see that different model/training designs have different quantization difficulties, which we hope will inspire future LLM research.</p><p>Results on LLMs of different model sizes.</p><p>SmoothQuant works not only for the very large LLMs beyond 100B parameters, but it also works consistently for smaller LLMs. In Figure <ref type="figure" target="#fig_4">6</ref>, we show that SmoothQuant can work on all scales of OPT models, matching the FP16 accuracy with INT8 quantization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Speedup and Memory Saving</head><p>In this section, we show the measured speedup and memory saving of SmoothQuant-O3 integrated into PyTorch and FasterTransformer. We measure the end-to-end latency of generating all hidden states for a batch of 4 sentences in one pass, i.e., the context stage latency. We record the (aggregated) peak GPU memory usage in this process. We only compare SmoothQuant with LLM.int8() because it is the only existing quantization method that can preserve LLM accuracy at all scales. Due to the lack of support for model parallelism in Huggingface, we only measure SmoothQuant's performance on a single GPU for the PyTorch implementation, so we choose OPT-6.7B, OPT-13B, and OPT-30B for evaluation. In the FasterTransformer library, SmoothQuant can seamlessly work with Tensor Parallelism <ref type="bibr" target="#b28">(Shoeybi et al., 2019)</ref> algorithm, so we test SmoothQuant on OPT-13B, OPT-30B, OPT-66B, and OPT-175B for both single and multi-GPU benchmarks. All our experiments are conducted on NVIDIA A100 80GB GPU servers.</p><p>Results of the PyTorch implementation. In Figure <ref type="figure" target="#fig_5">7</ref>, we show the inference latency and peak memory usage based on the PyTorch implementation. SmoothQuant is consistently faster than the FP16 baseline, getting a 1.51x speedup on OPT-30B when the sequence length is 256. We can also see a trend that the larger the model, the more significant the acceleration. On the other hand, LLM.int8() is almost always slower than the FP16 baseline, which is due to the large overhead of the mixed-precision activation representation. In terms of memory, SmoothQuant and LLM.int8() can all nearly halve the memory usage of the FP16 model, while SmoothQuant saves slightly more memory because it uses fully INT8 GEMMs.</p><p>Results of the FasterTransformer implementation. As shown in Figure <ref type="figure" target="#fig_6">8</ref> (top), compared to FasterTransformer's FP16 implementation of OPT, SmoothQuant-O3 can further reduce the execution latency of OPT-13B and OPT-30B by up to 1.56× when using a single GPU. This is challenging since FasterTransformer is already more than 3× faster compared to the PyTorch implementation for OPT-30B. Remarkably, for bigger models that have to be distributed across multiple GPUs, SmoothQuant achieves similar or even better latency using only half the number of GPUs (1 GPU  instead of 2 for OPT-66B, 4 GPUs instead of 8 for OPT-175B). This could greatly lower the cost of serving LLMs. The amount of memory needed when using SmoothQuant-O3 in FasterTransformer is reduced by a factor of almost 2×, as shown on Figure <ref type="figure" target="#fig_6">8</ref> (bottom).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Ablation Study</head><p>Quantization schemes. Table <ref type="table">6</ref> shows the inference latency of different quantization schemes based on our PyTorch implementation. We can see that the coarser the quantization granularity (from O1 to O3), the lower the latency. And static quantization can significantly accelerate inference compared with dynamic quantization because we no longer need to calculate the quantization step sizes at runtime. SmoothQuant is faster than FP16 baseline under all settings, while LLM.int8() is usually slower. We recommend using a coarser quantization scheme if the accuracy permits.</p><p>Migration strength. We need to find a suitable migration strength α (see Equation <ref type="formula">4</ref>) to balance the quantization difficulty of weights and activations. We ablate the effect of different α's on OPT-175B with LAMBADA in Figure <ref type="figure">9</ref>. When α is too small (&lt;0.4), the activations are hard to quantize; when α is too large (&gt;0.6), the weights will be hard to quantize. Only when we choose α from the sweet spot region (0.4-0.6) can we get small quantization errors for both weights and activations, and maintain the model performance after quantization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Related Work</head><p>Large language models (LLMs). Pre-trained language models have achieved remarkable performance on various benchmarks by scaling up. GPT-3 <ref type="bibr" target="#b5">(Brown et al., 2020b)</ref> is the first LLM be-Table <ref type="table">6</ref>: GPU Latency (ms) of different quantization schemes. The coarser the quantization scheme (from per-token to per-tensor, dynamic to static, O1 to O3, defined in Table <ref type="table">3</ref>), the lower the latency. SmoothQuant achieves lower latency compared to FP16 under all settings, while LLM.int8() is mostly slower. The batch size is 4.</p><p>Figure <ref type="figure">9</ref>: A suitable migration strength α (sweet spot) makes both activations and weights easy to quantize. If the α is too large, weights will be hard to quantize; if too small, activations will be hard to quantize.</p><p>yond 100B parameters and achieves impressive few-shot/zero-shot learning results. Later work like Gopher (Rae et al., 2021), Megatron-Turing NLG <ref type="bibr" target="#b29">(Smith et al., 2022)</ref>, GLaM <ref type="bibr" target="#b9">(Du et al., 2022)</ref>, PaLM <ref type="bibr" target="#b6">(Chowdhery et al., 2022)</ref>, etc. continue to push the frontier of scaling, going beyond 500B parameters. However, the language model gets larger, serving such models for inference becomes expensive and challenging. In this work, we show that our proposed method can quantize the three largest, openly available LLMs: OPT-175B <ref type="bibr" target="#b38">(Zhang et al., 2022)</ref>, BLOOM-176B (Scao et al., 2022) and GLM-130B <ref type="bibr" target="#b37">(Zeng et al., 2022)</ref>, to reduce the memory cost and accelerate inference.</p><p>Model quantization. Quantization is an effective method for reducing the model size and accelerating inference. It proves to be effective for various convolutional neural works (CNNs) <ref type="bibr" target="#b11">(Han et al., 2016;</ref><ref type="bibr" target="#b13">Jacob et al., 2018;</ref><ref type="bibr" target="#b20">Nagel et al., 2019;</ref><ref type="bibr" target="#b32">Wang et al., 2019;</ref><ref type="bibr" target="#b16">Lin et al., 2020)</ref> and transformers <ref type="bibr" target="#b27">(Shen et al., 2020;</ref><ref type="bibr">Kim et al., 2021;</ref><ref type="bibr" target="#b17">Liu et al., 2021)</ref>. Weight equalization <ref type="bibr" target="#b20">(Nagel et al., 2019)</ref> and channel splitting <ref type="bibr" target="#b39">(Zhao et al., 2019)</ref> reduce quanti-zation error by suppressing the outliers in weights.</p><p>However, these techniques cannot address the activation outliers, which are the major quantization bottleneck for LLMs <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref>.</p><p>Quantization of LLMs. ZeroQuant <ref type="bibr" target="#b35">(Yao et al., 2022)</ref> and nuQmm <ref type="bibr" target="#b22">(Park et al., 2022)</ref> use a per-tensor and group-wise quantization scheme for LLMs, which requires customized CUDA kernels. Their largest evaluated models are 20B and 2.7B, respectively and fail to maintain the performance of larger LMs like OPT-175B. LLM.int8() <ref type="bibr" target="#b7">(Dettmers et al., 2022)</ref> uses mixed INT8/FP16 decomposition to address the activation outliers. However, such implementation leads to large latency overhead, which can be even slower than FP16 inference. Outlier Suppression <ref type="bibr" target="#b33">(Wei et al., 2022)</ref> uses the non-scaling LayerNorm and token-wise clipping to deal with the activation outliers. However, it only succeeds on small language models such as BERT <ref type="bibr" target="#b8">(Devlin et al., 2019)</ref> and BART <ref type="bibr" target="#b15">(Lewis et al., 2019)</ref> and fails to maintain the accuracy for LLMs (Table <ref type="table" target="#tab_5">5</ref>). Our algorithm preserves the performance of LLMs (up to 176B, the largest open-source LLM we can find) with an efficient per-tensor, static quantization scheme without retraining, allowing us to use off-the-shelf INT8 GEMM to achieve high hardware efficiency.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusion</head><p>We propose SmoothQuant, an accurate and efficient post-training quantization method to enable lossless 8-bit weight and activation quantization for LLMs with 176 billion parameters. SmoothQuant migrates quantization difficulty from activations to weights by doing a mathematically equivalent transformation to the model parameters, which effectively smooths the activation outliers while maintaining low quantization error for the weights. SmoothQuant enables the quantization for both weight and activations for all GEMMs in the LLMs, which significantly reduces the inference latency and memory usage compared with the mixedprecision activation quantization baseline. We integrate SmoothQuant into PyTorch and FasterTransformer, getting up to 1.56× inference acceleration and halving the memory footprint. SmoothQuant democratizes the application of LLMs by offering a turnkey solution to reduce the serving cost.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: SmoothQuant's intuition: the activation X is hard to quantize because outliers stretch the quantization range, leaving few effective bits for most values. We migrate the scale variance from activations to weights W during offline to reduce the quantization difficulty of activations. The smoothed activation X and the adjusted weight Ŵ are both easy to quantize.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Magnitude of the input activations and weights of a linear layer in OPT-13B before and after SmoothQuant. Observations: (1) there are a few channels in the original activation map whose magnitudes are very large (greater than 70); (2) the variance in one activation channel is small; (3) the original weight distribution is flat and uniform. SmoothQuant migrates the outlier channels from activation to weight. In the end, the outliers in the activation are greatly smoothed while the weight is still pretty smooth and flat.</figDesc><graphic url="image-9.png" coords="4,70.87,70.87,453.53,137.05" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 4 :Figure 5 :</head><label>45</label><figDesc>Figure 4: Illustration of the smoothing factor s.</figDesc><graphic url="image-10.png" coords="5,70.87,70.87,218.26,76.70" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head></head><label></label><figDesc>per-tensor dynamic ZeroQuant group-wise per-token dynamic LLM.int8() per-channel per-token dynamic+FP16 Outlier Suppression per-tensor per-tensor static SmoothQuant-O1 per-tensor per-token dynamic SmoothQuant-O2 per-tensor per-tensor dynamic SmoothQuant-O3 per-tensor per-tensor static Table 3: Quantization setting of the baselines and SmoothQuant. All weight and activations use INT8 representations unless specified. For SmoothQuant, the efficiency improves from O1 to O3 (i.e., lower latency).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: SmoothQuant-O3 (the most efficient setting, defined in Table 3) preserves the accuracy of OPT models across different scales when quantized to INT8. LLM.int8() requires FP16/INT8 mixed precision and suffers from slow down.</figDesc><graphic url="image-11.png" coords="7,70.87,70.86,218.27,130.10" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: The PyTorch implementation of SmoothQuant-O3 achieves up to 1.51× speedup and 1.96× memory saving for OPT models on a single NVIDIA A100-80GB GPU, while LLM.int8() slows down the inference in most cases.</figDesc><graphic url="image-12.png" coords="8,70.87,70.87,453.55,155.74" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 8 :</head><label>8</label><figDesc>Figure8: Inference latency (top) and memory usage (bottom) of the FasterTransformer implementation on NVIDIA A100-80GB GPUs. For smaller models, the latency can be significantly reduced with SmoothQuant-O3 by up to 1.56x compared to FP16. For the bigger models (OPT-66B and 175B), we can achieve similar or even faster inference using only half number of GPUs. Memory footprint is almost halved compared to FP16.</figDesc><graphic url="image-13.png" coords="8,70.87,284.38,453.55,154.83" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>SmoothQuant achieves high hardware efficiency while maintaining the accuracy of LLMs with 176 billion parameters in a training-free fashion.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 2 :</head><label>2</label><figDesc>Among different activation quantization schemes, only per-channel quantization preserves the accuracy, but it is not compatible (marked in gray) with INT8 GEMM kernels. Models are OPT<ref type="bibr" target="#b38">(Zhang et al., 2022)</ref> family and we report the average accuracy on WinoGrande, HellaSwag, PIQA, and LAMBADA.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 4 :</head><label>4</label><figDesc>and LAMBADA to evaluate the GLM-130B model because some of the aforementioned benchmarks appear in the training SmoothQuant maintains the accuracy of OPT-175B model after INT8 quantization, even with the most aggressive and most efficient O3 setting (Table</figDesc><table><row><cell>OPT-175B</cell><cell cols="6">LAMBADA HellaSwag PIQA WinoGrande OpenBookQA RTE COPA Average↑ WikiText↓</cell></row><row><cell>FP16</cell><cell>74.7%</cell><cell>59.3% 79.7%</cell><cell>72.6%</cell><cell>34.0%</cell><cell>59.9% 88.0% 66.9%</cell><cell>10.99</cell></row><row><cell>W8A8</cell><cell>0.0%</cell><cell>25.6% 53.4%</cell><cell>50.3%</cell><cell>14.0%</cell><cell>49.5% 56.0% 35.5%</cell><cell>93080</cell></row><row><cell>ZeroQuant</cell><cell>0.0%*</cell><cell>26.0% 51.7%</cell><cell>49.3%</cell><cell>17.8%</cell><cell>50.9% 55.0% 35.8%</cell><cell>84648</cell></row><row><cell>LLM.int8()</cell><cell>74.7%</cell><cell>59.2% 79.7%</cell><cell>72.1%</cell><cell>34.2%</cell><cell>60.3% 87.0% 66.7%</cell><cell>11.10</cell></row><row><cell>Outlier Suppression</cell><cell>0.00%</cell><cell>25.8% 52.5%</cell><cell>48.6%</cell><cell>16.6%</cell><cell>53.4% 55.0% 36.0%</cell><cell>96151</cell></row><row><cell>SmoothQuant-O1</cell><cell>74.7%</cell><cell>59.2% 79.7%</cell><cell>71.2%</cell><cell>33.4%</cell><cell>58.1% 89.0% 66.5%</cell><cell>11.11</cell></row><row><cell>SmoothQuant-O2</cell><cell>75.0%</cell><cell>59.0% 79.2%</cell><cell>71.2%</cell><cell>33.0%</cell><cell>59.6% 88.0% 66.4%</cell><cell>11.14</cell></row><row><cell>SmoothQuant-O3</cell><cell>74.6%</cell><cell>58.9% 79.7%</cell><cell>71.2%</cell><cell>33.4%</cell><cell>59.9% 90.0% 66.8%</cell><cell>11.17</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 5 :</head><label>5</label><figDesc>SmoothQuant works for different LLMs.</figDesc><table><row><cell>We</cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>We thank MIT-IBM Watson AI Lab, MIT AI Hardware Program, Amazon and MIT Science Hub, Qualcomm Innovation Fellowship, NVIDIA Academic Partnership Award, Microsoft Turing Academic Program, and NSF for supporting this research. We thank Haotian Tang, Eric Lin and Jilei Hou for the helpful discussions.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Model OPT-13B OPT-30B</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">-O1</forename><surname>Smoothquant</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">-O3</forename><surname>Smoothquant</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Piqa: Reasoning about physical commonsense in natural language</title>
+		<author>
+			<persName><forename type="first">Yonatan</forename><surname>References</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rowan</forename><surname>Bisk</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zellers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Le</forename><surname>Ronan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianfeng</forename><surname>Bras</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yejin</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Choi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Thirty-Fourth AAAI Conference on Artificial Intelligence</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Language models are few-shot learners</title>
+		<author>
+			<persName><forename type="first">Tom</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Melanie</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><forename type="middle">D</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prafulla</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arvind</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pranav</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Girish</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amanda</forename><surname>Askell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sandhini</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ariel</forename><surname>Herbert-Voss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gretchen</forename><surname>Krueger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tom</forename><surname>Henighan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rewon</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Ramesh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Ziegler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Clemens</forename><surname>Winter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Hesse</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Sigler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mateusz</forename><surname>Litwin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<meeting><address><addrLine>Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford</addrLine></address></meeting>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2020">2020a</date>
+			<biblScope unit="volume">33</biblScope>
+			<biblScope unit="page" from="1877" to="1901" />
+		</imprint>
+	</monogr>
+	<note>Ilya Sutskever, and Dario Amodei</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Language models are few-shot learners</title>
+		<author>
+			<persName><forename type="first">Tom</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Melanie</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><forename type="middle">D</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prafulla</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arvind</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pranav</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Girish</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amanda</forename><surname>Askell</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2020">2020b</date>
+			<biblScope unit="volume">33</biblScope>
+			<biblScope unit="page" from="1877" to="1901" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<author>
+			<persName><forename type="first">Aakanksha</forename><surname>Chowdhery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sharan</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maarten</forename><surname>Bosma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gaurav</forename><surname>Mishra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Roberts</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyung</forename><forename type="middle">Won</forename><surname>Chung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Charles</forename><surname>Sutton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sebastian</forename><surname>Gehrmann</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2204.02311</idno>
+		<title level="m">Palm: Scaling language modeling with pathways</title>
+				<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Dettmers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Younes</forename><surname>Belkada</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2208.07339</idno>
+	</analytic>
+	<monogr>
+		<title level="m">-bit matrix multiplication for transformers at scale</title>
+				<imprint>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="page">8</biblScope>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+	<note>int8(</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">BERT: pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenton</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kristina</forename><surname>Toutanova</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NAACL-HLT 2019</title>
+				<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="4171" to="4186" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Glam: Efficient scaling of language models with mixture-of-experts</title>
+		<author>
+			<persName><forename type="first">Nan</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanping</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">M</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Tong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Lepikhin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuanzhong</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maxim</forename><surname>Krikun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanqi</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adams</forename><forename type="middle">Wei</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Orhan</forename><surname>Firat</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Machine Learning</title>
+				<imprint>
+			<publisher>PMLR</publisher>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="page" from="5547" to="5569" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<author>
+			<persName><forename type="first">Leo</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stella</forename><surname>Biderman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sid</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Laurence</forename><surname>Golding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Travis</forename><surname>Hoppe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Charles</forename><surname>Foster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Phang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Horace</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anish</forename><surname>Thite</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noa</forename><surname>Nabeshima</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2101.00027</idno>
+		<title level="m">The pile: An 800gb dataset of diverse text for language modeling</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Deep Compression: Compressing Deep Neural Networks with Pruning, Trained Quantization and Huffman Coding</title>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huizi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">Measuring massive multitask language understanding</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Hendrycks</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Collin</forename><surname>Burns</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><surname>Basart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andy</forename><surname>Zou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mantas</forename><surname>Mazeika</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dawn</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Steinhardt</surname></persName>
+		</author>
+		<idno>CoRR, abs/2009.03300</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Quantization and training of neural networks for efficient integer-arithmetic-only inference</title>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Jacob</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Skirmantas</forename><surname>Kligys</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Menglong</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hartwig</forename><surname>Adam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Kalenichenko</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition</title>
+				<meeting>the IEEE Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="2704" to="2713" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">2021. I-bert: Integeronly bert quantization</title>
+		<author>
+			<persName><forename type="first">Sehoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Gholami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhewei</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">W</forename><surname>Mahoney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kurt</forename><surname>Keutzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International conference on machine learning</title>
+				<imprint>
+			<publisher>PMLR</publisher>
+			<biblScope unit="page" from="5506" to="5518" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Denoising sequence-to-sequence pre-training for natural language generation, translation, and comprehension</title>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yinhan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal ; Abdelrahman Mohamed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ves</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1910.13461</idno>
+		<imprint>
+			<date type="published" when="2019">Marjan Ghazvininejad,. 2019</date>
+			<pubPlace>Bart</pubPlace>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Mcunet: Tiny deep learning on iot devices</title>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei-Ming</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yujun</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chuang</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="volume">33</biblScope>
+			<biblScope unit="page" from="11711" to="11722" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Post-training quantization for vision transformer</title>
+		<author>
+			<persName><forename type="first">Zhenhua</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunhe</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Siwei</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wen</forename><surname>Gao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="page" from="28092" to="28103" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Pointer sentinel mixture models</title>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Merity</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Caiming</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Socher</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Can a suit of armor conduct electricity? a new dataset for open book question answering</title>
+		<author>
+			<persName><forename type="first">Todor</forename><surname>Mihaylov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Clark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tushar</forename><surname>Khot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Sabharwal</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EMNLP</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Data-free quantization through weight equalization and bias correction</title>
+		<author>
+			<persName><forename type="first">Markus</forename><surname>Nagel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mart</forename><surname>Van Baalen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tijmen</forename><surname>Blankevoort</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Max</forename><surname>Welling</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE/CVF International Conference on Computer Vision</title>
+				<meeting>the IEEE/CVF International Conference on Computer Vision</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1325" to="1334" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">The LAMBADA dataset: Word prediction requiring a broad discourse context</title>
+		<author>
+			<persName><forename type="first">Denis</forename><surname>Paperno</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Germán</forename><surname>Kruszewski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Angeliki</forename><surname>Lazaridou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ngoc</forename><forename type="middle">Quan</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Raffaella</forename><surname>Bernardi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sandro</forename><surname>Pezzelle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Baroni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gemma</forename><surname>Boleda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Raquel</forename><surname>Fernández</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/P16-1144</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 54th Annual Meeting of the Association for Computational Linguistics<address><addrLine>Berlin, Germany</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1525" to="1534" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<author>
+			<persName><forename type="first">Gunho</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baeseong</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Se</forename><surname>Jung Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Byeongwook</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youngjoo</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dongsoo</forename><surname>Lee</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2206.09557</idno>
+		<title level="m">Quantized matmul for efficient inference of large-scale generative language models</title>
+				<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<author>
+			<persName><forename type="first">Sebastian</forename><surname>Jack W Rae</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trevor</forename><surname>Borgeaud</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katie</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jordan</forename><surname>Millican</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francis</forename><surname>Hoffmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sarah</forename><surname>Aslanides</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Roman</forename><surname>Henderson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Susannah</forename><surname>Ring</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Young</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2112.11446</idno>
+		<title level="m">Scaling language models: Methods, analysis &amp; insights from training gopher</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Choice of plausible alternatives: An evaluation of commonsense causal reasoning</title>
+		<author>
+			<persName><forename type="first">Melissa</forename><surname>Roemmele</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cosmin</forename><surname>Adrian Bejan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">S</forename><surname>Gordon</surname></persName>
+		</author>
+		<idno>SS-11-06</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Logical Formalizations of Commonsense Reasoning, Papers from the 2011 AAAI Spring Symposium</title>
+				<meeting><address><addrLine>Stanford, California, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>AAAI</publisher>
+			<date type="published" when="2011-03-21">2011. March 21-23, 2011</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">Technical Report</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Winogrande: An adversarial winograd schema challenge at scale</title>
+		<author>
+			<persName><forename type="first">Keisuke</forename><surname>Sakaguchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Le</forename><surname>Ronan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chandra</forename><surname>Bras</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yejin</forename><surname>Bhagavatula</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Choi</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1907.10641</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<author>
+			<persName><forename type="first">Teven</forename><surname>Le Scao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Angela</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Akiki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ellie</forename><surname>Pavlick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Suzana</forename><surname>Ilić</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Hesslow</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Roman</forename><surname>Castagné</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandra</forename><forename type="middle">Sasha</forename><surname>Luccioni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">François</forename><surname>Yvon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Gallé</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2211.05100</idno>
+		<title level="m">Bloom: A 176b-parameter open-access multilingual language model</title>
+				<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Q-bert: Hessian based ultra low precision quantization of bert</title>
+		<author>
+			<persName><forename type="first">Sheng</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhen</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiayu</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Linjian</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhewei</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Gholami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">W</forename><surname>Mahoney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kurt</forename><surname>Keutzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the AAAI Conference on Artificial Intelligence</title>
+				<meeting>the AAAI Conference on Artificial Intelligence</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="page" from="8815" to="8821" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">Megatron-lm: Training multi-billion parameter language models using model parallelism</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Shoeybi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mostofa</forename><surname>Patwary</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Raul</forename><surname>Puri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Patrick</forename><surname>Legresley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Casper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bryan</forename><surname>Catanzaro</surname></persName>
+		</author>
+		<idno>CoRR, abs/1909.08053</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">Using deepspeed and megatron to train megatron-turing nlg 530b, a large-scale generative language model</title>
+		<author>
+			<persName><forename type="first">Shaden</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mostofa</forename><surname>Patwary</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brandon</forename><surname>Norick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Patrick</forename><surname>Legresley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samyam</forename><surname>Rajbhandari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Casper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhun</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shrimai</forename><surname>Prabhumoye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><surname>Zerveas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Korthikanti</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2201.11990</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<title level="m" type="main">Attention is all you need. Advances in neural information processing systems</title>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aidan</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Łukasz</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Illia</forename><surname>Polosukhin</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page">30</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">GLUE: A multi-task benchmark and analysis platform for natural language understanding</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amanpreet</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julian</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samuel</forename><forename type="middle">R</forename><surname>Bowman</surname></persName>
+		</author>
+		<idno>CoRR, abs/1804.07461</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">HAQ: Hardware-Aware Automated Quantization with Mixed Precision</title>
+		<author>
+			<persName><forename type="first">Kuan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhijian</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yujun</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">Outlier suppression: Pushing the limit of low-bit transformer language models</title>
+		<author>
+			<persName><forename type="first">Xiuying</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunchen</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangguo</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruihao</forename><surname>Gong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shanghang</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fengwei</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xianglong</forename><surname>Liu</surname></persName>
+		</author>
+		<idno type="DOI">10.48550/ARXIV.2209.13325</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">A broad-coverage challenge corpus for sentence understanding through inference</title>
+		<author>
+			<persName><forename type="first">Adina</forename><surname>Williams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikita</forename><surname>Nangia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samuel</forename><surname>Bowman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1112" to="1122" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">Zeroquant: Efficient and affordable post-training quantization for large-scale transformers</title>
+		<author>
+			<persName><forename type="first">Zhewei</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Reza</forename><surname>Yazdani Aminabadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Minjia</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoxia</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Conglong</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuxiong</forename><surname>He</surname></persName>
+		</author>
+		<idno type="DOI">10.48550/ARXIV.2206.01861</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">Hellaswag: Can a machine really finish your sentence?</title>
+		<author>
+			<persName><forename type="first">Rowan</forename><surname>Zellers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ari</forename><surname>Holtzman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yonatan</forename><surname>Bisk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Farhadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yejin</forename><surname>Choi</surname></persName>
+		</author>
+		<idno>CoRR, abs/1905.07830</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<author>
+			<persName><forename type="first">Aohan</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhengxiao</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zihan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hanyu</forename><surname>Lai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhuoyi</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yifan</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wendi</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Xia</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2210.02414</idno>
+		<title level="m">Glm-130b: An open bilingual pre-trained model</title>
+				<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Susan</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Roller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mikel</forename><surname>Artetxe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moya</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuohui</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Dewan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mona</forename><surname>Diab</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xian</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xi</forename><surname>Victoria Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todor</forename><surname>Mihaylov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Myle</forename><surname>Ott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Shleifer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kurt</forename><surname>Shuster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Simig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Punit</forename><surname>Singh Koura</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anjali</forename><surname>Sridhar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianlu</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<idno type="DOI">10.48550/ARXIV.2205.01068</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note>Opt: Open pretrained transformer language models</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Improving neural network quantization without retraining using outlier channel splitting</title>
+		<author>
+			<persName><forename type="first">Ritchie</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuwei</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jordan</forename><surname>Dotzel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><forename type="middle">De</forename><surname>Sa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiru</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International conference on machine learning</title>
+				<imprint>
+			<publisher>PMLR</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="7543" to="7552" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

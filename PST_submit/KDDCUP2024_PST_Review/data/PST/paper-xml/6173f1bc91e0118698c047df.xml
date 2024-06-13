@@ -1,0 +1,1262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Enabling Branch-Mispredict Level Parallelism by Selectively Flushing Instructions</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author role="corresp">
+							<persName><forename type="first">Stijn</forename><surname>Eyerman</surname></persName>
+							<email>stijn.eyerman@intel.com</email>
+							<affiliation key="aff0">
+								<address>
+									<settlement>Wim Heirman Sam Van den Steen</settlement>
+								</address>
+							</affiliation>
+							<affiliation key="aff1">
+								<orgName type="institution">Intel Corporation Belgium Ibrahim Hur</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Enabling Branch-Mispredict Level Parallelism by Selectively Flushing Instructions</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/3466752.3480045</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:28+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Conventionally, branch mispredictions are resolved by flushing wrongly speculated instructions from the reorder buffer and refetching instructions along the correct path. However, a large part of the misspeculated instructions could have reconverged with the correct path and executed correctly. Yet, they are flushed to ensure in-order commit. This inefficiency has been recognized in prior work, which proposes either complex additions to a core to reuse the correctly executed instructions, or less intrusive solutions that only reuse part of the converged instructions.</p><p>We propose a hardware-software cooperative mechanism to recover correctly executed instructions, avoiding the need to refetch and re-execute them. It combines relatively limited additions to the core architecture with a high reuse of reconverged instructions. Adding the software hints to enable our mechanism is a similar effort as parallelizing an application, which is already necessary to extract high performance from current multicore processors. We evaluate the technique on emerging graph applications and sorting, applications that are known to perform poorly on conventional CPUs, and report an average 29% increase in performance.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">INTRODUCTION</head><p>Processor development has historically been driven by technology improvements, providing more transistors and frequency boosts without increasing energy density <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b30">31]</ref>. Architecture design mainly had to focus on extracting as much performance as possible out of the ever growing amount of transistors, with little focus on efficiency. This has led to wide and deep out-of-order architectures, relying on prediction and speculation to increase performance, even though mispredictions lead to a high amount of uselessly fetched and executed instructions. Nowadays, the halt of frequency and power efficiency scaling puts an increasing focus on efficiency, with the advent of specialized architectures and accelerators as the extreme examples <ref type="bibr" target="#b20">[21]</ref>.</p><p>Branch prediction is an important contributor to the performance of out-of-order processors: if the prediction is correct, the core does not have to stall fetch until a branch is executed. However, branch predictor misses have an increasingly higher power and performance penalty as the core's instruction window gets larger to exploit more parallelism: the amount of wrong-path instructions that need to be flushed increases with window size. Furthermore, CPU applications are becoming more irregular, both in terms of memory behavior and branch predictability. This is because regular code is now increasingly executed on architectures with a higher peak compute rate, such as GPUs, leaving the less regular code for the CPU <ref type="bibr" target="#b4">[5]</ref>. Additionally, emerging big data analysis algorithms, such as graph analysis <ref type="bibr" target="#b16">[17]</ref>, sparse neural networks <ref type="bibr" target="#b44">[44]</ref> and graph neural networks <ref type="bibr" target="#b42">[42]</ref>, operate on sparse and irregular data, resulting in high branch miss penalties.</p><p>In this paper, we propose a mechanism to increase the efficiency and performance of a conventional out-of-order processor, by not flushing all instructions after a mispredicted branch. The mechanism detects instructions in the speculative stream that reconverge to the correct path and only flushes those instructions that need to be refetched and re-executed to ensure correct execution. This increases performance, as the non-flushed instruction do not need to be refetched and re-executed, and also saves energy for the same reason.</p><p>Not flushing data and control independent instructions to increase efficiency has been extensively explored in prior work, as discussed in the next section. Our proposal differs from these proposals by its software-hardware cooperation: software indicates independent code fragments, while hardware uses this information to only flush instructions that truly depend on the branch miss. The goal is to maximally exploit instruction reuse while minimizing the additions to the core micro-architecture.</p><p>The novel instructions to indicate independent code fragments might seem to limit usefulness, as the application needs to be annotated and recompiled to use the mechanism. However, it is our opinion that software-hardware cooperation is key in increasing processing efficiency, for two reasons:</p><p>(i) A hardware only solution often involves detection and/or prediction structures, setting off part of the efficiency gains of the proposed mechanism. By using software to indicate independent code fragments, no complex detection, prediction and/or rollback hardware needs to be implemented.</p><p>(ii) Programmers and compilers are already forced to cooperate with hardware to extract the highest possible performance, for example by implementing parallel applications to exploit the compute power of multicore machines. Parallelizing an application includes thinking about synchronization, which is a form of dependence analysis.</p><p>Regarding the second point, we show how independent loop iterations can be easily detected using OpenMP "parallel for" pragmas, a commonly used parallelization technique.</p><p>In this paper, we make the following contributions:</p><p>• We propose a hardware-software cooperative technique to increase performance and efficiency with minimal changes to the hardware and software. • We describe different implementation options that provide different performance/complexity tradeoffs. • We evaluate our proposal using simulation on graph benchmarks, showing an average 29% and up to 54% performance increase.</p><p>We first discuss prior work and refresh memory on the branch recovery mechanism in conventional out-of-order processors. Next, we elaborate on the software and hardware aspects of our proposal. We then explain our experimental setup and show results, analyzing the performance impact of different software and hardware options. Finally, we conclude and discuss future work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">PRIOR WORK ON BRANCH MISS OPTIMIZATIONS</head><p>Branch convergence and selective flushing have been recognized as potential performance optimizations for out-of-order pipelines more than 20 years ago by Rotenberg and Smith <ref type="bibr" target="#b34">[35]</ref>. They implement a selective flush mechanism in a trace processor, an architecture that is not commonly used nowadays. Since then, a lot of proposals have been made to exploit branch convergence to improve performance. We can roughly divide them into two categories: the first advocates a dramatic redesign of the processor pipeline to extract the largest performance benefit, while the second category proposals have a very small impact on the pipeline design, but only reuse a small fraction of the convergent instructions.</p><p>Skipper <ref type="bibr" target="#b10">[11]</ref> belongs to the first category: it skips instructions that are control and data dependent on a hard-to-predict branch, and fetches and executes these instructions after the branch is resolved. It adds multiple predictors and roll-back mechanisms to the core for a relatively low (10%) performance gain. Furthermore, correctly predicted hard branches (50% probability) also cause outof-order fetches, potentially delaying forward progress. Collins et al. <ref type="bibr" target="#b11">[12]</ref> propose a more accurate reconvergence predictor, which can be used in control-independent architectures. Pajuelo et al. <ref type="bibr" target="#b33">[34]</ref> use convergence detection and a vectorization scheme to issue multiple iterations of control independent code while a hard-topredict branch is being resolved. Al-Zawawi et al. <ref type="bibr" target="#b3">[4]</ref> propose a novel ROB-less design, based on re-execution buffers to execute control and data dependent instruction after a mispredicted branch. Mao et al. <ref type="bibr" target="#b29">[30]</ref> describe a mechanism to implement the reuse of converging instructions in composable multi-processors.</p><p>An example of the second category (small additions, limited benefit) is the proposal by Roth and Sohi <ref type="bibr" target="#b35">[36]</ref>. They keep outcomes of squashed instructions and reuse the values if the inputs are still valid. This has a limited impact on performance, as reconvergent instruction still need to be re-fetched and dispatched. Selective Branch Recovery (SBR) <ref type="bibr" target="#b17">[18]</ref> can be applied when the recovergence point is the start of the correct path. By transforming wrong-path instructions into move instructions and re-executing them, data dependences are preserved. SBR only works for a subset of branch misses, i.e., those for which the start of the correct path is already fetched, while our mechanism can handle all branch misses. Naresh et al. <ref type="bibr" target="#b26">[27]</ref> propose to only reuse convergent instructions in the frontend pipeline, flushing all dispatched instructions.</p><p>Our proposal lies somewhere in the middle between these two categories: we target minimal changes to the architecture, and maximal reuse of convergent instructions. We avoid expensive predictors, dependence checkers and roll-back mechanisms by relying on compiler hints to denote control and data independent regions. NOREBA <ref type="bibr" target="#b18">[19]</ref> uses a similar strategy: compiler inserted instructions inform the hardware which branch independent instructions can commit out of order. Furthermore, we reuse the existing out-oforder mechanisms for register renaming, flushing instructions and redirecting fetch. Our mechanism does involve some non-trivial changes to the micro-architecture, but our goal is to keep these additions as limited as possible.</p><p>As an alternative to reusing converging instructions within a thread, multithreading can be used to spawn threads for control and data independent regions <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b1">2]</ref>, which avoids flushing instructions of other regions on a misprediction. Creating and spawning threads has a high overhead, especially when the independent regions are small. Furthermore, optimized parallel code already uses all available hardware thread contexts.</p><p>Another way of reducing the performance degradation due to hard-to-predict branches is predication <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b22">23]</ref>. Branch paths following branches that miss often are turned into predicated instructions, fetching both the taken and not taken path. Depending on the branch condition, the results of these instructions are committed or invalidated. Instructions after the convergence point are not predicated and can be executed while the branch resolves. No instructions need to be flushed. The performance benefit of predication is a subtle balance between adding data dependences, fetching more instructions and avoiding flushing instructions. Therefore, a performance monitoring system is needed to avoid performance inversion of predicating instructions <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b23">24]</ref>. Additionally, predication options are limited in current architectures (x86 only has cmov, 64-bit ARM instruction set removed most of the predicated instructions), and the compiler has strict conditions for applying if-conversion, such as no function calls and a limit on the number of instructions. As a result, none of the applications we evaluate can use predication to reduce the branch penalty. Our technique does not add dependences, has no restrictions on the type and number of instructions, and is only triggered when the branch is effectively mispredicted, while predication is done for all occurrences of the converted branch. Interestingly, Chauhan et al. <ref type="bibr" target="#b9">[10]</ref> report that 72% of the hard branches converge for the benchmarks they evaluate, which is a distinct set from the benchmarks we used. This shows that convergence can be exploited in a large set of applications.</p><p>Farzad et al. <ref type="bibr" target="#b36">[37]</ref> found that wrong-path control and data independent code accounts for 6% to 12% of the total power consumption in embedded processors, which could potentially be saved by not flushing them. Malik et al. <ref type="bibr" target="#b28">[29]</ref> discuss the performance benefit of parallel branch resolution, highlighting the importance of maximizing branch-miss level parallelism (BLP) in control independent architectures. Our proposal implements BLP: branches in different slices execute concurrently and are not flushed due to misses in other slices.</p><p>Branch resolution is often delayed by long-latency cache misses on which the branch depends, as is the case for our evaluated applications. The indirect memory prefetcher <ref type="bibr" target="#b43">[43]</ref> reduces the latency of irregular indirect memory accesses, speeding up branch resolution and thus indirectly reducing the branch penalty. Pipette <ref type="bibr" target="#b31">[32]</ref> exploits pipeline parallelism in irregular applications and adds a mechanism for quickly switching between stages when a stage is blocked due to long memory accesses. These techniques are orthogonal to our proposal.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">OUT-OF-ORDER EXECUTION AND BRANCH PREDICTION</head><p>Ultimately, the goal of out-of-order processing is to approach data flow execution: instructions are executed as soon as their inputs are ready, independent of the status of instructions that appear earlier in the instruction stream. However, to enable precise interrupts and to ease the implementation of synchronization between threads, instructions appear to be executed in order, by ensuring in-order commit.</p><p>Branch prediction increases the continuous flow of instructions into the reorder buffer, to provide a large window of instructions to select multiple ready-to-execute instructions. Branch mispredictions are, however, very costly: because we need to ensure in-order commit, all instructions after a detected branch miss need to be flushed and re-fetched along the correct path. The total penalty of a single branch misprediction equals the time spent fetching instructions along the wrong path, which could be many in a deeply pipelined processor <ref type="bibr" target="#b15">[16]</ref>. For the branch miss heavy applications evaluated in our study (see Section 5.1) using a state-of-the-art TAGE branch predictor <ref type="bibr" target="#b37">[38]</ref>, wrong path instructions account for on average 53% more dispatched instructions, branch miss resolution takes 47% of the execution time and oracle branch prediction improves performance by 60%.</p><p>Many branches have convergent paths: the taken and not-taken path eventually converge. In this case, flushing all instructions after a branch miss breaks the data flow execution model: the execution of converging instructions that are independent of the branch outcome is cancelled or delayed because of the in-order commit model, not because of true dependences. Our technique improves on this by keeping convergent instructions that are known to be independent of the branch paths in the reorder buffer and by continuing to execute them while the correct path is being fetched. Using our proposal, the penalty of a branch miss reduces to the fetch time of only those instructions that are control and data dependent on the mispredicted branch. Furthermore, independent instructions do not need to be refetched, resulting in less energy consumption.</p><p>For a better understanding of our proposal, we briefly recapture the conventional branch miss resolution mechanism in an out-of-order processor. If a branch is executed and it turns out to be mispredicted, all instructions that are younger are flushed from the ROB, and the issue, load and store queue entries they occupy are released, as well as the renamed physical registers. Before fetching and dispatching instructions along the correct path, the rename table has to be restored to its state just after the branch was dispatched, undoing all renamings along the mispredicted path. Conceptually, there are two main methods to restore the rename table <ref type="bibr" target="#b2">[3]</ref>:</p><p>(a) Using checkpoints: At each branch instruction, the rename table is checkpointed. When a branch turns out mispredicted, the checkpoint is looked up and restored. This is a quick mechanism, but requires substantial storage to keep all checkpoints.</p><p>(b) Using rollback logs: The renaming operations (architectural to physical register mappings) of all instructions in the ROB are logged, and rolled back one by one until the mispredicted branch is reached. This mechanism has lower storage requirements, but more time is needed to restore the rename table, because rename operations need to be undone one by one.</p><p>The combination of both is currently the most chosen option to balance storage requirements and speed: regular checkpoints (but not at all branches) and a rollback log. When a branch is mispredicted, the closest checkpoint is looked up and rolled back to the mispredicted branch. In the remainder of this paper, we assume a checkpointing mechanism at each branch. However, our proposal also supports a rollback or hybrid mechanism, because a rollback mechanism ensures that rename tables at dispatch of all in-flight instructions can be restored.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">SELECTIVE FLUSH MECHANISM</head><p>Our proposal to selectively flush instructions after a branch miss and to not waste resources on re-processing instructions on the convergent path consists of combined software and hardware additions. The software part is responsible for indicating control and data independent regions by means of 3 additional instructions. The hardware part takes this information to selectively flush instructions on a branch miss.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Denoting Independent Regions</head><p>Selective flush should only flush instructions that are dependent on the instructions before the branch miss. To simplify the mechanism, we only consider sequential lists of instructions, i.e., we do not extract individual (in)dependent instructions. We define a slice as a sequence of instructions such that all instructions following the slice are control and data independent<ref type="foot" target="#foot_0">1</ref> of the instructions in the slice, up to a certain point in the application, called the slice region end, after which instructions can depend on sliced instructions. When a branch misprediction occurs within a slice, only the remaining instructions in the same slice should be flushed, while newer instructions can continue to be executed (until the end of the slice region). The typical use case is a loop of independent iterations, see Listing 1. The slice is the body of the loop, indicated by the slice_start and slice_end instructions, and the number of slices in the region equals the number of iterations. The region is ended after the loop using a slice_fence instruction, when data calculated in the loop is used.</p><p>Not all instructions within a region should belong to a slice. For example, the iterator increment and the loop branch (instructions 9 and 10) are always control and data dependent on the previous iteration increment and branch. Therefore, they are left out of the slice, although they still belong to the slice region. If a branch that is not within a slice is mispredicted, all instructions following that branch should be flushed, as in the regular case. For example, if the loop branch is predicted taken after the last iteration, we should flush all wrongly speculated next iterations of the loop.</p><p>Instructions in a slice can depend on instructions out of a slice in the same region. In the example, the loop body depends on the value of r1, i.e., the iterator, and is also control dependent on the loop branch. The only requirement is that all instructions following the slice should be control and data independent of the instructions in the slice.</p><p>Figure <ref type="figure" target="#fig_0">1</ref> shows a typical sliced loop, with its (potential) dependences. The iterator increment and branch are outside the slice, but within the slice region, i.e., all code before the slice fence. All slices are independent of each other, except for reduction variables, which we discuss in Section 4.5. Furthermore, none of the non-sliced code depends on sliced instructions, up to the slice fence. Code after the fence depends on the sliced code (otherwise the sliced code would be dead code), but only through memory, as we explain in Section 4.4.</p><p>Slices and regions are indicated using three new instructions: slice_start, slice_end and slice_fence. These need to be inserted by the programmer or compiler, who is responsible for ensuring that the slice independence conditions are met. This alleviates hardware from dependence checking, but it puts more burden on the software. However, dependence checking is already a main task of the compiler, and increasingly also of the programmer to enable thread parallelism. Enabling selective flush is a similar effort as parallelizing an application. For example, consider the popular OpenMP (omp) framework for parallelizing applications. The iterations of an omp parallel for loop can be divided among threads and are therefore inherently independent. These loop bodies can be safely encapsulated in a slice, exploiting the selective flush mechanism for iterations executed in the same thread. In fact, by putting parallel for iterations into slices, we further exploit the parallelism within a thread: instead of enforcing sequential execution after a branch miss, newer iterations can be executed in parallel with the branch miss resolution. Furthermore, branch reconvergence and instruction dependence compiler analysis have been discussed in prior work <ref type="bibr" target="#b5">[6,</ref><ref type="bibr" target="#b18">19]</ref>, which means an automatic compiler implementation is realistic.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Selective Flush Mechanism</head><p>The first addition to the hardware is the ability to decode the three new slice instructions. Note that these instructions can be taken from the set of no-op instructions, such that a binary compiled with slice instructions can also be executed on a processor that does not support selective flush. The core keeps track of which instructions are within a slice and which not, e.g., by adding one bit to each ROB entry. When a misprediction on a non-sliced branch is detected, the regular branch recovery mechanism is used, i.e, flushing all newer instructions and restarting fetch at the correct path. When a misprediction on a sliced branch is detected, only the instructions after the branch in the same slice are flushed, see Figure 2(b). Additionally, we take a checkpoint (CP2) of the current rename table, i.e., at the point where instruction fetch should continue after fetching the correct path within the slice. We call this checkpoint the 'regular fetch checkpoint'. Newer instructions that do not belong to the slice (rightmost '9 i' and further to the left) are kept in the ROB, and continue to execute. Fetch is redirected at the correct path, and the mispredicted branch rename table checkpoint (CP1) is restored (c). When the correct path execution reaches a slice_end instruction (d), the correct path within the slice is complete. The instructions after the slice_end are already fetched and potentially executed. At that point, the 'regular fetch checkpoint' (CP2) is restored and fetch continues where it left off (e).</p><p>When a branch misprediction in a slice is detected and the end of the slice is already in the ROB, the front-end (fetch-decode-rename) contains correct path instructions (because they are outside the current slice). These front-end instructions should not be flushed and can continue to proceed through the pipeline. The regular fetch checkpoint is taken when the last of these instructions is renamed. In the meantime, the front-end is filled with the resolved correct path instructions within the affected slice, so there is no disruption in the flow of instructions in the front-end. Redirecting fetch after the detection of the miss might introduce a one cycle bubble, which also ensures that no regular fetch and resolved path instructions end up in the same rename batch and a clean regular fetch checkpoint can be taken.</p><p>After the correct path is resolved, i.e., a slice end instruction is fetched, the fetch stage continues at the regular fetch point. To enable a smooth flow, we assume that slice ends are detected early in the fetch pipeline (similar to branches), such that we do not need to wait until they are decoded to redirect fetch to the regular fetch point. To avoid deadlocks, we propose to reserve some resources for resolving correct paths, see Section 4.7.</p><p>The regular fetch checkpoint (CP2 in the example) does not contain the renamings made after dispatching the resolved path. Because there are no dependences between instructions in the slice and the next instructions, all registers renamed inside a slice are dead at the end of the slice and the regular fetch checkpoint does not depend on the novel renamings along the correct path. An exception is a reduction variable, which we discuss in Section 4.5. We assume that the rename table is used only at the rename stage. The architectural/physical renaming for each instruction is also encoded in its ROB entry, this information is used at the commit stage to write back the architectural register and free the physical register.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Linked List ROB</head><p>Selectively flushing and restoring the wrong path within a slice breaks the in-order appearance of instructions in the ROB: instructions of the correct path of one iteration are inserted after instructions of later iterations. However, we still want to support in-order commit to avoid impact on off-core mechanisms that rely on inorder commit, such as precise interrupts and memory consistency mechanisms. Therefore, we propose to implement the ROB as a linked list, which enables removing and adding instructions in the middle of a stream. On a branch miss in a slice, the next pointer of the ROB entry containing the branch is set at the next free ROB entry, where the correct path will be fetched, see Figure <ref type="figure" target="#fig_2">2(c)</ref>. After finishing the correct path in the slice, the pointer is set to the instruction that logically follows, but that has already been fetched earlier (d). This pointer is saved together with the 'regular fetch checkpoint'. Next, the last instruction fetched when detecting the branch miss points to the next free entry, i.e., after the correct path  (e), and dispatch continues. At the commit stage, the pointers are followed to ensure in-order commit of instructions. Note that most instructions will still be stored sequentially, each branch miss in a slice causes at most 3 redirections. The number of cycles where commit is stopped prematurely because of a pointer indirection is therefore limited.</p><p>Depending on the implementation of the load and store queues in the baseline core, they should or should not also be changed to a linked list. For example, if there are pointers to/from the corresponding ROB entries or some kind of sequence numbers, the relative order for checking address aliasing, load-store forwarding and ordering for memory consistency, can be determined without a linked list implementation. If a linked list implementation is necessary, it involves a small extra overhead, because these queues are smaller than the ROB.</p><p>The linked list ROB is arguably the most impacting change to the regular core design. It involves adding a pointer to each entry, which adds n⌈log 2 n⌉ bits for a ROB of n entries (e.g., 256 byte for a 256 entry ROB). Linked list ROBs have been used in the IBM POWER5 <ref type="bibr" target="#b21">[22]</ref> and POWER8 <ref type="bibr" target="#b40">[40]</ref> architecture to enable dynamically sharing ROB entries between threads in SMT mode.</p><p>To reduce the overhead of pointers, the ROB can be partitioned into blocks (e.g., of 8 entries), with only one pointer per block. Inside a block, instructions are consecutive, while blocks can be dispatched out of order. Blocks also simplify committing multiple instructions per cycle by avoiding following pointers. This reduces the overhead (e.g., to 20 byte for a 256-entry ROB and 8-entry blocks), but it also leaves holes in the ROB, as out-of-order paths can only start at block boundaries.</p><p>If a branch miss in a slice is detected, the instructions in the slice are flushed, see Figure <ref type="figure" target="#fig_4">3</ref>. If the slice_end is in a different block as the branch miss (or it is the last instruction of the same block), see Figure <ref type="figure" target="#fig_4">3</ref>(a), we start fetching the correct path after the branch miss to fill gaps and to keep instructions consecutive as much as possible (rightmost green area in Figure <ref type="figure" target="#fig_4">3(b)</ref>). When the last block before the end of the flushed slice is filled, we use its pointer to point to the next free block to continue fetching the correct path. This means that the flushed entries in the partially flushed block will remain empty. Once the correct path is fetched, the pointer of the last correct path block points back to the block with the next instruction, i.e., the first instruction after the flushed instructions. The remainder of the last correct path block also has to remain empty, because the pointer is used to point back to the next block. As soon as all instructions in a block with a gap are committed, these gaps can be reclaimed.</p><p>However, if the missed branch and slice_end are in the same block (and slice_end is not the last instruction) (Figure <ref type="figure" target="#fig_4">3</ref>(c)), there is no available pointer between the flushed instructions and the first out-of-slice correct path instruction. To avoid this, we propose the following mechanism:</p><p>• At dispatch, a 'slice branch' bit is kept.</p><p>• If a conditional branch within a slice is dispatched, this bit is set. • If we cross the boundary of a block, the bit is reset.</p><p>• When we dispatch a slice_end and the bit is set, we pad the rest of the block with empty slots, such that the next instruction after the slice_end starts at the next block, see Figure <ref type="figure" target="#fig_4">3(d)</ref>.</p><p>Note that this addition is only needed when the ROB is divided into blocks with multiple instructions. We evaluate the impact of a blocked implementation in the results section.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Slice Fence</head><p>A slice_fence denotes the end of a slice region. After a slice_fence, instructions can depend on instructions in slices. If an in-slice branch miss is detected after fetching a slice_fence, we should therefore also flush the instructions after the slice_fence. Thereto, when dispatching a slice_fence, we also take a rename table checkpoint, as for branches. When an in-slice branch miss is detected and the slice_fence is already dispatched, we also flush the instructions after the slice_fence, in addition to flushing the instructions in the slice. We store the rename table checkpoint at the slice_fence as the 'regular fetch checkpoint', i.e., the point where fetch should restart after dispatching the correct path in the slice. Like this, instructions after a slice_fence can be executed speculatively and are only flushed when a branch miss is detected within a slice. Instructions after the slice_fence can depend on instructions within a slice, but the register rename information of instructions in a recovered slice can be lost in the rename table (see the last paragraph of Section 4.2). Therefore, the dependences between the slices and the code after the fence should be implemented through memory and not through registers, by storing and loading data from memory. In the envisioned use case of a parallel loop, this is the case: because iterations are executed by different threads, no data can be transferred through registers, only through memory. Reduction variables are a special case, which are discussed in the next section.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5">Reduction Variables</head><p>Reduction variables are variables that are updated and accumulated in the loop iterations, such as counting the occurrence of certain conditions. An important characteristic of a reduction variable is that it can be updated in any order, i.e., its operation is commutative (e.g., addition, taking maximum, etc.). Additionally, the other calculations in the loop do not depend on these variables, they only depend on each other between different iterations.</p><p>In OpenMP, reduction variables have to be explicitly defined, such that they are correctly updated when the loop is executed by multiple threads. Typically, a local reduction variable is instantiated in a register, and after all iterations are finished, the local variables of all threads are reduced through shared memory to obtain the final value. This implementation breaks when applying our selective flush mechanism: if the reduction variable is wrongly updated speculatively, the next iteration will take the wrong value, and this will not be corrected when the correct path is executed because the newer instructions are not re-executed.</p><p>To solve this, we propose to execute reduction variable operations only when they are not speculative anymore, i.e., when they are at the head of the ROB. Reduction variable updates are kept in the reservation stations until they are at the head of the ROB, similar to what is currently done for atomic operations. Delaying their execution until commit does not delay other instructions, because they only depend on themselves, no other instructions depend on them. Additionally, reduction variables should not be renamed and should read from and write to architectural registers, which is correct because they are the oldest instruction when executed. This is needed because reduction variable update instructions may be re-fetched on a branch miss in a slice, and an output register renaming would not be transferred to already fetched non-flushed slices. We propose to introduce a new prefix to indicate instructions that cannot be executed speculatively (similar to the 'lock' prefix in x86). This prefix is added by the compiler, guided by the programmer's annotations (e.g., the reduction keyword in OpenMP).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.6">Multiple Concurrent Branch Misses</head><p>A consequence of the selective flush mechanism is that branch misses in newer slices can occur when an older branch miss is still being resolved, because newer instructions continue to execute. To support multiple concurrent branch misses, we propose to add a 'fetch redirect queue' (FRQ), that contains all detected branch misses in slices that should be resolved before continuing to fetch at the 'regular fetch checkpoint'. The FRQ is a FIFO queue where each entry contains the following fields:</p><p>• The ROB entry of the mispredicted branch, to set the ROB pointers when dispatching the correct path.</p><p>• The program counter of the correct path instruction after the mispredicted branch, to indicate the start of the correct path. • A pointer to the rename table checkpoint of the mispredicted branch.</p><p>Additionally, there is a separate entry (not part of the queue) containing this data for the 'regular fetch checkpoint'. On a branch miss in a slice, this data is pushed in the FRQ, and if the FRQ is empty, the 'regular fetch checkpoint' is also set. At the fetch stage, the FRQ is checked, and if there is an entry at the head, the correct path is fetched until a slice_end. If another branch miss in a slice is detected while another slice is being resolved, its data is pushed in the FRQ, but fetch continues at the currently resolving slice. When the slice is resolved, the head of the FRQ is removed and the FRQ is again checked. If there is another entry at the head, this slice is resolved first. Only if the FRQ is empty, fetch is resumed from the 'regular fetch checkpoint'. This ensures that branch misses are resolved in the order they occur, and the oldest instructions are executed first, such that commit is not needlessly blocked.</p><p>When instructions are flushed after a non-slice branch miss, the FRQ is checked if it contains entries that point to flushed instructions. If so, the corresponding FRQ entry is removed from the queue. Because all newer instructions are also flushed, all newer FRQ entries will also be removed, preserving a simple FIFO ordering.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.7">Freeing/Reserving Resources</head><p>Selectively flushing and refetching instructions can lead to a deadlock if there are no free resources for fetching the correct path. For example, assume a mispredicted branch that jumps over a section with store operations, i.e., the correct path is to execute these store operations. Assume further that before detecting this miss, all store queue entries have been occupied by newer instructions. Since the wrong path contains no store instructions, no store queue entries are freed when the wrong path is flushed. The correct path cannot dispatch because of the lack of store queue entries, and the store queue entries of the newer instructions cannot be released because they cannot commit before the older slice is resolved. A similar deadlock can occur when there are more regular fetch instructions in the front-end than the number of free ROB entries after flushing the wrong path.</p><p>To prevent deadlocks, we propose to reserve a certain number of resources for resolving correct paths when there are in-slice instructions in the ROB. These cannot be used for the regular fetch. We identified three resources to reserve: reservation stations (RS), load queue (LQ) entries and store queue (SQ) entries. By reserving these resources, we also ensure that enough ROB entries are free to fetch the correct path. Note that reserving a single resource of each suffices to prevent deadlocks: eventually, the resolved path instructions will become the oldest and can commit, freeing resources to dispatch the next correct path instruction(s).</p><p>In case there are still not enough free resources to hold the regular fetch instructions in the front-end, we flush (part of) the front-end instructions. This has no impact on the checkpoints (they are not renamed yet), it only has a small extra performance penalty.</p><p>Reserving resources does not only prevent deadlocks, it can also improve performance. The more resources are reserved, the quicker we can execute the correct path. On the other hand, reserving resources slows down the progress in the regular fetch path.</p><p>We evaluate the impact of freeing fewer or more resources in the evaluation section.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.8">Summary of Additions</head><p>In summary, the following additions to a conventional out-of-order core are needed to support selective flush:</p><p>• 3 new slice instructions (no arguments).</p><p>• A linked list ROB, which can be block partitioned to limit the overhead.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>• One bit per ROB entry to indicate if an instruction belongs</head><p>to a slice. • The FRQ with a few (e.g., 8) entries, to support concurrent branch misses. If the FRQ is full, new misses can be resolved using the conventional scheme, i.e., flushing all newer instructions. • A prefix for the common reduce instructions to execute at commit. • A controller to correctly set the ROB linked list pointers on a branch miss and after resolving the correct path.</p><p>These are non-trivial changes, but they mainly relate to ROB bookkeeping. Critical pipeline stages, such as wakening and selecting instructions to issue in the reservation stations, are not impacted by our mechanism.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">EXPERIMENTAL SETUP 5.1 Benchmarks</head><p>For evaluating the performance, we selected the GAP benchmark suite <ref type="bibr" target="#b6">[7]</ref>. The GAP benchmarks are optimized CPU implementations of 6 basic graph kernels: betweenness centrality (bc), breadth first search (bfs), connected components (cc), pagerank (pr), single source shortest path (sssp) and triangle count (tc). Graph applications, and more generally unstructured sparse applications, are gaining importance to analyze relations within big data sets <ref type="bibr" target="#b32">[33]</ref>. Recently, several graph accelerators <ref type="bibr" target="#b14">[15,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b25">26,</ref><ref type="bibr" target="#b41">41]</ref> and graph analysis software platforms <ref type="bibr" target="#b27">[28]</ref> have been proposed, and a US government project to optimize graph analysis <ref type="bibr" target="#b38">[39]</ref> was launched.</p><p>As input graphs, we use synthetically generated RMAT graphs <ref type="bibr" target="#b8">[9]</ref>. Synthetic graphs have the advantage that we can control their size, and measure the impact of graph size on performance. The execution time of the six benchmarks as a function of input graph size differs considerably. In order to have a similar execution time, the baseline graph input size differs per application: RMAT-18 for tc, RMAT-20 for bc, cc, pr and sssp, and RMAT-22 for bfs (for single core evaluation). The memory footprint of these graphs is 47 MB (RMAT-18) to 283 MB (RMAT-22), which is much larger than the 1.4 MB LLC cache per core. The miss rate in the LLC varies between 45% and 70%. We also evaluate our technique on larger graphs.</p><p>Graph applications typically have data dependent hard-to-predict branches, which depend on loads from main memory, because of the high cache miss rate due to the lack of locality. Furthermore, they are often highly parallel, applying a function on each vertex, which means iterations are independent. Lastly, the small code footprint of the GAP benchmarks makes it easy to add slice instructions at meaningful places.</p><p>Additionally, we also evaluate our proposal on merge sort (ms) <ref type="bibr" target="#b24">[25]</ref>, which also suffers from a high branch miss rate because of the unpredictable comparisons between elements. Sorting is a common kernel for many applications. For example, the SPEC 2017 benchmark mcf spends 40% of its execution time in sorting. Mcf uses the quicksort algorithm, for which is it hard to find or create independent slices. Merge sort is particularly fit for parallelization, and thus also for selective flush, because distinct sections of the array can be merged in parallel. For the baseline results, we sort a list of 10 million random integers.</p><p>Although we only evaluate our proposal on graph applications and sort, we believe that it will be also beneficial for other branch miss heavy workloads. Note that our mechanism mostly favors short parallel sections, whereas conventional thread parallelism performs best with long parallel sections to reduce the threading overhead. This is why existing code (such as the SPEC benchmarks) is difficult to convert without heavily reworking parts of the code. However, emerging domains, such as machine learning, require new code which can be implemented with this mechanism in mind. Furthermore, the advent of domain specific processors in search for more efficiency, provides a choice to processor designers to implement this mechanism only for domains where it has a substantial impact (such as graph analysis).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Simulator</head><p>We implement the selective flush mechanism into an in-house version of the Sniper multicore simulator <ref type="bibr" target="#b7">[8]</ref>. We configure the simulator to resemble an Intel ® Xeon ® Platinum 8180 processor, codenamed Skylake <ref type="bibr" target="#b13">[14]</ref>, see Table <ref type="table" target="#tab_0">1</ref>. We extend Sniper with a wrong-path engine, which models the flow of wrong-path instructions through the core pipeline until they are flushed. This is needed to accurately model the impact of fetching and flushing only the wrong-path instructions within a slice. We use Pin's code cache and decoder to reconstruct the wrong path, so when both paths are in the code cache (which is soon for hard-to-predict branches) we can reconstruct them both in case of a misprediction. Because selective flush is an internal core mechanism, most of our results are measured on a single core. For these simulations, we scale down shared resources (LLC and memory bandwidth) proportionally (i.e., 28 times smaller).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">RESULTS AND DISCUSSION 6.1 Placing Slice Instructions and Single Core Speedup</head><p>All of the GAP benchmarks have nested loops, of which the outer loop is parallelized with OpenMP. Typically, the outer loop iterates over all vertices of the graph, while the inner loop iterates over the neighbors of these vertices. For some benchmarks, the iterations of this inner loop are also independent, meaning that we can choose to put the slice instructions around the iterations of the outer loop or the inner loop (slices cannot be nested). Putting the slices in the outer loop means that on a branch miss, all of the iterations  of the inner loop after the branch miss will be flushed and reexecuted, while slicing the inner loop only flushes instructions within one inner loop iteration. However, putting them in the inner loop prevents the use of selective flush for branches outside the inner loop, falling back to the default mechanism of flushing all instructions. In particular, the branch ending the inner loop is often mispredicted, because the number of neighbors is variable.</p><p>The decision where to put the slice instructions depends on the iteration count of the inner loop, and where most branch misses occur. We need to make this decision for three of the six GAP benchmarks. bfs and tc have inner loops with control dependent iterations (they break out of the loop prematurely), and pr has no conditional branch in its inner loop. Merge sort's inner loop (merging the subarrays) also contains dependent iterations, so only the outer loop can be sliced. Figure <ref type="figure" target="#fig_5">4</ref> shows the single core speedup of the selective flush mechanism versus the baseline core, for slicing the inner and outer loop for the three other benchmarks, and the outer loop slicing for the rest.</p><p>For bc, slicing the outer loop gives better performance, while for cc, slicing the inner loop is better. For sssp it does not matter much. Therefore, if there is a choice, we propose to test a few options to determine which one performs best. Taking the best performing options, the overall average speedup is 1.29 (harmonic mean). pr has no speedup, because it has no conditional branches in its loop, other than the inner loop branch. Without pr, the average speedup is 1. <ref type="bibr" target="#b34">35</ref>.</p><p>Figure <ref type="figure" target="#fig_5">4</ref> also shows the speedups for an oracle branch predictor, i.e., the maximum achievable speedup for branch optimization. It confirms the low margin for pr. For the other applications, our mechanism closes a large part of the gap between the baseline and a utopic perfect branch predictor. Perfect branch prediction has an average speedup of 1.60, meaning that selective flush reaches almost 50% of the potential gain.</p><p>Note that the branch miss rate in the baseline and the sliced execution is exactly the same. Selective flush decreases the penalty per miss. There is still an unavoidable penalty, namely the flush and refetch of miss dependent instructions, so perfect branch predictor performance can never be reached. In addition, if the slice is large (e.g., multiple iterations of the inner loop), a large number of instructions need to be flushed, and the penalty will be closer to that of the conventional branch miss resolution mechanism.</p><p>Figure <ref type="figure" target="#fig_6">5</ref> shows the (simplified) cycle stacks of the baseline and sliced execution. The stacks are normalized to the cycle count of the baseline execution. The 'exec' component refers to the time needed to execute all instructions assuming all cache hits and no branch mispredictions. The 'branch' component is the time lost due to branch misses, and the 'mem' component is the time the core is stalled waiting for memory operations that miss in the L1 cache. The 'other' component contains other stall cycles, such as decode bottlenecks.</p><p>The evaluated benchmarks are branch miss and memory bound. The graphs do not fit into the LLC, and traversing a graph leads to low locality, resulting in a large miss rate. Branches are data dependent, and often depend on loads that miss in the cache, explaining their large miss penalty.</p><p>Our mechanism clearly reduces the branch miss component, explaining the execution time reduction. The memory component increases slightly, because some cache misses along the wrong path turn out to be useful prefetches for the correct path, and in the baseline execution, their latency is therefore partly hidden by the branch resolution time. In the sliced execution, this penalty is exposed more, because execution continues during branch resolution. The execution component also increases, because more instructions need to be fetched, i.e., the slice instructions.</p><p>In that respect, Figure <ref type="figure" target="#fig_7">6</ref> shows the number of dispatched instructions for both executions, normalized to the number of correct path instructions in the baseline execution. Wrong path instructions are fetched after a branch miss until the miss is detected, or in case of sliced execution, until a slice end is fetched. Overhead refers to the slice instructions, which are discarded after dispatch but still take up slots in the frontend. Slicing reduces the number of dispatched wrong path instructions, and for all but one application, the overhead of slice instructions is smaller than the reduction of wrong path instructions. This means we can also claim better energy efficiency, because fewer instructions need to be processed.</p><p>For sssp, the inner loop code is small, resulting in a large overhead of slice instructions, and an overall increase in total dispatched instruction count. However, since the slice instructions are processed in the frontend only and are discarded at dispatch, they only have a small impact on total latency, explaining the net positive performance gain.</p><p>The small reduction in wrong-path instructions for ms might seem strange, given the high performance benefit. Figure <ref type="figure" target="#fig_7">6</ref> shows the number of wrong-path instructions that are dispatched, which does not include the instructions flushed in the front-end pipeline. ms has a small memory component, because the sequential accesses can be efficiently prefetched. As a result, the branch miss is resolved quickly and the number of dispatched wrong-path instructions is low. Selective flush does flush slightly fewer instructions, but most of the non-flushed instructions are in the core front-end, which are not counted here. In fact, because selective flush can continue fetching and dispatching instructions while the mispredicted branch is recovering, there is no interruption in the front-end, yet another performance benefit of our mechanism.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Freeing/Reserving Resources</head><p>Figure <ref type="figure" target="#fig_9">7</ref> shows the impact of reserving 1 to 32 entries (of each type) in powers of two (out of 97 reservation stations, 72 load queue entries and 56 store queue entries). It shows that until 16 reserved entries, the performance remains pretty constant, or even improves (for bc). bc has its outer loop sliced, so the correct path can potentially be long (multiple inner loop iterations), which is   why it benefits from the extra resources. Reserving 32 entries has a clear negative impact on performance, because it limits the progress of regular fetch, while not providing much extra performance to the resolve paths. Note that reserving 32 entries still has a speedup (or neutral for pr) versus the baseline: due to the branch misses, high cache miss rate and indirect memory operations, there is not much instruction-level parallelism to exploit, and therefore these resources are not used efficiently in the baseline. In the results in the previous section, we always assume 8 reserved entries. The small dip for bfs at 4 reserved entries is due to a secondorder interference with the data prefetcher, making the prefetcher perform slightly worse for this configuration. Disabling the prefetcher for all configurations does not show this dip, but the overall performance is lower.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Blocked Linked List ROB</head><p>A blocked linked list ROB reduces the overhead of pointers and simplifies committing multiple instructions per cycle. However, as discussed in Section 4.3, it creates gaps in the ROB when flushing instructions, reducing the ROB capacity. We model these gaps in our simulator. Figure <ref type="figure" target="#fig_10">8</ref> shows the resulting performance for different block sizes, from 1 (no blocks) to 16. Up to a block size of 4, we see negligible impact, because the number of empty slots is small. For   a block size of 8, we see an average 4.1% reduction in performance, increasing to 9.5% for blocks of 16 entries.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4">Sensitivity Studies</head><p>The sensitivity of our mechanism to the input size is evaluated in Figure <ref type="figure" target="#fig_12">9</ref>. We increased the input size by 2×, 4× and 8× versus the baseline results. There is no clear trend: for cc and sssp, the speedup increases as the graph gets bigger, while for bfs and tc, the speedup decreases. We find that the gain is highly correlated with the branch miss fraction in the cycle stack: for some applications, this fraction decreases because the memory fraction increases, while for others, the branch miss fraction also increases because branches are dependent on memory operations that miss in cache. The higher the branch miss fraction, the higher the potential gain of selective flush. The average speedup varies between 1.27 (2× larger graph) and 1.31 (8× larger graph). We also evaluated the selective flush mechanism on a full 28core configuration, see Figure <ref type="figure" target="#fig_13">10</ref>. We increased the input size by a factor of 16, to have a similar memory footprint per core. In this experiment, we both exploit the thread parallelism (using OpenMP threads) as the branch parallelism within a thread (using selective flush). As for the input size sensitivity, speedups either decrease or increase versus a single core evaluation. This is again dependent on the branch miss fraction in the cycle stack. The average speedup of 1.29 shows that the benefit of our technique is orthogonal to that of thread parallelism. Lastly, Figure <ref type="figure" target="#fig_14">11</ref> shows the impact of simultaneous multithreading (SMT) and combining SMT and slicing. We execute 2 and 4 application threads on a single core, for SMT2 and SMT4, respectively. SMT reduces the penalty of branch misses: fewer speculative instructions are fetched, because instructions of other threads are also fetched during the branch resolution time. Furthermore, SMT also hides more memory latency by executing instructions of other threads during the memory latency. Therefore, we see a larger speedup for SMT than for slicing. However, combining slicing and SMT still provides additional speedup. Compared to perfect branch prediction, slicing still provides 50% of the potential speedup with SMT2 or SMT4.</p><p>For some applications (cc and ms), slicing performs even better than adding SMT threads. For SMT, multiple threads execute concurrently, which increases the current working set and puts more pressure on caches and TLBs. This leads to more conflict misses and lower per-thread performance, in most cases compensated by the larger throughput (but not always, e.g., for pr at SMT4). Slicing does not require more threads, and therefore has no impact on cache miss rates.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">CONCLUSIONS AND FUTURE WORK</head><p>Branch mispredictions remain an important source of performance limiters, which gets worse with deeper pipelines and increasingly irregular applications. Reusing the execution of data and control independent instructions after a branch miss instead of refetching them increases performance and energy efficiency. We propose a novel hardware-software cooperative technique to select reconverging instructions and not flush them after a branch miss. Independent slices are denoted by 3 novel slice instructions, inserted by the (performance expert) programmer or compiler. The reorder buffer is reorganized as a linked list to enable removing and inserting instructions in the middle of a stream, enabling the insertion of the part of the correct path that truly depends on the branch misprediction. An evaluation on emerging graph applications shows an average performance increase of 29%.</p><p>This paper serves as a proof of the efficacy of this technique. Further research is needed to implement automatic insertion of slice instructions by the compiler, and to study the impact of the novel ROB organization on low level (RTL and circuit) design.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Listing 1 :</head><label>1</label><figDesc>Example loop 1 l o o p : s l i c e _ s t a r</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Typical sliced loop. Full line arrows are register dependences, dashed arrows are dependences through memory (store to load).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Selective flush mechanism example. Instructions from Listing 1: line number and first letter of instruction (j=branch). Different colors denote different slices/iterations, slice instructions are shown as large brackets. (a) Situation after fetching 2 iterations. (b) Misprediction detected in instruction '3 j', 2 instructions flushed (red). (c) ROB relinked to fetch correct path, dispatch set to checkpoint CP1, checkpoint CP2 taken at 'regular fetch'. (d) Fetching correct path until end of slice and pointing back to next out-of-slice instruction (9 i). (e) Resuming regular fetch from CP2.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: A blocked linked list ROB. Each block consists of multiple instructions; there is one pointer at the end of each block. In blue are correct path instructions, flushed instructions are in gray, green is the resolved correct path and shaded refers to gaps in the ROB. (a) Flushed instructions cross block boundary. (b) Situation after resolving the branch miss. (c) Flushed instructions do not cross block boundary. (d) Inserting a gap at dispatch to enable correct redirection to the resolved path.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Speedup of the selective flush mechanism versus baseline for slicing the inner (where possible) and outer loop, and speedup for perfect branch prediction.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Cycle stacks of the baseline (orig) and sliced execution.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Dispatched instruction count, normalized to the number of correct path instructions.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Speedup of the selective flush mechanism with reserving 1 to 32 RS/LQ/SQ entries for resolving correct paths.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Speedup of the selective flush mechanism with a block linked list from blocks of size 1 (no blocks) to 16.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Sensitivity to input size.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Multicore speedups versus single core speedups.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Speedups of SMT (2 and 4 threads), sliced execution and combinations (single core).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>Simulated processor configuration</figDesc><table><row><cell></cell><cell cols="3">Dispatch/commit width</cell><cell>4</cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="3">Reorder buffer (ROB)</cell><cell cols="2">224 entries</cell><cell></cell></row><row><cell></cell><cell cols="3">Reservation stations</cell><cell>97</cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="5">Load/store queue entries 72/56</cell><cell></cell></row><row><cell></cell><cell cols="3">Branch predictor</cell><cell cols="2">TAGE [38]</cell><cell></cell></row><row><cell></cell><cell cols="2">L1 I/D-cache</cell><cell></cell><cell cols="2">32 KB/32 KB</cell><cell></cell></row><row><cell></cell><cell cols="3">L2 private cache</cell><cell cols="2">1 MB</cell><cell></cell></row><row><cell></cell><cell cols="2">LLC NUCA</cell><cell></cell><cell cols="3">1.375 MB/core</cell></row><row><cell></cell><cell cols="2">Core count</cell><cell></cell><cell>28</cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="3">Network on chip</cell><cell cols="2">mesh</cell><cell></cell></row><row><cell></cell><cell cols="3">Memory latency</cell><cell cols="2">50 ns</cell><cell></cell></row><row><cell></cell><cell cols="3">Memory bandwidth</cell><cell cols="2">115.2 GB/s</cell><cell></cell></row><row><cell></cell><cell>2</cell><cell>inner loop</cell><cell cols="2">outer loop</cell><cell cols="3">perfect bpred</cell></row><row><cell></cell><cell>1.8</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Speedup vs. baseline</cell><cell>0.4 0.6 0.8 1 1.2 1.4 1.6</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.2</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>bc</cell><cell>bfs</cell><cell>cc</cell><cell>pr</cell><cell>sssp</cell><cell>tc</cell><cell>ms</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">Considering only true RAW dependences, WAR and WAW dependences are removed by register renaming.</note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Exploiting Postdominance for Speculative Parallelization</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Malik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">M</forename><surname>Woley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">S</forename><surname>Stone</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">I</forename><surname>Frank</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE 13th International Symposium on High Performance Computer Architecture (HPCA)</title>
+				<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="295" to="305" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Fetch-Criticality Reduction through Control Independence</title>
+		<author>
+			<persName><forename type="first">Mayank</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nitin</forename><surname>Navale</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kshitiz</forename><surname>Malik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><forename type="middle">I</forename><surname>Frank</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="13" to="24" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Checkpoint processing and recovery: Towards scalable large instruction window processors</title>
+		<author>
+			<persName><forename type="first">Haitham</forename><surname>Akkary</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Rajwar</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Srikanth</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Srinivasan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">36th IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page" from="423" to="434" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Transparent Control Independence (TCI)</title>
+		<author>
+			<persName><forename type="first">Ahmed</forename><forename type="middle">S</forename><surname>Al-Zawawi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Vimal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Reddy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haitham</forename><forename type="middle">H</forename><surname>Rotenberg</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Akkary</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">34th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="448" to="459" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Redefining the Role of the CPU in the Era of CPU-GPU Integration</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Arora</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Nath</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mazumdar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">B</forename><surname>Baden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MM.2012.57</idno>
+		<ptr target="https://doi.org/10.1109/MM.2012.57" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">32</biblScope>
+			<biblScope unit="page" from="4" to="16" />
+			<date type="published" when="2012">2012. 2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Classifying Memory Access Patterns for Prefetching</title>
+		<author>
+			<persName><forename type="first">Grant</forename><surname>Ayers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heiner</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">25th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="513" to="526" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Beamer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krste</forename><surname>Asanovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Patterson</surname></persName>
+		</author>
+		<ptr target="http://arxiv.org/abs/1508.03619" />
+		<title level="m">The GAP Benchmark Suite. CoRR abs/1508</title>
+				<imprint>
+			<date type="published" when="2015">2015. 2015</date>
+			<biblScope unit="page">3619</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Sniper: Exploring the Level of Abstraction for Scalable and Accurate Parallel Multi-Core Simulations</title>
+		<author>
+			<persName><forename type="first">Trevor</forename><forename type="middle">E</forename><surname>Carlson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wim</forename><surname>Heirman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">R-MAT: A recursive model for graph mining</title>
+		<author>
+			<persName><forename type="first">Deepayan</forename><surname>Chakrabarti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiping</forename><surname>Zhan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Faloutsos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIAM International Conference on Data Mining</title>
+				<imprint>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page" from="442" to="446" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Auto-predication of critical branches</title>
+		<author>
+			<persName><forename type="first">Adarsh</forename><surname>Chauhan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayesh</forename><surname>Gaur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zeev</forename><surname>Sperber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Franck</forename><surname>Sala</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lihu</forename><surname>Rappoport</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adi</forename><surname>Yoaz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sreenivas</forename><surname>Subramoney</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM/IEEE 47th International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="92" to="104" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Skipper: a microarchitecture for exploiting control-flow independence</title>
+		<author>
+			<persName><forename type="first">Chen-Yong</forename><surname>Cher</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Vijaykumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">34th ACM/IEEE International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="4" to="15" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Control flow optimization via dynamic reconvergence prediction</title>
+		<author>
+			<persName><forename type="first">Dean</forename><forename type="middle">M</forename><surname>Jamison D Collins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hong</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">37th International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page" from="129" to="140" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Design of ion-implanted MOSFET&apos;s with very small physical dimensions</title>
+		<author>
+			<persName><forename type="first">Fritz</forename><forename type="middle">H</forename><surname>Robert H Dennard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hwa-Nien</forename><surname>Gaensslen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ernest</forename><surname>Leo Rideout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andre</forename><forename type="middle">R</forename><surname>Bassous</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Leblanc</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Journal of Solid-State Circuits</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="256" to="268" />
+			<date type="published" when="1974">1974. 1974</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Inside 6th-generation Intel Core: New microarchitecture code-named Skylake</title>
+		<author>
+			<persName><forename type="first">Jack</forename><surname>Doweck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wen-Fu</forename><surname>Kao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Allen</forename><surname>Kuan-Yu Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julius</forename><surname>Mandelblat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anirudha</forename><surname>Rahatekar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lihu</forename><surname>Rappoport</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Efraim</forename><surname>Rotem</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ahmad</forename><surname>Yasin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adi</forename><surname>Yoaz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">37</biblScope>
+			<biblScope unit="page" from="52" to="62" />
+			<date type="published" when="2017">2017. 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Highly Scalable Near Memory Processing with Migrating Threads on the Emu System Architecture</title>
+		<author>
+			<persName><forename type="first">Timothy</forename><surname>Dysart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Kogge</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Deneroff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Bovell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Preston</forename><surname>Briggs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jay</forename><surname>Brockman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenneth</forename><surname>Jacobsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yujen</forename><surname>Juan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shannon</forename><surname>Kuntz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Lethin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Janice</forename><surname>Mcmahon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chandra</forename><surname>Pawar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Perrigo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sarah</forename><surname>Rucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Ruttenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Max</forename><surname>Ruttenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steve</forename><surname>Stein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Sixth Workshop on Irregular Applications: Architectures and Algorithms</title>
+				<meeting>the Sixth Workshop on Irregular Applications: Architectures and Algorithms</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="2" to="9" />
+		</imprint>
+	</monogr>
+	<note>IA 3 &apos;16</note>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">A Mechanistic Performance Model for Superscalar Out-of-order Processors</title>
+		<author>
+			<persName><forename type="first">Stijn</forename><surname>Eyerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tejas</forename><surname>Karkhanis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">E</forename><surname>Smith</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Computer Systems (TOCS)</title>
+		<imprint>
+			<biblScope unit="volume">27</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page">37</biblScope>
+			<date type="published" when="2009-05">2009. May 2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Many-Core Graph Workload Analysis</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Eyerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Heirman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Bois</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">B</forename><surname>Fryman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Hur</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/SC.2018.00025</idno>
+		<ptr target="https://doi.org/10.1109/SC.2018.00025" />
+	</analytic>
+	<monogr>
+		<title level="m">SC18: International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="282" to="292" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Reducing branch misprediction penalty via selective branch recovery</title>
+		<author>
+			<persName><forename type="first">Amit</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haitham</forename><surname>Akkary</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Srikanth</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Srinivasan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on High Performance Computer Architecture (HPCA)</title>
+				<imprint>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page" from="254" to="264" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">NOREBA: a compiler-informed non-speculative out-of-order commit processor</title>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Hajiabadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Diavastos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trevor</forename><forename type="middle">E</forename><surname>Carlson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">26th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="182" to="193" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Graphicionado: A high-performance and energy-efficient accelerator for graph analytics</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">J</forename><surname>Ham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Sundaram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Satish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Martonosi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">49th IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="13" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Understanding sources of inefficiency in general-purpose chips</title>
+		<author>
+			<persName><forename type="first">Rehan</forename><surname>Hameed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wajahat</forename><surname>Qadeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Megan</forename><surname>Wachs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omid</forename><surname>Azizi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Solomatnikov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><forename type="middle">C</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Richardson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Horowitz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">37th International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="37" to="47" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">IBM Power5 chip: A dual-core multithreaded processor</title>
+		<author>
+			<persName><forename type="first">Ron</forename><surname>Kalla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Balaram</forename><surname>Sinharoy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><forename type="middle">M</forename><surname>Tendler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">24</biblScope>
+			<biblScope unit="page" from="40" to="47" />
+			<date type="published" when="2004">2004. 2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Diverge-merge processor (DMP): Dynamic predicated execution of complex control-flow graphs based on frequently executed paths</title>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jose</forename><forename type="middle">A</forename><surname>Joao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">39th IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="53" to="64" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Wish branches: Combining conditional branching and predication for adaptive predicated execution</title>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Stark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">38th International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">The art of computer programming</title>
+		<author>
+			<persName><surname>Donald E Knuth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Sorting and Searching</title>
+				<imprint>
+			<publisher>Addison-Wesley Professional</publisher>
+			<date type="published" when="1998">1998</date>
+			<biblScope unit="volume">3</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Overview of the next generation Cray XMT</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Kopser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dennis</forename><surname>Vollrath</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Cray User Group Proceedings</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="1" to="10" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">SPF: Selective Pipeline Flush</title>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">R</forename><surname>Kothinti Naresh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Sheikh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Perais</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">W</forename><surname>Cain</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE 36th International Conference on Computer Design (ICCD)</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="152" to="155" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">SIMD-X: Programming and Processing of Graph Algorithms on GPUs</title>
+		<author>
+			<persName><forename type="first">Hang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">Howie</forename><surname>Huang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 USENIX Annual Technical Conference (USENIX ATC 19</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="411" to="428" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Branchmispredict level parallelism (BLP) for control independence</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Malik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">S</forename><surname>Stone</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">M</forename><surname>Woley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">I</forename><surname>Frank</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE 14th International Symposium on High Performance Computer Architecture (HPCA)</title>
+				<imprint>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="62" to="73" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Distributed Control Independence for Composable Multi-processors</title>
+		<author>
+			<persName><forename type="first">Mengjie</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hong</forename><surname>An</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tao</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bobin</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuechao</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Junrui</forename><surname>Zhou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2012 IEEE/ACIS 11th International Conference on Computer and Information Science</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="124" to="129" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<title level="m" type="main">Cramming more components onto integrated circuits</title>
+		<author>
+			<persName><forename type="first">Moore</forename><surname>Gordon</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1965">1965</date>
+			<biblScope unit="page" from="114" to="117" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Pipette: Improving Core Utilization on Irregular Applications through Intra-Core Pipeline Parallelism</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Quan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Sanchez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">53rd International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="596" to="608" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Techniques for Graph Analytics on Big Data</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">U</forename><surname>Nisar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Miller</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2013 IEEE International Congress on Big Data</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="255" to="262" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Control-flow independence reuse via dynamic vectorization</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Pajuelo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Antonio</forename><surname>González</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mateo</forename><surname>Valero</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">19th IEEE International Parallel and Distributed Processing Symposium</title>
+				<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Control independence in trace processors</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Rotenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Smith</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">32nd ACM/IEEE International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="4" to="15" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Register integration: a simple and efficient implementation of squash reuse</title>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Roth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gurindar</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">33rd ACM/IEEE international symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2000">2000</date>
+			<biblScope unit="page" from="223" to="234" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Power and frequency analysis for data and control independence in embedded processors</title>
+		<author>
+			<persName><forename type="first">Farzad</forename><surname>Samie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amirali</forename><surname>Baniasadi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2011 International Green Computing Conference and Workshops</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="1" to="6" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">A new case for the TAGE branch predictor</title>
+		<author>
+			<persName><forename type="first">André</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">44th IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="117" to="127" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Wade</forename><surname>Shen</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+	<note>n. d.</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<ptr target="https://www.darpa.mil/program/hierarchical-identify-verify-exploit" />
+		<title level="m">Hierarchical Identify Verify Exploit (HIVE)</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<author>
+			<persName><forename type="first">Balaram</forename><surname>Sinharoy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Van Norstrand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><forename type="middle">J</forename><surname>Eickemeyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hung</forename><forename type="middle">Q</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jens</forename><surname>Leenstra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dung</forename><forename type="middle">Q</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Konigsburg</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ward</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">José</forename><forename type="middle">E</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Moreira</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IBM POWER8 processor core microarchitecture</title>
+				<imprint>
+			<date type="published" when="2015">2015. 2015</date>
+			<biblScope unit="volume">59</biblScope>
+			<biblScope unit="page" from="2" to="3" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Novel graph processor architecture, prototype system, and results</title>
+		<author>
+			<persName><forename type="first">Vitaliy</forename><surname>William S Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexei</forename><surname>Gleyzer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeremy</forename><surname>Lomakin</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Kepner</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE High Performance Extreme Computing Conference (HPEC)</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="7" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">A comprehensive survey on graph neural networks</title>
+		<author>
+			<persName><forename type="first">Zonghan</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shirui</forename><surname>Pan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fengwen</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guodong</forename><surname>Long</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chengqi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Philip</forename><surname>Yu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Neural Networks and Learning Systems</title>
+		<imprint>
+			<date type="published" when="2020">2020. 2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">IMP: Indirect memory prefetcher</title>
+		<author>
+			<persName><forename type="first">Xiangyao</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">J</forename><surname>Hughes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nadathur</forename><surname>Satish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Srinivas</forename><surname>Devadas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">48th International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="178" to="190" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Cambricon-S: Addressing irregularity in sparse neural networks through a cooperative software/hardware approach</title>
+		<author>
+			<persName><forename type="first">Xuda</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zidong</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaoli</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chengsi</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chao</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuehai</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ling</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianshi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunji</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">51st IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="15" to="28" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

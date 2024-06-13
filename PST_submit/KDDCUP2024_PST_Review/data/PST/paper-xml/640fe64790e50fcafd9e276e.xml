@@ -1,0 +1,1558 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">High-throughput Generative Inference of Large Language Models with a Single GPU</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Ying</forename><surname>Sheng</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Lianmin</forename><surname>Zheng</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Binhang</forename><surname>Yuan</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Zhuohan</forename><surname>Li</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Max</forename><surname>Ryabinin</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Daniel</forename><forename type="middle">Y</forename><surname>Fu</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Zhiqiang</forename><surname>Xie</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Beidi</forename><surname>Chen</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Clark</forename><surname>Barrett</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Joseph</forename><forename type="middle">E</forename><surname>Gonzalez</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Percy</forename><surname>Liang</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Christopher</forename><surname>R?</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ion</forename><surname>Stoica</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ce</forename><surname>Zhang</surname></persName>
+						</author>
+						<title level="a" type="main">High-throughput Generative Inference of Large Language Models with a Single GPU</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:48+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>The high computational and memory requirements of large language model (LLM) inference traditionally make it feasible only with multiple high-end accelerators. Motivated by the emerging demand for latency-insensitive tasks with batched processing, this paper initiates the study of high-throughput LLM inference using limited resources, such as a single commodity GPU. We present FlexGen, a high-throughput generation engine for running LLMs with limited GPU memory. FlexGen can be flexibly configured under various hardware resource constraints by aggregating memory and computation from the GPU, CPU, and disk. Through a linear programming optimizer, it searches for efficient patterns to store and access tensors. FlexGen further compresses these weights and the attention cache to 4 bits with negligible accuracy loss. These techniques enable FlexGen to have a larger space of batch size choices and thus significantly increase maximum throughput. As a result, when running OPT-175B on a single 16GB GPU, FlexGen achieves significantly higher throughput compared to state-of-the-art offloading systems, reaching a generation throughput of 1 token/s for the first time with an effective batch size of 144. On the HELM benchmark, FlexGen can benchmark a 30B model with a 16GB GPU on 7 representative sub-scenarios in 21 hours. The code is available at https://github.com/FMInference/FlexGen.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>In recent years, large language models (LLMs) have demonstrated strong performance across a wide range of tasks <ref type="bibr" target="#b3">(Brown et al., 2020;</ref><ref type="bibr" target="#b1">Bommasani et al., 2021;</ref><ref type="bibr" target="#b41">Zhang et al., 2022;</ref><ref type="bibr" target="#b5">Chowdhery et al., 2022)</ref>. Along with these unprecedented capabilities, generative LLM inference comes with unique challenges. These models can have billions, if not trillions of parameters <ref type="bibr" target="#b5">(Chowdhery et al., 2022;</ref><ref type="bibr" target="#b10">Fedus et al., 2022)</ref>, which leads to extremely high computational and memory requirements to run. For example, GPT-175B requires 325GB of GPU memory simply to load its model weights. Fitting this model onto GPUs would require at least five A100 (80GB) GPUs and complex parallelism strategies <ref type="bibr" target="#b29">(Pope et al., 2022;</ref><ref type="bibr" target="#b0">Aminabadi et al., 2022)</ref>. Thus, lowering LLM inference resource requirements has recently attracted intense interest.</p><p>In this paper, we focus on a setting that we call throughput-oriented generative inference. In addition to interactive use cases such as chatbots, LLMs are also applied to many "back-of-house" tasks such as benchmarking <ref type="bibr" target="#b20">(Liang et al., 2022)</ref>, information extraction <ref type="bibr" target="#b24">(Narayan et al., 2018)</ref>, data wrangling <ref type="bibr" target="#b23">(Narayan et al., 2022)</ref>, and form processing <ref type="bibr" target="#b4">(Chen et al., 2021)</ref>. One key characteristic of these tasks is that they often require running LLM inference in batches over a large number of tokens (e.g., all the documents in a company's corpus), and are less sensitive to the latency of token generation. As a result, it is possible to trade off latency for higher throughput in these workloads, providing opportunities to reduce resource requirements.</p><p>Prior efforts to lower resource requirements of LLM inference correspond to three directions: (1) model compression to decrease total memory footprint <ref type="bibr">(Dettmers et al., 2022;</ref><ref type="bibr" target="#b39">Yao et al., 2022;</ref><ref type="bibr" target="#b12">Frantar et al., 2022;</ref><ref type="bibr" target="#b38">Xiao et al., 2022)</ref>; (2) collaborative inference to amortize inference cost via decentralization <ref type="bibr" target="#b2">(Borzunov et al., 2022)</ref>; and (3) offloading to utilize memory from CPU and disk <ref type="bibr" target="#b0">(Aminabadi et al., 2022;</ref><ref type="bibr">HuggingFace, 2022)</ref>. These techniques have significantly lowered the resource requirements for using LLMs, but there are distinct limitations. Research in the first two directions often assume that the model fits into the GPU memory and thereby struggle to run 175B-scale models with a single commodity GPU. On the other hand, state-of-the-art offloading-based systems in the third category do not achieve acceptable throughput on a single GPU due to inefficient I/O scheduling and tensor placement. For example, these systems can be bottlenecked by small batch sizes (e.g., batch sizes of only one or two for OPT-175B in some cases). 1 Stanford University 2 UC Berkeley 3 ETH Zurich 4 Yandex 5 HSE University 6 Meta 7 Carnegie Mellon University. Ying Sheng &lt;ying1123@stanford.edu&gt;, Lianmin Zheng &lt;lianminzheng@gmail.com&gt;, Binhang Yuan &lt;biyuan@inf.ethz.ch&gt;, Zhuohan Li &lt;zhuohan@cs.berkeley.edu&gt;, Max Ryabinin &lt;mryabinin0@gmail.com&gt;, Daniel Y. Fu &lt;danfu@cs.stanford.edu&gt;, Zhiqiang Xie &lt;xiezhq@stanford.edu&gt;, Beidi Chen &lt;beidic@andrew.cmu.edu&gt;, Clark Barrett &lt;barrett@cs.stanford.edu&gt;, Joseph E. Gonzalez &lt;jegonzal@cs.berkeley.edu&gt;, Percy Liang &lt;pliang@cs.stanford.edu&gt;, Christopher R? &lt;chrismre@cs.stanford.edu&gt;, Ion Stoica &lt;istoica@cs.berkeley.edu&gt;, Ce Zhang &lt;ce.zhang@inf.ethz.ch&gt;. Latency (s) Our focus is designing efficient offloading strategies for high-throughput generative inference, on a single commodity GPU. To run an LLM with limited GPU memory, we can offload it to secondary storage and perform computation part-by-part by partially loading it. On a typical machine, there are three levels of the memory hierarchy, as illustrated in the figure to the right. Higher levels are faster but scarce, while lower levels are slower but abundant. In throughput-oriented scenarios, we can sacrifice latency by using a large batch size, and amortize the expensive I/O operations among different memory hierarchies over a large batch of inputs, overlapped with computation. Fig. <ref type="figure" target="#fig_0">1</ref> shows the latency-throughput trade-off of three inference systems with offloading on a single NVIDIA T4 (16 GB) GPU. Note that the performance in terms of latency and throughput on limited resources is significantly inferior to that of the cases with sufficient resources.</p><p>Achieving high-throughput generative inference with limited GPU memory is challenging even if we can sacrifice the latency. The first challenge is to design an efficient offloading strategy. During generative inference, there are three kinds of tensors: weights, activations, and key-value (KV) cache. The strategy should specify what tensors to offload, where to offload them within the three-level memory hierarchy, and when to offload them during inference. The batch-by-batch, token-by-token, and layer-by-layer structure of the computation forms a complex dependency graph where there are multiple ways to conduct computation. Together, these choices form a complex design space. Existing offloading-based inference systems <ref type="bibr" target="#b0">(Aminabadi et al., 2022;</ref><ref type="bibr">HuggingFace, 2022)</ref> inherit strategies from training, which turn out to be some suboptimal points for inference, performing excessive I/O and achieving throughput far below theoretical hardware limits.</p><p>The second challenge is to develop effective compression strategies. Previous works have demonstrated promising results in compressing the weights and activations of LLMs. However, when combining compression with offloading for highthroughput generative inference, the I/O costs and memory reduction of the weights and KV cache become more important, motivating alternative compression schemes.</p><p>To address these challenges, we present FlexGen, an offloading framework for high-throughput LLM inference. FlexGen aggregates memory from the GPU, CPU, and disk, and efficiently schedules I/O operations, along with possible compression methods and distributed pipeline parallelism.</p><p>(Contribution 1) We formally define a search space of possible offloading strategies by considering computation schedule, tensor placement, and computation delegation. We prove that our search space captures a computation order with I/O complexity within 2? of optimality. We then develop a linear programming-based search algorithm to optimize the throughput within the search space. This algorithm can be configured for various hardware specifications and can be easily extended to incorporate latency and throughput constraints, thus helping to navigate the trade-off space smoothly. Compared with existing strategies, our solution unifies the placement of weights, activations, and the KV cache, enabling a dramatically higher batch size upper bound, which is key to achieving high throughput.</p><p>(Contribution 2) We show that it is possible to compress both the weights and KV cache for LLMs like OPT-175B to 4 bits without retraining or calibration, all with negligible accuracy loss. This is achieved through fine-grained group-wise quantization <ref type="bibr" target="#b34">(Shen et al., 2020)</ref>, which is suitable for reducing I/O costs and memory usage during offloading.</p><p>(Contribution 3) We demonstrate the efficiency of FlexGen by running OPT-175B on NVIDIA T4 (16GB) GPUs. Compared to DeepSpeed Zero-Inference <ref type="bibr" target="#b0">(Aminabadi et al., 2022)</ref> and Hugging Face Accelerate (HuggingFace, 2022), two state-of-theart offloading-based inference systems, FlexGen often allows a batch size that is orders of magnitude larger. As a result, FlexGen can achieve much higher throughputs. On a single T4 GPU with 208 GB CPU DRAM and 1.5 TB SSD, input sequence length 512, and output sequence length 32:</p><p>? With the same latency of 5000 seconds, FlexGen (effective batch size 64, or 2048 tokens in total) can achieve more than 40? higher throughput than DeepSpeed Zero-Inference (batch size 1, or 32 tokens in total), while Hugging Face Accelerate cannot complete a single batch. ? By allowing a higher latency of 12000 seconds, FlexGen achieves 69? higher maximum throughput compared to baselines because it can enlarge the effective batch size to 256 (8192 tokens generated in total), while DeepSpeed Zero-Inference and Hugging Face Accelerate cannot use a batch size larger than 2 due to out-of-memory issues. ? If allowing 4-bit compression, FlexGen can reach 100? higher maximum throughput with effective batch size 144 (4608 tokens generated in total) with latency 4000 seconds by holding all weights in CPU and getting rid of disk offloading.</p><p>We also compare offloading and decentralized collective inference based on FlexGen and Petals <ref type="bibr" target="#b2">(Borzunov et al., 2022)</ref> as two representative systems. We conduct comparisons between the two systems from the aspects of delay and bandwidth of the decentralized network and output sequence length. The results show that FlexGen outperforms a decentralized Petals cluster in terms of per-GPU throughput and can even achieve lower latency in certain cases.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Related Work</head><p>Given the recent advances of LLMs, LLM inference has become an important workload, encouraging active research from both the system side and the algorithm side.</p><p>Recent years have witnessed the emergence of systems specialized for LLM inference, such as FasterTransformer (NVIDIA, 2022), Orca <ref type="bibr" target="#b40">(Yu et al., 2022)</ref>, LightSeq <ref type="bibr" target="#b37">(Wang et al., 2021)</ref>, PaLM inference <ref type="bibr" target="#b29">(Pope et al., 2022)</ref>, TurboTransformers <ref type="bibr" target="#b9">(Fang et al., 2021)</ref>, DeepSpeed Inference <ref type="bibr" target="#b0">(Aminabadi et al., 2022)</ref>, and Hugging Face Accelerate (HuggingFace, 2022). Unfortunately, most of these systems focus on latency-oriented scenarios with high-end accelerators, limiting their deployment for throughput-oriented inference on easily accessible hardware. To enable LLM inference on such commodity hardware, offloading is an essential technique -as far as we know, among current systems, only DeepSpeed Zero-Inference and Hugging Face Accelerate support offloading. These inference systems typically inherit the offloading techniques from training systems <ref type="bibr" target="#b30">(Rajbhandari et al., 2021;</ref><ref type="bibr" target="#b31">Ren et al., 2021;</ref><ref type="bibr" target="#b19">Li et al., 2022;</ref><ref type="bibr" target="#b14">Huang et al., 2020;</ref><ref type="bibr" target="#b36">Wang et al., 2018)</ref> but ignore the special computational property of generative inference. They fail to exploit the structure of the throughput-oriented LLM inference computation and miss great opportunities for efficient scheduling of I/O traffic. Another attempt to enable LLM inference on accessible hardware is collaborative computing proposed by Petals <ref type="bibr" target="#b2">(Borzunov et al., 2022)</ref>.</p><p>Besides these advances on the system side, there are also many algorithm-oriented works that relax certain aspects of computation in LLM inference to accelerate the computation or reduce the memory footprint. Both sparsification <ref type="bibr" target="#b13">(Hoefler et al., 2021;</ref><ref type="bibr" target="#b11">Frantar &amp; Alistarh, 2023)</ref> and quantization <ref type="bibr" target="#b18">(Kwon et al., 2022;</ref><ref type="bibr" target="#b39">Yao et al., 2022;</ref><ref type="bibr" target="#b27">Park et al., 2022;</ref><ref type="bibr" target="#b38">Xiao et al., 2022;</ref><ref type="bibr" target="#b12">Frantar et al., 2022;</ref><ref type="bibr">Dettmers et al., 2022)</ref> have been adopted for LLM inference. On the quantization side, prior works have shown weights can be compressed down to 3 bits without compressing activations <ref type="bibr" target="#b12">(Frantar et al., 2022)</ref>, or both weights and activations can be compressed to 8 bits <ref type="bibr" target="#b39">(Yao et al., 2022;</ref><ref type="bibr">Dettmers et al., 2022;</ref><ref type="bibr" target="#b38">Xiao et al., 2022)</ref>. In FlexGen, we compress both the weights and KV cache to 4 bits and show how to combine the compression with offloading to make further improvements.</p><p>Within domains outside of LLM inference, memory optimizations and offloading have been studied for training <ref type="bibr" target="#b14">(Huang et al., 2020;</ref><ref type="bibr" target="#b31">Ren et al., 2021;</ref><ref type="bibr" target="#b35">Steiner et al., 2022)</ref> and linear algebra <ref type="bibr" target="#b17">(Jia-Wei &amp; Kung, 1981;</ref><ref type="bibr" target="#b6">Demmel, 2013)</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Background: LLM Inference</head><p>In this section, we describe the LLM inference workflow and its memory footprint.</p><p>Generative Inference. A typical LLM generative inference task consists of two stages: i) the prefill stage which takes a prompt sequence to generate the key-value cache (KV cache) for each transformer layer of the LLM; and ii) the decoding stage which utilizes and updates the KV cache to generate tokens step-by-step, where the current token generation depends on previously generated tokens. Formally, the computation of a transformer layer can be summarized below:</p><p>For a particular inference computation, denote the batch size by b, the input sequence length by s, the output sequence length by n, the hidden dimension of the transformer by h 1 , the hidden dimension of the second MLP layer by h 2 , and the total number of transformer layers by l. Given the weight matrices of a transformer layer specified by</p><formula xml:id="formula_0">w i K , w i Q , w i V , w i O , w i 1 , w i 2 , where w i K , w i Q , w i V , w i O ? R h1?h1 , w 1 ? R h1?h2</formula><p>, and w 2 ? R h2?h1 . During the prefill phase, the input of the i-th layer is specified by x i , and key, value, query, and output of the attention layer is specified by</p><formula xml:id="formula_1">x i K , x i V , x i Q , x i Out , where x i , x i K , x i V , x i Q , x i Out ? R b?s?h1 .</formula><p>Then, the cached key, value can be computed by:</p><formula xml:id="formula_2">x i K = x i ? w i K ; x i V = x i ? w i V</formula><p>The rest of the computation in the i-th layer is:</p><formula xml:id="formula_3">x i Q = x i ? w i Q x i Out = f Softmax x i Q x i K T ? h ? x i V ? w i O + x i x i+1 = f relu x i Out ? w 1 ? w 2 + x i</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Out</head><p>During the decoding phase, given the embedding of the current generated token in the i-th layer noted by t i ? R b?1?h1 , the inference computation needs to i) update the KV cache; and ii) compute the output of the current layer. The update of the KV cache can be formalized as:</p><formula xml:id="formula_4">x i K ? Concat x i K , t i ? w i K x i V ? Concat x i V , t i ? w i V</formula><p>The rest of the computation for the current layer is:</p><formula xml:id="formula_5">t i Q = t i ? w i Q t i Out = f Softmax t i Q x i K T ? h ? x i V ? w i O + t i t i+1 = f relu t i Out ? w 1 ? w 2 + t i</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Out</head><p>Memory Analysis. The memory footprint of LLM inference mainly comes from two components: the model weights and the KV cache. Considering the OPT-175B model in FP16, the total number of bytes to store the parameters can be roughly<ref type="foot" target="#foot_0">1</ref> calculated by l(8h 2 1 + 4h 1 h 2 ). The total number of bytes to store the KV cache in peak is 4 ? blh 1 (s + n). In a realistic setting with a sufficient number of GPUs, the OPT-175B model (l = 96, h 1 = 12288, h 2 = 49152) takes 325 GB. With a batch size of b = 512, an input sequence length s = 512, and an output sequence length of n = 32, the total memory required to store the KV cache is 1.2 TB, which is 3.8? the model weights, making the KV cache a new bottleneck of large-batch high-throughput inference. In the single GPU setting, the batch size is usually smaller but is still a significant bottleneck. In FlexGen, for OPT-175B, we enlarge the effective batch size to 256 to achieve the throughput at 0.69 token/s. Throughput and Latency. Considering an effective batch size b, an input sequence length s, and an output sequence length of n, the latency t is defined as the total number of seconds spent to process the prompts and generate all the bn tokens. The generation throughput is defined as bn/t token/s. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Offloading Strategy</head><p>In this section, we do not relax any computation of LLM inference and illustrate how to formalize the offloading procedure under the GPU, CPU, and disk memory hierarchy. We first formulate the problem and then construct the search space of the possible offloading strategies in FlexGen. To find an efficient strategy, FlexGen builds an analytical cost model and searches for configurations with an optimizer based on linear programming. We also show how to extend FlexGen to support multi-GPU settings. for i = 1 to generation length do for j = 1 to num layers do // Compute a block with multiple GPU batches for k = 1 to num GP U batches do // Load the weight of the next layer load weight(i, j + 1, k) // Store the cache and activation of the prev batch store activation(i, j, k -1) store cache(i, j, k -1) // Load the cache and activation of the next batch load cache(i, j, k + 1) load activation(i, j, k + 1) // Compute this batch compute(i, j, k) // Synchronize all devices synchronize() end for end for end for </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.">Problem Formulation</head><p>Consider a machine with three devices: a GPU, a CPU, and a disk. The GPU and CPU can perform computation while the disk cannot. The three devices form a three-level memory hierarchy where the GPU has the smallest but fastest memory and the disk has the largest but slowest memory. When an LLM cannot fit entirely within the GPU, we need to offload it to secondary storage and perform computation part-by-part by partially loading the LLM.</p><p>We formulate the generative inference with offloading as a graph traversal problem. Fig. <ref type="figure" target="#fig_1">2</ref> shows an example computational graph, where the model has 4 layers and we generate 3 tokens per prompt. As our focus is throughput-oriented scenarios, we assume a given dataset with an infinite number of prompts that need to be processed. In the figure, a square means the computation of a batch on a layer on the GPU. The squares with the same color share the same layer weights. We define a valid path as a path that traverses (i.e., computes) all squares, while subject to the following constraints:</p><p>? A square can only be computed if all squares to its left on the same row were computed.</p><p>? To compute a square on a device, all its inputs (weights, activations, cache) must be loaded to the same device.</p><p>? After being computed, a square produces two outputs: activations and KV cache. The activations should be stored until its right sibling is computed. The KV cache should be stored until the rightmost square on the same row is computed. ? At any time, the total size of tensors stored on a device cannot exceed its memory capacity.</p><p>The goal is to find a valid path that minimizes the total execution time, which includes the compute cost and I/O cost when moving tensors between devices.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.">Search Space</head><p>Given the formulation above, we construct a search space for possible valid strategies in FlexGen.</p><p>Compute schedule. Intuitively, there are two orders to traverse the graph in Fig. <ref type="figure" target="#fig_1">2</ref>: row-by-row and column-by-column. All existing systems <ref type="bibr" target="#b0">(Aminabadi et al., 2022;</ref><ref type="bibr">HuggingFace, 2022)</ref> traverse the graph row-by-row, as shown in Fig. <ref type="figure" target="#fig_2">3(a)</ref>. This is reasonable because it is the fastest way to finish the generation for one batch and the KV cache can be freed immediately after a row. However, because every two contiguous squares do not share weights, this schedule has to repeatedly load the weights and incurs huge I/O costs.</p><p>To reduce the I/O costs of the weights, we can traverse the graph column-by-column. All squares in a column share weights, so we can let the weights stay on GPU for reusing and only load/unload the activations and KV cache. However, we cannot traverse a column all the way to the end because the activations and KV cache still need to be stored. Hence, we have to stop when they fill the CPU and disk memory. Taking all this into consideration, we converge to a zig-zag block schedule, as shown in Fig. <ref type="figure" target="#fig_2">3(b</ref>). Besides the zig-zag block schedule, there exists another more advanced and I/O-optimal schedule. We only implement the simpler block schedule due to the practical implementation difficulty of the optimal schedule. However, we prove that the block schedule is at most twice worse than the optimal schedule in Appendix A.2.</p><p>Theorem 4.1. The I/O complexity of the zig-zag block schedule is within 2? of the optimal solution.</p><p>Another typical optimization is overlapping. We can overlap the weights load of the next layer, cache/activation load of the next batch, cache/activation store of the previous batch, and the computation of the current batch. Adding overlapping to the block schedule results in Fig. <ref type="figure" target="#fig_3">4</ref>. The first six functions in the innermost loop can be seen as launched in parallel with six logical threads because there are no dependencies. The last function then synchronizes these six logical threads. We rely on operating systems and CUDA drivers to resolve the schedule of the underlying hardware resources. The algorithm introduces two parameters into our search space: the GPU batch size and the number of GPU batches in a block. The product of the GPU batch size and the number of GPU batches is called block size (or effective batch size).</p><p>Tensor placement. Besides compute schedule, a strategy should specify how to store these tensors within the three-level memory hierarchy. We use three variables wg, wc, and wd to define the percentages of weights stored on GPU, CPU, and disk respectively. Similarly, we use three variables hg, hc, hd to define the percentages of activations and use cg, cc, cd for the KV cache. Given the percentages, there are still multiple ways to partition the tensors. Taking weight tensors as an example, from coarse grain to fine grain, we can partition the weights at the model granularity (e.g., assign 50% of the layers in a model to the GPU), at the layer granularity (e.g., assign 50% of the tensors in a layer to the GPU), or at the tensor granularity (e.g., assign 50% of the elements in a tensor to the GPU). Coarser granularity leads to lower runtime overhead but it is less flexible and its cost is difficult to analyze. Considering both the runtime overhead and desired flexibility, we use layer granularity for weights, and tensor granularity for activations and the KV cache.</p><p>Computation delegation. While CPUs are much slower than GPUs, we find using CPU compute can still be beneficial in some cases. This is because the computation of attention scores during decoding is I/O-bounded. Consider a case where the KV cache is stored on the CPU. Computing the attention scores on the GPU requires moving the entire KV cache to the GPU, which incurs a substantial I/O cost as the KV cache is huge. In contrast, computing the attention score on the CPU does not require moving the KV cache. It only requires moving the activations from the GPU to the CPU. Quantitatively, let b be the GPU batch size, s be the sequence length, and h 1 be the hidden size. The size of the moved KV cache is b ? s ? h 1 ? 4 bytes, and the size of the moved activation is b ? h 1 ? 4 bytes, so computing attention score on CPU reduces I/O by s?. For long sequences (e.g., s ? 512), it is better to compute the attention scores on the CPU if the associated KV cache is stored on the CPU or disk.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.">Cost Model and Policy Search</head><p>The schedule and placement in Section 4.2 constructs a search space with several parameters. Now we develop an analytical cost model to estimate the execution time given these algorithm parameters and hardware specifications.</p><p>Cost Model. The cost model predicts the latency during prefill for one layer denoted as T pre , and the averaged latency during decoding for one layer denoted as T gen in one block. The total latency for computing a block can then be estimated as T = T pre ? l + T gen ? (n -1) ? l, where l is the number of layers and n is the number of tokens to generate.</p><p>Assuming perfect overlapping, T pre can be estimated as T pre = max(ctog p , gtoc p , dtoc p , ctod p , comp p ), where ctog p , gtoc p , dtoc p , ctod p , comp p denote the latency of read from CPU to GPU, write from GPU to CPU, read from disk to CPU, write from CPU to disk, computation, respectively, during prefill for one layer.</p><p>Similarly, T gen can be estimated as T gen = max(ctog g , gtoc g , dtoc g , ctod g , comp g ), with ctog g , gtoc g , dtoc g , ctod g , comp g denoting the latency of read from CPU to GPU, write from GPU to CPU, read from disk to CPU, write from CPU to disk, computation, respectively, during decoding for one layer.</p><p>For I/O terms like dtoc g , it is estimated by summing up the I/O events, which contain weights, activations, and cache reads. The size of FP16 weights for one transformer layer is 8h 2 1 + 4h 1 ? h 2 bytes, with h 1 denoting the hidden size, and h 2 denoting the hidden size of the second MLP layer. Let bls be the block size and s be the prompt length; then the size of activations for one layer is 2 ? bls ? h 1 . The size of the KV cache for one layer on average is 4</p><formula xml:id="formula_6">? bls ? (s + n 2 ) ? h 1 .</formula><p>We have to load wd, hd, cd percent of weights, activations, and the KV cache from the disk respectively so that the total latency of disk read is</p><formula xml:id="formula_7">dtoc g = 1 disk to cpu bandwidth ((8h 2 1 + 4h 1 ? h 2 ) ? wd + 4 ? bls ? (s + n 2 ) ? h 1 ? cd + 2 ? bls ? h 1 ? hd).</formula><p>Similarly for computation terms, we sum up all computation events, including matrix multiplications and batched matrix multiplications on the CPU and the GPU.</p><p>Besides latency estimation, we also estimate the peak memory usage of the GPU, CPU, and disk, and then we add memory constraints. The full cost model is in Appendix A.3. Policy Search. A policy includes 11 variables: block size bls, GPU batch size gbs, weight placement wg, wc, wd, activation placement hg, hc, hd, and KV cache placement cg, cc, cd. In practice, the percentage cannot be an arbitrary real number between 0 and 1, because the tensor cannot be split arbitrarily. However, we relax the percentage variables in the cost model to be any real number between 0 and 1 since it is changing gradually. We solve the problem as a two-level optimization problem. We first enumerate a few choices of (bls, gbs) tuple. Typically, gbs is a multiple of 4, and bls is less than 20 so there are not too many choices. Then with the fixed bls, gbs, finding the best placement p = (wg, wc, wd, cg, cc, cd, hg, hc, hd) becomes a linear programming problem shown in Eq. ( <ref type="formula">1</ref>). The linear programming problem can be solved very quickly because there are only 9 variables. This formulation can also be flexibly extended to include latency constraints and model approximate methods such as compression. min p T /bls s.t. gpu peak memory &lt; gpu mem capacity cpu peak memory &lt; cpu mem capacity disk peak memory &lt; disk mem capacity wg</p><formula xml:id="formula_8">+ wc + wd = 1 cg + cc + cd = 1 hg + hc + hd = 1 (1)</formula><p>To use the cost model, we run profiling on the hardware to sample some data points and fit the hardware parameters. We then call the optimizer to get an offloading policy. Due to our relaxation and the hardness of accurately modeling peak memory usage (e.g., fragmentation), sometimes a strategy from the policy search can run out of memory. In this case, we manually adjust the policy slightly. The cost model can usually return a good policy, but it is common that a better policy can be obtained by tuning manually.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4.">Extension to Multiple GPUs</head><p>We discuss how to extend the offloading strategy in FlexGen if there are multiple GPUs. Although we can find a nearly optimal strategy for one GPU, the strategy is still heavily limited by I/O and has a low GPU utilization. If we are given more GPUs and more CPUs, model parallelism can be utilized to reduce the memory pressure of each GPU, which can potentially lead to a super-linear scaling in decoding.</p><p>There are two kinds of model parallelisms: tensor parallelism and pipeline parallelism <ref type="bibr" target="#b25">(Narayanan et al., 2021;</ref><ref type="bibr" target="#b0">Zheng et al., 2022)</ref>. Tensor parallelism can reduce the single-query latency but pipeline parallelism can achieve good scaling on throughput due to its low communication costs. Since we target throughput, FlexGen implements pipeline parallelism.</p><p>We use pipeline parallelism by equally partitioning an l-layer LLM on m GPUs, and then the execution of all GPUs follows the same pattern. The problem is reduced to running an n/m-layer transformer on one GPU. We can directly reuse the policy search developed for one GPU. To achieve micro-batch pipelining, a new for-loop is added to Fig. <ref type="figure" target="#fig_3">4</ref> to combine the iteration-level pipeline parallel execution schedule <ref type="bibr" target="#b15">(Huang et al., 2019;</ref><ref type="bibr" target="#b40">Yu et al., 2022)</ref> with our single-device offloading runtime.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Approximate Methods</head><p>The previous section focuses on the exact computation. However, the inference throughput can be greatly boosted with negligible accuracy loss by allowing some approximation, because LLMs are typically robust to careful approximations. This section introduces two such approximations: group-wise quantization and sparse attention.</p><p>Group-wise Quantization. We show that both the weights and KV cache can be directly quantized into 4-bit integers without any retraining or calibration on OPT-175B, all while preserving similar accuracy (Section 6.2). When compared to some related works <ref type="bibr" target="#b39">(Yao et al., 2022;</ref><ref type="bibr">Dettmers et al., 2022;</ref><ref type="bibr" target="#b38">Xiao et al., 2022)</ref> that try to use integer matrix multiplication mainly for accelerated computation, the goal of quantization in our case is primarily for compression and reducing I/O costs. Therefore, we can choose a fine-grained quantization format in favor of a high compression ratio and dequantize the tensors back to FP16 before computation. We use a fine-grained group-wise asymmetric quantization method <ref type="bibr" target="#b34">(Shen et al., 2020)</ref>. Given a tensor, we choose g contiguous elements along a certain dimension as a group. For each group, we compute the min and max of the group elements and quantize each element x into b-bit integers by x quant = round x-min max-min ? (2 b -1) . The tensors are stored in the quantized format and converted back to FP16 before computation. Since both the weights and KV cache consume a significant amount of memory, we compress both to 4 bits with a group size of 64. There are multiple ways to choose which dimension to group on. We find that grouping the weights along the output channel dimension and the KV cache along the hidden dimension preserves the accuracy while being runtime-efficient in practice. One thing to mention is that such a fine-grained group-wise quantization in FlexGen causes some overhead in compression and decompression. Such an overhead could be very significant if run on a CPU which makes the CPU delegation useless, so we turn off the CPU delegation when enabling quantization. A concurrent work <ref type="bibr">(Dettmers &amp; Zettlemoyer, 2022</ref>) also finds that 4-bit precision is almost optimal for total model bits and zero-shot accuracy on OPT models. Compared to this previous work, we first propose to compress the KV cache and present the results on OPT-175B.</p><p>Sparse Attention. We demonstrate that the sparsity of self-attention can be exploited by only loading the top 10% attention value cache on OPT-175B, all while maintaining the model quality. We present one simple Top-K sparse approximation.</p><p>After computing the attention matrices, for each query, we calculate the indices of its Top-K tokens from the K cache. We then simply drop the other tokens and only load a subset of the V cache according to the indices.</p><p>The application of these approximations is straightforward. We present these preliminary but interesting results and intend to emphasize that FlexGen is a general framework that can seamlessly plug in many approximation methods.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Evaluation</head><p>Hardware. We run experiments on the NVIDIA T4 GPU instances from Google Cloud. The hardware specifications are listed in Table <ref type="table" target="#tab_1">1</ref>. The read bandwidth of SSD is about 2GB/s and the write bandwidth is about 1GB/s.</p><p>Model. OPT models <ref type="bibr" target="#b41">(Zhang et al., 2022)</ref> with 6.7B to 175B parameters are used in the evaluation. Although we do not evaluate other models, the offloading in FlexGen can be applied to other transformer LLMs, e.g., GPT-3 <ref type="bibr" target="#b3">(Brown et al., 2020)</ref>, PaLM <ref type="bibr" target="#b5">(Chowdhery et al., 2022)</ref>, and BLOOM <ref type="bibr" target="#b33">(Scao et al., 2022)</ref> because they all share a similar structure.</p><p>Workload. Our focus is high-throughput generation on a given dataset. We use synthetic datasets where all prompts are padded to the same length. The system is required to generate 32 tokens for each prompt. We test two prompt lengths: 512 and 1024 (for experiments in more settings, see Appendix A.4). The evaluation metric is generation throughput, defined as the number of generated tokens / (prefill time + decoding time). Sometimes even running a full batch takes too long for certain systems -in this cases, we generate fewer tokens and project the final throughput. We use dummy model weights in throughput benchmarks for FlexGen and all baselines, but we use real weights for accuracy evaluations.</p><p>Baseline. We use DeepSpeed ZeRO-Inference <ref type="bibr" target="#b0">(Aminabadi et al., 2022)</ref> and Hugging Face Accelerate (HuggingFace, 2022) as baselines. They are the only systems that can run LLMs with offloading when there is not enough GPU memory. DeepSpeed supports offloading the whole weights to the CPU or disk. It uses ZeRO data parallelism if there are multiple GPUs. Accelerate supports offloading a fraction of the weights. It does not support distributed GPUs on different machines. Both of them use the row-by-row schedule and can only put cache/activations on GPU. These systems support different quantization methods. However, the quantization in Accelerate is not compatible with offloading, and the quantization in DeepSpeed cannot preserve accuracy up to 175B, so we do not enable quantization on these systems.</p><p>Implementation. FlexGen is implemented on top of PyTorch <ref type="bibr" target="#b28">(Paszke et al., 2019)</ref>. FlexGen manages multiple CUDA streams and CPU threads to overlap I/O with compute. FlexGen creates files for tensors stored on the disk and maps them as virtual memory to access them.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1.">Offloading</head><p>Maximum throughput benchmark. We first evaluate the maximum generation throughput the systems can achieve with one GPU on two prompt lengths. As shown in Table <ref type="table" target="#tab_2">2</ref>, FlexGen outperforms all baselines in all cases. On OPT-6.7B, Accelerate and FlexGen can successfully fit the whole model into a single GPU, so they choose to only use the GPU. DeepSpeed has a higher memory overhead and cannot fit OPT-6.7B into the GPU, so it uses slower CPU offloading. On OPT-30B, all systems switch to CPU offloading. DeepSpeed and Accelerate store the KV cache on the GPU, so they cannot use a very large batch size, while FlexGen offloads most weights and all KV cache to the CPU and enables a larger GPU batch size. In addition, FlexGen reuses the weights by block scheduling. On OPT-175B, all systems start to offload the weights to the disk. Baseline systems can only use a maximum batch size of 2, but FlexGen can use a GPU batch size of 32 and a block size of 32 ? 8, achieving a 69? higher throughput. With compression enabled, FlexGen achieves a 112? higher generation throughput on a single GPU for prompt sequence length 512. This huge improvement is because FlexGen uses an effective batch size of 144 and compresses the weights and KV cache to fit into CPU memory to avoid slow disk swapping. More details on the policy setups and effective batch sizes can be found in Appendix A.4. We also include Petals <ref type="bibr" target="#b2">(Borzunov et al., 2022)</ref> as an additional baseline. Petals uses 1 x T4 for OPT-6.7B, 4 x T4 for OPT-30B, and 24 x T4 for OPT-175B, but reports per-GPU throughput. The models are run in INT8 as the default for petals. We benchmark it under a good network assumption with a delay of less than 5ms and bandwidth of 1 Gbps. For a more comprehensive comparison with Petals, see Section 6.3.</p><p>Table <ref type="table" target="#tab_3">3</ref> shows the results on 4 machines with one GPU on each machine. Even with 4 GPUs, OPT-30B or OPT-175B still cannot fit into these GPUs. Naively, we can run 4 independent FlexGen in a data-parallel fashion to get a linear scaling on throughput. But here we show that pipeline parallelism can achieve super-linear scaling on decoding throughput. With pipeline parallelism, the memory pressure of each machine is reduced so we can switch from small batch sizes to larger batch sizes, or switch from disk offloading to CPU-only offloading. In Table <ref type="table" target="#tab_3">3</ref>, FlexGen does not achieve linear scaling on generation throughput (which counts both prefill and decoding time costs). This is because there are pipeline bubbles during the prefill stage and our workload settings only generate 32 tokens. However, FlexGen achieves super-linear scaling on decoding throughput (which only counts decoding time costs assuming the prefill is done). This means if we generate more tokens, pipeline parallelism will show its benefits as decoding time will dominate.</p><p>Latency-throughput trade-off. We configure these systems to achieve maximum throughput under various latency constraints and draw their latency-throughput trade-off curves in Fig. <ref type="figure" target="#fig_0">1</ref>. FlexGen sets a new Pareto-optimal frontier that significantly outperforms baselines. On the low-latency side, FlexGen supports partial offloading and uses more space for weights. On the high-throughput side, FlexGen aggressively offloads all things out of the GPU to achieve a large GPU batch size and block size. Given the same latency requirement of 5000 seconds, FlexGen without compression can achieve a 40? higher throughput compared to DeepSpeed and Accelerate. If allowing a higher latency and compression, FlexGen can further boost throughput and reach a 100? improvement by using an effective batch size of 144. In this case, compression enables FlexGen to fit all things in the CPU memory and avoid disk I/O. The detailed latency, throughput, and policy setup can be found in Appendix A.4.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Runtime breakdown.</head><p>Table <ref type="table" target="#tab_4">4</ref> shows the runtime breakdown of OPT-175B on FlexGen. We disable overlapping and profile the time used for major components. The GPU compute utilization is 82% and 13% for prefill and decoding, respectively.</p><p>Ablation study. We then isolate the improvement brought by each individual technique. Table <ref type="table" target="#tab_5">5</ref> lists the throughput FlexGen can achieve if disabling one technique at a time. On OPT-30B, with all optimizations enabled, we put 20% weights on GPU, 80% weights on CPU, and all activations and KV cache to CPU. We also choose a GPU batch size of 48 and a block size of 48 ? 3. "No policy search" illustrates the performance of worse strategies, showing the importance of a good policy. On both models, using CPU compute and overlapping brings non-trivial improvement. We also port the policy used in DeepSpeed/Accelerate into FlexGen runtime, showing the suboptimality of their policy. A more detailed ablation study about policies can be found in Appendix A.4.</p><p>HELM integration. We integrate FlexGen into HELM <ref type="bibr" target="#b20">(Liang et al., 2022)</ref>, a language model benchmark framework, as its execution backend. We evaluate a new model OPT-IML-30B <ref type="bibr" target="#b16">(Iyer et al., 2022)</ref>, which has not been included in the official release of HELM. FlexGen finishes the benchmark of 7 representative sub-scenarios in 21 hours for this new model, with all system overhead included, under the hardware setup described in Table <ref type="table" target="#tab_1">1</ref>. Table <ref type="table" target="#tab_6">6</ref> shows the details of the tasks and the corresponding running time.</p><p>Data wrangling. We use FlexGen to run the data wrangling tasks <ref type="bibr" target="#b23">(Narayan et al., 2022)</ref> with OPT models. The detailed task configurations and running time are in Appendix A.4.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2.">Approximations</head><p>We use two tasks to show that our approximation methods exhibit negligible accuracy loss: next-word prediction on Lambada <ref type="bibr" target="#b26">(Paperno et al., 2016)</ref> and language modeling on WikiText <ref type="bibr" target="#b21">(Merity et al., 2016)</ref>. As shown in Table <ref type="table" target="#tab_7">7</ref>, "4-bit" means using group-wise quantization to compress both weights and KV cache into 4-bit integers. "4-bit-S" means combining the quantization and sparse attention with a 10% sparsity on the value cache. Both methods show negligible accuracy loss compared to FP16. The results reveal the robustness of LLMs against these approximations. We also tried 3-bit compression but it cannot preserve accuracy.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3.">Offloading vs. Collaborative Inference</head><p>In addition to offloading, decentralized collaborative inference is another option to lower the resource requirement for LLM utilization. Collaborative inference demands decentralized communication to accommodate the LLM inference workflow distribution. For example, Petals <ref type="bibr" target="#b2">(Borzunov et al., 2022)</ref> transfers activations between decentralized devices following the design of Swarm Parallelism <ref type="bibr" target="#b32">(Ryabinin et al., 2023)</ref>. We compare FlexGen and Petals under different network conditions by setting a private Petals cluster on Google Cloud with 4 nodes having one T4 GPU per node. We use Linux traffic control to constrain the connections between instances to simulate a realistic decentralized network (delay: 5ms/100ms and bandwidth: 1Gbps/0.1Gbps) and benchmark the performance of an OPT-30B model (input sequence length: 512, output sequence length: 32). We tune the batch size of each request to be 2 and issue requests by 6 parallel client processes to achieve the maximum throughput. In addition, we normalize the throughput of Petals by the number of used GPUs. As shown in Fig. <ref type="figure" target="#fig_4">5</ref>, we find that the throughput of FlexGen with a single T4 outperforms the per-GPU throughput of the Petals cluster under all tested network conditions. Petals does not utilize offloading, so it cannot use a very large batch size, which limits its scaling on throughput. Thus, we believe offloading could be a more efficient solution for throughput than communicating a large volume of activations in a long decentralized pipeline; on the other hand, collaborative inference can be a more viable option in more latency-sensitive scenarios.</p><p>Interestingly, we find that FlexGen can even outperform Petals in terms of inference latency in slow connections. We speculate this is because the network bandwidth becomes the bottleneck for activation transfer, and high latency incurs a significant overhead on each communication step in the pipeline. For the curve of a 100ms delay network, we can observe a cross point between FlexGen and Petals. This is because the activations during prefill are larger than the activations during decoding by a factor of the input sequence length. Thus, the communication overhead is proportionally larger, which significantly slows down Petals during prefill. The decoding latency of Petals is lower than FlexGen, so it has a lower slope. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Conclusion</head><p>We introduce FlexGen, a high-throughput generation engine for LLMs. FlexGen lowers the resource requirements of running 175B-scale models down to a single 16GB GPU and reaches a generation throughput of 1 token/s with an effective batch size of 144. FlexGen provides a viable option for deploying LLMs for resource-constrained and throughput-oriented scenarios. Diagonal block schedule Figure <ref type="figure" target="#fig_5">6</ref> is an illustration of our diagonal block schedule. We have a block containing 4 GPU batches, and we are going to generate 4 tokens with a model that has 4 layers. There will be a one-time warm-up phase (gray area) to compute the area above the diagonal. Then for each iteration, the system will compute a diagonal that contains 4 sub-diagonals (4 squares enclosed by red outlines as the first sub-diagonal, then 4 squares enclosed by blue outlines as the second sub-diagonal). After finishing the 4 sub-diagonals, it will repeat the same computation in the next row.</p><p>For simplicity, consider the good case that the memory capacity is large enough that the diagonal can cover all n generation iterations for n tokens. The block size bls now is defined as the number of samples touched by the diagonal.</p><p>In total, to compute one diagonal, the weights of each layer will be loaded once, and the I/O of the activations and KV cache will be in size roughly as 1/n as the value in the zig-zag block schedule. There will be bls tokens generated. So the I/O per token is the same with the zig-zag block schedule after the one-time warm-up if for the same bls.</p><p>The peak memory needed to hold the necessary weights, activations, and KV cache is estimated as</p><formula xml:id="formula_9">peak mem = w + 2h 1 ? bls + 4h 1 ? bls ? l(2s + n)(n -1) 2n from peak mem ? cmem, we have bls ? n(cmem -w) 2h 1 ? n + 2h 1 ? l ? (2s + n)(n -1) = bls 2</formula><p>Despite a one-time warm-up at the beginning. The diagonal block schedule can accommodate a larger block size than zig-zag block schedule at the ratio of bls 2 bls</p><formula xml:id="formula_10">1 = 2s + 2n 2s + n + O 1 n</formula><p>which is close to 2 when n s, and close to 1 when s n.</p><p>A larger bls does not change the activations and KV caches I/O per token, but can reduce the weights I/O per token proportionally, while weights I/O can normally occupy a large portion.</p><p>Discussions. In offloading setting, I/O is a significant bottleneck in latency and throughput, so the diagonal block schedule should be able to give considerable gain when n is relatively large compared to s and the memory is sufficiently large to fit n samples.</p><p>When the compute resources are sufficient to avoid offloading, the diagonal block schedule can still help to reduce the peak memory and enlarge the batch size, which increases GPU utilization.</p><p>Another benefit compared to the zig-zag block schedule is that with the same throughput, the generation latency for each prompt is reduced. For example, suppose in the zig-zag block schedule the bls samples finish the generation at the same time with latency T . In the diagonal block schedule, the first bls/n samples finish the generation with latency T /n, the second bls/n samples finish with latency 2T /n, and so on. The average latency of completion is reduced by half.</p><p>Despite its advantages, there are some difficulties in implementing the diagonal block schedule. The major implementation difficulty is the dynamic update of the KV cache buffer. To improve runtime efficiency, FlexGen now pre-allocates continuous buffers for all KV cache at the beginning of a block. This works well for the zig-zag block schedule. However, for the diagonal block schedule, pre-allocating continuous buffers make it impossible to save memory anymore. To utilize the memory-saving property of the diagonal block schedule, one needs to implement efficient attention computation on non-contiguous memory.</p><p>A.2.2. PROOF OF THEOREM 4.1</p><p>Note that in any case when we move from computing a square to another square, we need to offload and load the corresponding KV cache. So that the total I/O incurred by KV cache is constant. The total I/O incurred by activations could vary, but despite the prefill phase, its size for each square is much smaller than the KV cache for the same square. In total, the size of activations is around 1/(2s + n) of the size of KV cache. We will ignore the I/O incurred by activations for simplicity, which can cause a multiplicative error of 1/(2s + n) at most. Then the only thing left is the weights I/O. Starting from now, the I/O complexity in the context refers to the I/O complexity incurred by weights.</p><p>Definition A.1. We define the working state at any time when the GPU is computing a square as follows. Suppose there are k GPU batches working in progress. The column indices of the last squares that have been computed (including the current one) are a 1 , a 2 , ..., a k , and 1 ? a i ? n ? l. Different batches are identically independent, so w.l.o.g., suppose a 1 ? a 2 ? ... ? a k . Then the working state is a tuple (a 1 , a 2 , ..., a k ). A move that does a computation on a square is a pair of states s (1) , s (2) that means transit from state s (1) to s (2) .</p><p>Consider an optimal order denoted as an infinite sequence m 1 , m 2 , ...., m ? , where m i is the ith move. For each i, let s i be the current working state.</p><p>Lemma A.2. If there is a list of moves that start from state s, and back to state s at the end, the number of computed squares for every column (one layer for one token) is the same.</p><p>Proof. Suppose the start state s = (a 1 , a 2 , ..., a k ). For computations that occupy the whole row, the number of computed squares for every column is the same. So we only need to consider the rows that have not been fully traversed (captured by the end state). For each a i , if the underlying row has not been finished at the end, and ends with the index b i , then we pair a i with b i . If the underlying row has been finished, we pair it with a newly opened but not finished row, still, let b i denote the new index.</p><p>Thus we have transited from state S a = (a 1 , a 2 , ... we argue that for each column index j and 1 ? j ? n ? l, the count over it is summed to 0. Suppose not, that there are p positive count and q negative count and p = q. Then there are p values lower than j in state a and q values lower than j in state b. This contradicts the fact that S a and S b are the same state with different orders. Therefore, the number of computed squares for every column is the same.</p><p>Theorem A.3. The diagonal block schedule is I/O-optimal asymptotically.</p><p>Proof. Notice that since the memory capacity is finite, the length of the state is finite, thus the number of the possible state is finite. If each state appears finite times in the sequence, then the sequence cannot be infinite. Therefore, there exists a state s that appears in the sequence infinite times.</p><p>Let j 1 , j 2 , ..., j ? be the indices in the sequence that have state s. The moves between each two neighboring s states correspond to a throughput. The moves between j 1 and j 2 should create the highest possible throughput that pushes from state s to s. Otherwise, we can replace it to get a higher total throughput, which contradicts to that it is an optimal order. So that we can repeat such a strategy between each neighboring j i , j i+1 to get an optimal compute order.</p><p>Now the problem is reduced to finding an optimal compute order between j 1 and j 2 . With infinite loops, the highest throughput from j 1 to j 2 gives the highest throughput among the whole sequence.</p><p>Assume an optimal compute order between j 1 and j 2 . From Lemma A.2, there is the same number of squares to be computed for every column denoted as c. With such fixed c, the throughput is determined by the I/O time between j 1 and j 2 . The number of times we load weights for each color in Figure <ref type="figure" target="#fig_1">2</ref> determines the total I/O time. Each time we load weights, for example, the weights for computing the yellow squares, we cannot compute two yellow squares in the same row without other weights swaps, because the squares between them have not been computed and require other weights.</p><p>Therefore, for one load, we can only compute squares from different rows, which means all the caches and activations corresponding to those squares need to be held (either on the CPU or on the disk). Every square corresponds to some memory consumption, for example, the squares in the range of the i-th token cost caches for s + i -1 tokens. The sum of the memory consumption of all squares is a constant denoted as M . Let M denote the memory capacity. The number of weights loading times is at least M/M . Let t w denote the I/O time for loading weights for one color, the optimal throughput is at most c/ M/M /t w .</p><p>In the diagonal block schedule, after warm-up, each time with the loaded weights, the peak memory is the sum of the memory consumption of each computed square, which is the same each time we load weights. We can set it to hit M<ref type="foot" target="#foot_1">2</ref> . Take c number of diagonals as the repeated list of moves denoted as q. Set the starting state to be s mentioned before, q will restore the state to s by construction. The number of weights loading times during q is M/M , which meets the lower bound, and achieves the throughput upper bound c/ M/M /t w . The warm-up phase can be ignored in the setting of an infinite sequence. In summary, the diagonal block schedule is I/O optimal asymptotically.</p><p>The zig-zag block schedule is not optimal, as the peak memory consumption is not the same each time loading the weights. When computing the layers for the last token, the peak memory is scaled with s + n -1, while for the first token, it is scaled with s. In order to let the former fit in M , the latter must be smaller than M . But the memory consumption change is linear when generating the tokens, thus the average memory consumption for each weights loading can be pushed to at least M /2. From this, the zig-zag block schedule can achieve the throughput at least c/ M/(M /2) /t w which is 1/2 of the throughput upper bound. In the infinite sequence setting, this means the zig-zag block schedule can achieve an I/O complexity that is at most 2? optimal. Therefore, we have:</p><p>Theorem 4.1. The I/O complexity of the zig-zag block schedule is within 2? of the optimal solution.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.3. Cost Model</head><p>In this section, we present the full cost model. Note that we use a single variable to represent constants like bandwidth and TFLOPS to simplify the formulation below. In real systems, these constants vary according to the total load. We handle such dynamics by using piece-wise functions and adding regularization terms. We carefully model the dynamics by depending only on other constants (e.g., hidden size), so the optimization problem remains a linear programming problem with respect to policy variables.  The object is to maximize throughput (token/s), which is equivalent to minimizing the reciprocal (s/token). Free variables are colored blue.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Objective Minimize T /bls</head><p>Then the following constraints describe the calculation of total latency:</p><formula xml:id="formula_11">T = T pre ? l + T gen ? (n -1) ? l T pre = max(ctog p , gtoc p , dtoc p , ctod p , comp p ) ctog p = weights ctog p + act ctog p ctog bdw = 1 ctog bdw ((wc + wd)(8h 2 1 + 4h 1 ? h 2 ) + 2(hc + hd)s ? h 1 ? bls) gtoc p = cache gtoc p + act gtoc p gtoc bdw = 1 gtoc bdw (4(cc + cd)(s + 1)h 1 ? bls + 2(hc + hd)s ? h 1 ? bls) dtoc p = weights dtoc p + act dtoc p dtoc bdw = 1 dtoc bdw (wd(8h 2 1 + 4h 1 ? h 2 ) + 2hd ? s ? h 1 ? bls) ctod p = cache ctod p + act ctod p ctod bdw = 1 ctod bdw (4cd ? bls ? (s + 1) ? h 1 + 2hd ? s ? h 1 ? bls) comp p = linear layer p mm f lops + att p bmm = bls(8s ? h 2 1 + 4s ? h 1 ? h 2 ) mm f lops + 4bls ? s 2 ? h 1 bmm f lops T gen = max(ctog g , gtoc g , dtoc g , ctod g , comp g ) ctog g = weights ctog g + act ctog g ctog bdw = 1 ctog bdw ((wc + wd)(8h 2 1 + 4h 1 ? h 2 ) + 2(hc + hd)h 1 ? bls) gtoc g = act gtoc g gtoc bdw = 1 gtoc bdw (2(hc + hd) ? h 1 ? bls) dtoc g = cache dtoc g + weights dtoc g + act dtoc g dtoc bdw = 1 dtoc bdw (4cd ? bls ? (s + n/2) ? h 1 + wd(8h 2 1 + 4h 1 ? h 2 ) + 2hd ? h 1 ? bls) ctod g = cache ctod g + act ctod g ctod bdw = 1 ctod bdw (4cd ? bls ? h 1 + 2hd ? h 1 ? bls) comp g = gpu comp g + cpu comp g gpu comp g = linear layer g mm f lops + att g bmm f lops = bls(8h 2 1 + 4h 1 ? h 2 ) mm f lops + 4cg ? bls ? (s + n/2) ? h 1 bmm f lops cpu comp g = att g cpu f lops = 4(cc + cd)bls ? (s + n/2) ? h 1 cpu f lops</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Peak Memory Constraints</head><p>? GPU peak memory constraints during prefill: GPU memory used to hold a fixed percentage of weights, activations, and cache is</p><formula xml:id="formula_12">gpu home p = wg ? (8h 2 1 + 4h 1 ? h 2 ) ? l + hg ? 2s ? h 1 ? bls + 4(s + n)h 1 ? cg ? bls ? l.</formula><p>GPU working memory (omit mask):</p><formula xml:id="formula_13">qkv p = gbs ? (2s ? h 1 + 3(2s ? h 1 )) = gbs ? 8s ? h 1 att p 1 = cg ? gbs ? (2s ? h 1 + 2s ? h 1 + 2nh ? s 2 ) att p 2 = cg ? gbs ? (2nh ? s 2 + 2s ? h 1 + 2s ? h 1 ) embed p = gbs ? (2s ? h 1 + 2s ? h 1 ) = gbs ? 4s ? h 1 mlp p 1 = gbs ? 2(s ? h 1 + s ? h 2 ) = 2gbs ? s(h 1 + h 2 ) mlp p 2 = gbs ? 2(s ? h 2 + s ? h 1 ) = 2gbs ? s(h 1 + h 2 ) gpu w p = 2(1 -wg)(8h 2 1 + 4h 1 ? h 2 ) + (1 -hg) ? 2s ? h 1 ? gbs + max(qkv, att 1 , att 2 , embed, mlp 1 , mlp 2 )</formula><p>gpu peak p = gpu home p + gpu w p &lt; gmem ? GPU peak memory constraints after prefill:</p><p>GPU memory used to hold a fixed percentage of weights, activations, and cache is</p><formula xml:id="formula_14">gpu home g = wg ? (8h 2 1 + 4h 1 ? h 2 ) ? l + hg ? 2h 1 ? bls + 4(s + n)h 1 ? cg ? bls ? l.</formula><p>GPU working memory (omit mask):</p><formula xml:id="formula_15">qkv g = gbs ? (2h 1 + 3(2h 1 )) = 8gbs ? h 1 att g 1 = cg ? gbs ? (2h 1 + 2(s + n) ? h 1 + 2nh ? (s + n)) att g 2 = cg ? gbs ? (2nh ? (s + n) + 2(s + n) ? h 1 + 2h 1 ) embed g = gbs ? (2h 1 + 2h 1 ) = 4gbs ? h 1 mlp g 1 = 2gbs ? (h 1 + h 2 ) mlp g 2 = 2gbs ? (h 2 + h 1 ) gpu w g = 2(1 -wg)(8h 2 1 + 4h 1 ? h 2 ) + (1 -hg) ? 2s ? h 1 ? gbs + max(qkv g , att g</formula><p>1 , att g 2 , embed g , mlp g 1 , mlp g 2 )</p><p>gpu peak g = gpu home g + gpu w g &lt; gmem</p><p>? CPU peak memory constraints during prefill: CPU memory used to hold a fixed percentage of weights, activations, and cache is</p><formula xml:id="formula_16">cpu home p = wc ? (8h 2 1 + 4h 1 ? h 2 ) ? l + hc ? 2s ? h 1 ? bls + 4(s + n)h 1 ? cc ? bls ? l.</formula><p>CPU working memory:</p><formula xml:id="formula_17">cpu w p = (1 -wg)(8h 2 1 + 4h 1 ? h 2 ) + (1 -hg) ? 2s ? h 1 ? gbs.</formula><p>cpu peak p = cpu home p + cpu w p &lt; cmem ? CPU peak memory constraints after prefill:</p><p>CPU memory used to hold fixed percentage of weights, activations, and cache is</p><formula xml:id="formula_18">cpu home g = wc ? (8h 2 1 + 4h 1 ? h 2 ) ? l + hc ? 2h 1 ? bls + 4(s + n)h 1 ? cc ? bls ? l.</formula><p>CPU working memory:</p><formula xml:id="formula_19">cpu w g = wd(8h 2 1 + 4h 1 ? h 2 ) + 2hd ? 2 ? h 1 ? gbs + 2cd ? 4(s + n)h 1 ? gbs + 2nh ? (s + n) ? gbs + 2h 1 ? gbs.</formula><p>cpu peak g = cpu home g + cpu w g &lt; cmem ? NVMe peak memory constraints:</p><formula xml:id="formula_20">nvme peak = (8h 2 1 + 4h 1 ? h 2 ) ? wd ? l + hd ? 2s ? h 1 ? bls + cd ? 4(s + n)h 1 ? bls ? l &lt; nmem</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.4. Additional Experimental Results</head><p>Table <ref type="table" target="#tab_1">10</ref> and Table <ref type="table" target="#tab_1">11</ref> list the concrete policy setups for the results in Table <ref type="table" target="#tab_2">2</ref> for sequence length 512 and 1024. Table <ref type="table" target="#tab_2">12</ref> and Table <ref type="table" target="#tab_10">13</ref> list the latency and throughput for the data points in Fig. <ref type="figure" target="#fig_0">1</ref>. Table <ref type="table" target="#tab_4">14</ref> and Table <ref type="table" target="#tab_5">15</ref> shows some additional ablation study on policies. Table <ref type="table" target="#tab_6">16</ref> and Table <ref type="table" target="#tab_7">17</ref> shows the results for an additional sequence length of 256. Table <ref type="table" target="#tab_8">18</ref> and Table <ref type="table" target="#tab_9">19</ref> shows additional results for the data wrangling task.</p><p>Table <ref type="table" target="#tab_1">10</ref>. Generation throughput (token/s) on 1 GPU with input sequence length 512 and output sequence length 32. FlexGen is our system without compression; FlexGen (c) uses 4-bit compression. "OOM" means out-of-memory. The gray tuple denotes a policy (GPU batch size ? #GPU-batch, wg, wc, cg, cc, hg, hc).</p><p>Seq. length 512</p><p>Model size 6.7B 30B 175B Accelerate 25.12 (2?1, 100, 0, 100, 0, 100, 0) 0.62 (8?1, 0, 100, 100, 0, 100, 0) 0.01 (2?1, 0, 0, 100, 0, 100, 0) DeepSpeed 9.28 (16?1, 0, 100, 100, 0, 100, 0) 0.60 (4?1, 0, 100, 100, 0, 100, 0) 0.01 (1?1, 0, 0, 100, 0, 100, 0) FlexGen 25.26 (2?1, 100, 0, 100, 0, 100, 0) 7.32 (48?3, 20, 80, 0, 100, 0, 100) 0.69 (32?8, 0, 50, 0, 0, 0, 100) FlexGen (c) 29.12 (72?1, 100, 0, 100, 0, 100, 0) 8.70 (16?20, 20, 80, 0, 100, 100, 0) 1.12 (48?3, 0, 100, 0, 100, 0, 100)</p><p>Table <ref type="table" target="#tab_1">11</ref>. Generation throughput (token/s) on 1 GPU with input sequence length 1024 and output sequence length 32. FlexGen is our system without compression; FlexGen (c) uses 4-bit compression. "OOM" means out-of-memory. The gray tuple denotes a policy (GPU batch size ? #GPU-batch, wg, wc, cg, cc, hg, hc).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Seq. length 1024</head><p>Model size 6.7B 30B 175B Accelerate 13.01 (1?1, 100, 0, 100, 0, 100, 0) 0.31 (4?1, 0, 100, 100, 0, 100, 0) 0.01 (1?1, 0, 0, 100, 0, 100, 0) DeepSpeed 4.59 (8?1, 0, 100, 100, 0, 100, 0) 0.29 (2?1, 0, 100, 100, 0, 100, 0) OOM FlexGen 13.72 (1?1, 100, 0, 100, 0, 100, 0) 3.50 (20?4, 4, 96, 0, 100, 0, 100) 0.35 (12?12, 0, 50, 0, 0, 0, 100) FlexGen (c) 13.18 (28?1, 100, 0, 100, 0, 100, 0) 3.98 (20?12, 0, 100, 0, 100, 0, 100) 0.42 (12?4, 0, 100, 0, 100, 0, 100)</p><p>Table <ref type="table" target="#tab_2">12</ref>. The Pareto frontier of the latency-throughput trade-off of OPT-175B. The numbers are generation throughput (token/s) and effective batch latency (s) on 1 GPU with input sequence length 512 and output sequence length 32. The numbers in the parentheses are corresponding effective batch sizes. The numbers in bold are the best throughput and latency for each model. We organize the table so that the latency numbers of different methods in each row are similar for each model. The top value of each column corresponds to the setting of effective batch size 1. (To reach the lowest latency, FlexGen uses an effective batch size of 2 rather than 1 because the latency difference between batch sizes 1 and 2 is negligible in this case. So, a run with batch size 2 dominates the one with batch size 1 with higher throughput and similar latency.) </p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 .</head><label>1</label><figDesc>Figure1. The latency and throughput trade-offs of three offloading-based systems for OPT-175B (left) and OPT-30B (right) on a single NVIDIA T4 (16 GB) GPU with 208 GB CPU DRAM. FlexGen achieves a new Pareto-optimal frontier with 100? higher maximum throughput for OPT-175B. Other systems cannot further increase throughput due to out-of-memory issues. "(c)" denotes compression.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. Computational graph of LLM inference.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Two different schedules. The red arrows denote the computation order.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. Block schedule with overlapping.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 .</head><label>5</label><figDesc>Figure 5. Full generation latency and per-GPU generation throughput of FlexGen and Petals in different network conditions.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 .</head><label>6</label><figDesc>Figure 6. diagonal block schedule</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head></head><label></label><figDesc>, a k ) to another state S b = (b 1 , b 2 , ..., b k ). The indices in S a are sorted by a 1 ? a 2 ? ... ? a k . The indices in S b are not sorted, but b i is paired to a i according to the above paragraph. For each i, if b i &gt; a i , we need to count the squares in (a i , b i ] by 1. If b i &lt; a i , we need to count the squares in (b i , a i ] by -1. Now</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 .</head><label>1</label><figDesc>Hardware Specs</figDesc><table><row><cell cols="2">Device Model</cell><cell>Memory</cell></row><row><cell>GPU</cell><cell>NVIDIA T4</cell><cell>16 GB</cell></row><row><cell>CPU</cell><cell>Intel Xeon @ 2.00GHz</cell><cell>208 GB</cell></row><row><cell>Disk</cell><cell cols="2">Cloud default SSD (NVMe) 1.5 TB</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 2 .</head><label>2</label><figDesc>Generation throughput (token/s) on 1 GPU with different systems. Accelerate, DeepSpeed, and FlexGen use 1 GPU. Petals uses 1 GPU for OPT-6.7B, 4 GPUs for OPT-30B, and 24 GPUs for OPT-175B, but reports per-GPU throughput. FlexGen is our system without compression; FlexGen (c) uses 4-bit compression. "OOM" means out-of-memory.</figDesc><table><row><cell>Seq. length</cell><cell></cell><cell>512</cell><cell></cell><cell>1024</cell></row><row><cell>Model size</cell><cell>6.7B</cell><cell cols="2">30B 175B 6.7B</cell><cell>30B 175B</cell></row><row><cell>Accelerate</cell><cell cols="2">25.12 0.62 0.01</cell><cell cols="2">13.01 0.31 0.01</cell></row><row><cell>DeepSpeed</cell><cell>9.28</cell><cell>0.60 0.01</cell><cell>4.59</cell><cell>0.29 OOM</cell></row><row><cell cols="2">Petals (&lt;5ms, 1Gbps) 8.25</cell><cell>2.84 0.08</cell><cell>6.56</cell><cell>1.51 0.06</cell></row><row><cell>FlexGen</cell><cell cols="2">25.26 7.32 0.69</cell><cell cols="2">13.72 3.50 0.35</cell></row><row><cell>FlexGen (c)</cell><cell cols="2">29.12 8.70 1.12</cell><cell cols="2">13.18 3.98 0.42</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 3 .</head><label>3</label><figDesc>The scaling performance on 4 GPUs. The prompt sequence length is 512. Generation throughput (token/s) counts the time cost of both prefill and decoding while decoding throughput only counts the time cost of decoding assuming prefill is done.</figDesc><table><row><cell>Metric</cell><cell cols="3">Generation Throughput</cell><cell cols="3">Decoding Throughput</cell></row><row><cell>Model size</cell><cell>6.7B</cell><cell>30B</cell><cell cols="2">175B 6.7B</cell><cell>30B</cell><cell>175B</cell></row><row><cell>FlexGen 1 GPU</cell><cell>25.26</cell><cell>7.32</cell><cell>0.69</cell><cell>38.28</cell><cell cols="2">11.52 0.83</cell></row><row><cell>FlexGen 4 GPU</cell><cell cols="3">201.12 23.61 2.33</cell><cell cols="3">764.65 48.94 3.86</cell></row><row><cell cols="2">DeepSpeed 4 GPU 50.00</cell><cell>6.40</cell><cell>0.05</cell><cell>50.20</cell><cell>6.40</cell><cell>0.05</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 4 .</head><label>4</label><figDesc>Execution time breakdown (seconds) for OPT-175B. The prompt length is 512. (R) denotes read and (W) denotes write.</figDesc><table><row><cell>Stage</cell><cell>Total</cell><cell cols="4">Compute Weight (R) Cache (R) Cache (W)</cell></row><row><cell>Prefill</cell><cell>2711</cell><cell>2220</cell><cell>768</cell><cell>0</cell><cell>261</cell></row><row><cell cols="3">Decoding 11315 1498</cell><cell>3047</cell><cell>7046</cell><cell>124</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 5 .</head><label>5</label><figDesc>Ablation study of proposed techniques. The numbers are generation throughput on 1 GPU with prompt length 512. The gray tuple denotes a policy (GPU batch size ? #GPU-batch, wg, wc)</figDesc><table><row><cell>Model size</cell><cell>30B</cell><cell>175B</cell></row><row><cell>All optimizations</cell><cell cols="2">7.32 (48?3, 20, 80) 0.69 (32?8, 0, 50)</cell></row><row><cell>No policy search</cell><cell cols="2">7.26 (48?3, 0, 100) 0.27 (32?1, 0, 50)</cell></row><row><cell>No overlapping</cell><cell>5.86</cell><cell>0.59</cell></row><row><cell>No CPU compute</cell><cell>4.03</cell><cell>0.62</cell></row><row><cell>No disk</cell><cell>7.32</cell><cell>OOM</cell></row><row><cell cols="2">w/ DeepSpeed policy 1.57</cell><cell>0.01</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 6 .</head><label>6</label><figDesc>The setup and running time of 7 representative sub-scenarios in the HELM integration. The running time consists of dataset downloading, model initialization, generation, and metric computation.Scenario description Input seq. length Output seq. length Number of sequences Running time (minutes)</figDesc><table><row><cell>wikifact:k=5,subject=plaintiff</cell><cell>256</cell><cell>8</cell><cell>288</cell><cell>10</cell></row><row><cell>wikifact:k=5,subject=instance of</cell><cell>256</cell><cell>8</cell><cell>2592</cell><cell>55</cell></row><row><cell>mmlu:subject=abstract algebra</cell><cell>512</cell><cell>1</cell><cell>864</cell><cell>31</cell></row><row><cell>mmlu:subject=us foreign policy</cell><cell>512</cell><cell>1</cell><cell>1008</cell><cell>33</cell></row><row><cell>synthetic reasoning:mode=pattern match</cell><cell>256</cell><cell>50</cell><cell>1584</cell><cell>118</cell></row><row><cell>synthetic reasoning natural:difficulty=easy</cell><cell>512</cell><cell>20</cell><cell>1584</cell><cell>100</cell></row><row><cell>summarization xsum:temperature=0.3</cell><cell>1984</cell><cell>64</cell><cell>1568</cell><cell>902</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 7 .</head><label>7</label><figDesc>The accuracy (higher is better) and perplexity (lower is better) with approximate methods.</figDesc><table><row><cell>Dataset</cell><cell cols="2">Lambada (acc)</cell><cell cols="2">WikiText (ppl)</cell></row><row><cell>Config</cell><cell>FP16 4-bit</cell><cell cols="2">4-bit-S FP16 4-bit</cell><cell>4-bit-S</cell></row><row><cell>OPT-30B</cell><cell cols="2">0.725 0.724 0.718</cell><cell cols="2">12.72 12.90 12.90</cell></row><row><cell cols="3">OPT-175B 0.758 0.756 0.756</cell><cell cols="2">10.82 10.94 10.94</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head>Table 8 and</head><label>8</label><figDesc>Table9give the meaning of constants used in the cost model.</figDesc><table><row><cell>Var</cell><cell>Meaning</cell></row><row><cell>ctog bdw</cell><cell>CPU to GPU bandwidth</cell></row><row><cell>gtoc bdw</cell><cell>GPU to CPU bandwidth</cell></row><row><cell>dtoc bdw</cell><cell>disk to CPU bandwidth</cell></row><row><cell>ctod bdw</cell><cell>CPU to disk bandwidth</cell></row><row><cell cols="2">mm f lops GPU flops per second for matrix multiplication</cell></row><row><cell cols="2">bmm f lops GPU flops per second for batched matrix multiplication</cell></row><row><cell>cpu f lops</cell><cell>CPU flops per second</cell></row><row><cell>wg</cell><cell>percentage of weights on GPU</cell></row><row><cell>wc</cell><cell>percentage of weights on CPU</cell></row><row><cell>wd</cell><cell>percentage of weights on disk</cell></row><row><cell>cg</cell><cell>percentage of KV cache on GPU</cell></row><row><cell>cc</cell><cell>percentage of KV cache on CPU</cell></row><row><cell>cd</cell><cell>percentage of KV cache on disk</cell></row><row><cell>hg</cell><cell>percentage of activations on GPU</cell></row><row><cell>hc</cell><cell>percentage of activations on CPU</cell></row><row><cell>hd</cell><cell>percentage of activations on disk</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_9"><head>Table 9 .</head><label>9</label><figDesc>Notation Variables</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_10"><head>Table 13 .</head><label>13</label><figDesc>The Pareto frontier of the latency-throughput trade-off of OPT-30B. The numbers are generation throughput (token/s) and effective batch latency (s) on 1 GPU with input sequence length 512 and output sequence length 32. The numbers in the parentheses are corresponding effective batch sizes. The numbers in bold are the best throughput and latency for each model. We organize the table so that the latency numbers of different methods in each row are similar for each model. The top value of each column corresponds to the setting of effective batch size 1. 30B (generation throughput / latency)</figDesc><table><row><cell></cell><cell cols="2">175B (generation throughput / latency)</cell><cell></cell></row><row><cell>Accelerate</cell><cell>DeepSpeed</cell><cell>FlexGen</cell><cell>FlexGen (c)</cell></row><row><cell>-</cell><cell>-</cell><cell>-</cell><cell>0.052 / 612 (1)</cell></row><row><cell>-</cell><cell>-</cell><cell>-</cell><cell>0.198 / 647 (4)</cell></row><row><cell>-</cell><cell>-</cell><cell>-</cell><cell>0.369 / 693 (8)</cell></row><row><cell>-</cell><cell>-</cell><cell>-</cell><cell>0.779 / 1973 (48)</cell></row><row><cell>-</cell><cell>-</cell><cell>0.025 / 2555 (2)</cell><cell>1.092 / 2813 (96)</cell></row><row><cell>-</cell><cell>-</cell><cell cols="2">0.254 / 4028 (32) 1.122 / 4072 (144)</cell></row><row><cell cols="2">-0.006 / 5024 (1)</cell><cell>0.421 / 4864 (64)</cell><cell>-</cell></row><row><cell>-</cell><cell>-</cell><cell>0.572 / 7159 (128)</cell><cell>-</cell></row><row><cell>0.004 / 7508 (1)</cell><cell>-</cell><cell>-</cell><cell>-</cell></row><row><cell>0.008 / 7633 (2)</cell><cell>-</cell><cell>-</cell><cell>-</cell></row><row><cell>-</cell><cell cols="2">-0.687 / 11916 (256)</cell><cell>-</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>We ignore the word embedding layer(s), which is relatively small compared with all the transformer layers.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>The size value is discrete, we cannot exactly hit M , but with large enough parameters, such a gap could be set to only affect the total value by less than 1%. For example, the layer could be at the tensor level to make squares extremely fine-grained.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>Acknowledgements</head><p>We would like to thank <rs type="person">Hao Zhang</rs>, <rs type="person">Nick Chow</rs>, <rs type="person">Benjamin Spector</rs>, <rs type="person">Guangxuan Xiao</rs>, <rs type="person">Jue Wang</rs>, <rs type="person">Arjun Desai</rs>, <rs type="person">Yao Fu</rs>, <rs type="person">Anjiang Wei</rs>, and <rs type="person">Zihao Ye</rs> for their insightful review and discussions.</p></div>
+			</div>			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.2. Compute Schedule Optimality</head><p>This subsection discusses the graph traversal problem described in Section 4.1 and only considers the case that the model cannot fit in a single GPU. We assume no application of CPU computation. To compute a square, the GPU loads the tensors it needs and offloads the cache and activations when finished. We will analyze two schedules: the zig-zag block schedule used in Section 4.2 and an I/O-optimal diagonal block schedule introduced in this section. Note that our analysis only considers the theoretical I/O complexity. In the real system, the latency and memory consumption cannot be the same as in the theoretical calculations.</p><p>There are three things that need to be stored during the generation process: weights, activations, and the KV cache. From the computational graph, we have three observations. (1) Suppose we need to swap the weights in and out of the GPU. Whatever the portion is, to finish the generation for one prompt, we need to swap n times for n tokens. Therefore, it would be preferable to reuse the loaded weights for a batch of prompts, amortizing the weights I/O time. (2) Each square will output activations which will be fed into the next layer. Each row in the computational graph only needs to hold activations for one square at the same time. (3) For each square besides the last l squares in a row, the KV cache dumped by the square cannot be released until generating the last token (the last l columns in the computational graph). It is not shared across rows or columns, which will be the major factor in limiting the batch size.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.2.1. ZIG-ZAG BLOCK SCHEDULE AND DIAGONAL BLOCK SCHEDULE</head><p>Zig-zag block schedule. Inspired by the three observations introduced in Section 4.2, we compute the first column in the computational graph for bls samples, save the dumped caches and activations, then compute the second column for bls samples, until the last column for bls samples. We call bls as the block size as introduced in Section 4.2. The computed bls ? n ? l squares are called a block.</p><p>Assume FP16 precision, to generate n ? bls tokens during one block computation, we have to load n times the whole model weights, do I/O operations on activations with 2(2h</p><p>Let w denote the size of one-layer weights. The peak memory used to store the weights, activations, and KV caches can be estimated as</p><p>If we only swap with CPU, then there is the constraint that peak mem &lt; CPU memory -some overhead. Let cmem denote the right hand, there is</p><p>Now we show that there is a better schedule that gives the same I/O efficiency but can enlarge the bls by around 2 in some cases.  <ref type="table">16</ref>. Generation throughput (token/s) on 1 GPU with input sequence length 256 and output sequence length 32. FlexGen is our system without compression; FlexGen (c) uses 4-bit compression. "OOM" means out-of-memory. The gray tuple denotes a policy (GPU batch size ? #GPU-batch, wg, wc, cg, cc, hg, hc).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Seq. length 256</head><p>Model size 6.7B 30B 175B Accelerate 50.66 (4?1, 100, 0, 100, 0, 100, 0) 1.34 (16?1, 0, 100, 100, 0, 100, 0) 0.02 (4?1, 0, 0, 100, 0, 100, 0) DeepSpeed 14.52 (32?1, 0, 100, 100, 0, 100, 0) 1.30 (12?1, 0, 100, 100, 0, 100, 0) 0.01 (2?1, 0, 0, 100, 0, 100, 0) FlexGen 53.29 (4?1, 100, 0, 100, 0, 100, 0) 16.01 (160?2, 10, 90, 0, 100, 0, 100) 1.36 (64?8, 0, 50, 0, 0, 0, 100) FlexGen (c) 56.72 (128?1, 100, 0, 100, 0, 100, 0) 16.86 (128?8, 0, 100, 0, 100, 0, 100) 2.26 (96?3, 0, 100, 0, 100, 0, 100) </p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Deepspeed-inference: Enabling efficient inference of transformer models at unprecedented scale</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">Y</forename><surname>Aminabadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Rajbhandari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">A</forename><surname>Awan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Ruwase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Rasley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2022">2022. 2022</date>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="page" from="646" to="660" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">On the opportunities and risks of foundation models</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bommasani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Hudson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Adeli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Altman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Arora</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Von Arx</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">S</forename><surname>Bernstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bohg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bosselut</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Brunskill</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2108.07258</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><surname>Borzunov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Baranchuk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Dettmers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ryabinin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Belkada</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Chumachenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Samygin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Raffel</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2209.01188</idno>
+		<title level="m">Petals: Collaborative inference and fine-tuning of large models</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Language models are few-shot learners</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">D</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Askell</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Advances in neural information processing systems</title>
+		<imprint>
+			<biblScope unit="volume">33</biblScope>
+			<biblScope unit="page" from="1877" to="1901" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Formula prediction from semi-structured context</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Maniatis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Sutton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Spreadsheetcoder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Machine Learning</title>
+		<imprint>
+			<publisher>PMLR</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1661" to="1672" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><surname>Chowdhery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Bosma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Mishra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roberts</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">W</forename><surname>Chung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Sutton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gehrmann</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2204.02311</idno>
+		<title level="m">Scaling language modeling with pathways</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Communication-avoiding algorithms for linear algebra and beyond</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Demmel</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2013 IEEE 27th International Symposium on Parallel and Distributed Processing</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="585" to="585" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">The case for 4-bit precision: k-bit inference scaling laws</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Dettmers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2212.09720</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">8-bit matrix multiplication for transformers at scale</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Dettmers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Belkada</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Llm</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">A</forename><forename type="middle">H</forename><surname>Oh</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">A</forename><surname>Agarwal</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">D</forename><surname>Belgrave</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">K</forename><surname>Cho</surname></persName>
+		</editor>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note>int8(</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Turbotransformers: an efficient gpu serving system for transformer models</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming</title>
+		<meeting>the 26th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="389" to="402" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Fedus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Machine Learning Research</title>
+		<imprint>
+			<biblScope unit="volume">23</biblScope>
+			<biblScope unit="issue">120</biblScope>
+			<biblScope unit="page" from="1" to="39" />
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">Massive language models can be accurately pruned in one-shot</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Frantar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Alistarh</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2301.00774</idno>
+		<imprint>
+			<date type="published" when="2023">2023</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">Gptq: Accurate post-training quantization for generative pre-trained transformers</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Frantar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ashkboos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Hoefler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Alistarh</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2210.17323</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Sparsity in deep learning: Pruning and growth for efficient inference and training in neural networks</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Hoefler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Alistarh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Ben-Nun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Dryden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Peste</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">J. Mach. Learn. Res</title>
+		<imprint>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="issue">241</biblScope>
+			<biblScope unit="page" from="1" to="124" />
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Pushing deep learning beyond the gpu memory limit via smart swapping</title>
+		<author>
+			<persName><forename type="first">C.-C</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Jin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Swapadvisor</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="1341" to="1355" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Gpipe: Efficient training of giant neural networks using pipeline parallelism</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bapna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Firat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ngiam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<ptr target="https://huggingface.co/docs/accelerate/index" />
+	</analytic>
+	<monogr>
+		<title level="j">Advances in neural information processing systems</title>
+		<imprint>
+			<biblScope unit="volume">32</biblScope>
+			<date type="published" when="2019">2019. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<title level="m" type="main">Opt-iml: Scaling language model instruction meta learning through the lens of generalization</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Iyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><forename type="middle">V</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pasunuru</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Mihaylov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Simig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Shuster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">S</forename><surname>Koura</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2212.12017</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">T. I/o complexity: The red-blue pebble game</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Jia-Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kung</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the thirteenth annual ACM symposium on Theory of computing</title>
+		<meeting>the thirteenth annual ACM symposium on Theory of computing</meeting>
+		<imprint>
+			<date type="published" when="1981">1981</date>
+			<biblScope unit="page" from="326" to="333" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Alphatuning: Quantization-aware parameter-efficient adaptation of large-scale pre-trained language models</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">J</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bae</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">M</forename><surname>Yoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-H</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-W</forename><surname>Ha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Sung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Lee</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2210.03858</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<title level="m" type="main">Overcoming the hurdles of gpu memory capacity to train massive dnn models on commodity servers</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Phanishayee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tarnawski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">S</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Harmony</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2202.01306</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bommasani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Tsipras</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Soylu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Yasunaga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Narayanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kumar</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2211.09110</idno>
+		<title level="m">Holistic evaluation of language models</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Merity</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Socher</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1609.07843</idno>
+		<title level="m">Pointer sentinel mixture models</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">A</forename><surname>Morton</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Pagecachemangagement</surname></persName>
+		</author>
+		<ptr target="https://code.google.com/archive/p/pagecache-mangagement/source/default/source" />
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">Can foundation models wrangle your</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Chami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Orr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>R?</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2205.09911</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Don&apos;t give me the details, just the summary! topic-aware convolutional neural networks for extreme summarization</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">B</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lapata</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1808.08745</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Efficient large-scale language model training on gpu clusters using megatron-lm</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Narayanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Shoeybi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Casper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Legresley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Patwary</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Korthikanti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Vainbrand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Kashinkunti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bernauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Catanzaro</surname></persName>
+		</author>
+		<ptr target="https://github.com/NVIDIA/FasterTransformer" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+		<meeting>the International Conference for High Performance Computing, Networking, Storage and Analysis</meeting>
+		<imprint>
+			<date type="published" when="2021">2021. 2022</date>
+			<biblScope unit="page" from="1" to="15" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">The lambada dataset: Word prediction requiring a broad discourse context</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Paperno</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Kruszewski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lazaridou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N.-Q</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bernardi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Pezzelle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Baroni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Boleda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Fern?ndez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics</title>
+		<meeting>the 54th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<publisher>Long Papers</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1525" to="1534" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<author>
+			<persName><forename type="first">G</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">J</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Lee</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2206.09557</idno>
+		<title level="m">Quantized matmul for efficient inference of large-scale generative language models</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Pytorch: An imperative style, high-performance deep learning library</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Paszke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gross</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Massa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lerer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Chanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Killeen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Gimelshein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Antiga</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Advances in neural information processing systems</title>
+		<imprint>
+			<biblScope unit="page">32</biblScope>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pope</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Douglas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Chowdhery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Levskaya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Heek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Agrawal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2211.05102</idno>
+		<title level="m">Efficiently scaling transformer inference</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Zero-infinity: Breaking the gpu memory wall for extreme scale deep learning</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Rajbhandari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Ruwase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Rasley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>He</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+		<meeting>the International Conference for High Performance Computing, Networking, Storage and Analysis</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Zero-offload: Democratizing billion-scale model training</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Rajbhandari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">Y</forename><surname>Aminabadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Ruwase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>He</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2021 USENIX Annual Technical Conference (USENIX ATC 21)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="551" to="564" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">Swarm parallelism: Training large models can be surprisingly communication-efficient</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ryabinin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Dettmers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Diskin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Borzunov</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2301.11913</idno>
+		<imprint>
+			<date type="published" when="2023">2023</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">L</forename><surname>Scao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Akiki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Pavlick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ili?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Hesslow</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Castagn?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">S</forename><surname>Luccioni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Yvon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Gall?</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2211.05100</idno>
+		<title level="m">A 176b-parameter open-access multilingual language model</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Q-bert: Hessian based ultra low precision quantization of bert</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gholami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">W</forename><surname>Mahoney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Keutzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the AAAI Conference on Artificial Intelligence</title>
+		<meeting>the AAAI Conference on Artificial Intelligence</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="page" from="8815" to="8821" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">Optimizing the lifetime and location of arrays to reduce the memory usage of neural networks</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Elhoushi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hegarty</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Olla</surname></persName>
+		</author>
+		<idno type="DOI">10.48550/arXiv.2210.12924</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Superneurons: Dynamic gpu memory management for training deep neural networks</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">L</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Kraska</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 23rd ACM SIGPLAN symposium on principles and practice of parallel programming</title>
+		<meeting>the 23rd ACM SIGPLAN symposium on principles and practice of parallel programming</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="41" to="53" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Lightseq: A high performance inference library for transformers</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2021 Conference of the North American Chapter</title>
+		<meeting>the 2021 Conference of the North American Chapter</meeting>
+		<imprint>
+			<publisher>Human Language Technologies: Industry Papers</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="113" to="120" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Accurate and efficient post-training quantization for large language models</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Seznec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Demouth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Smoothquant</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2211.10438</idno>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Efficient and affordable post-training quantization for large-scale transformers</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">Y</forename><surname>Aminabadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zeroquant</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">A</forename><forename type="middle">H</forename><surname>Oh</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">A</forename><surname>Agarwal</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">D</forename><surname>Belgrave</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">K</forename><surname>Cho</surname></persName>
+		</editor>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">A distributed serving system for {Transformer-Based} generative models</title>
+		<author>
+			<persName><forename type="first">G.-I</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">S</forename><surname>Jeong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G.-W</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B.-G</forename><surname>Chun</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Orca</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">16th USENIX Symposium on Operating Systems Design and Implementation</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="page" from="521" to="538" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Roller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Artetxe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Dewan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Diab</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><forename type="middle">V</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2205.01068</idno>
+		<title level="m">Open pre-trained transformer language models</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Alpa: Automating inter-and intra-operator parallelism for distributed deep learning</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhuang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zhuo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">E</forename><surname>Gonzalez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">16th USENIX Symposium on Operating Systems Design and Implementation</title>
+		<imprint>
+			<biblScope unit="page">2022</biblScope>
+		</imprint>
+	</monogr>
+	<note>OSDI 22</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

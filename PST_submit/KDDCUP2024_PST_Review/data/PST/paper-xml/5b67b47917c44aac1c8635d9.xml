@@ -1,0 +1,978 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Dynamic Memory Dependence Predication</title>
+				<funder ref="#_eRS5b5M">
+					<orgName type="full">National Science Foundation</orgName>
+					<orgName type="abbreviated">NSF</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Zhaoxiang</forename><surname>Jin</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="department">Department of Computer Science</orgName>
+								<orgName type="institution">Michigan Technological University Houghton</orgName>
+								<address>
+									<country key="US">USA</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Soner</forename><surname>?nder</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="department">Department of Computer Science</orgName>
+								<orgName type="institution">Michigan Technological University Houghton</orgName>
+								<address>
+									<country key="US">USA</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Dynamic Memory Dependence Predication</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1109/ISCA.2018.00029</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:38+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Store-queue-free architectures remove the store queue and use memory cloaking to communicate in-flight stores instead. In these architectures, frequent mispredictions may occur when the store to load dependencies are inconsistent. We present DMDP (Dynamic Memory Dependence Predication) which modifies the microarchitecture behavior for such loads to mitigate memory dependence mispredictions. When a given dependence is hard to predict, i.e., a given load occasionally depends on a particular store, but it is independent at other times, DMDP predicates the load so that the address of the load is compared with the address of the predicted store to compute a predicate. This predicate guides the load to obtain the value from either the cache or the colliding store.</p><p>The predication provided by DMDP i) enables the loads and their dependent instructions to execute much earlier, ii) reduces the hardware complexity of store-queue-free mechanisms, and iii) reduces the number of mispredictions. DMDP outperforms a state-of-the-art store-queue-free architecture by 7.17% on Integer benchmarks and 4.48% on Float benchmarks in our Spec 2006 evaluation. We further show that despite executing extra predication instructions, DMDP is power efficient as it saves about 6.7% on EDP.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>I. INTRODUCTION</head><p>In superscalar processors, store instructions do not update the memory subsystem until they commit. Therefore, a mechanism to bridge in-flight stores and loads is necessary and critical. Without this mechanism, in-flight loads and their dependent instructions would have to wait until all prior stores commit. Most processors implement an associatively searched, ageordered store queue to handle the store-load communication. When a load is executed, the store queue and the data cache are simultaneously accessed. If the store queue does not contain a store instruction with the same address, the data read from the cache is used. Otherwise, the youngest matching store data is selected. This search latency dramatically increases as the number of in-flight stores grows. Although processor manufacturers do not release the search latency of their mechanisms, it is unlikely to be one cycle <ref type="bibr" target="#b0">[1]</ref>.</p><p>Despite the difficulty of scaling, each processor generation incorporates a larger store queue than its predecessors in order to exploit more instruction-level parallelism (Sandy Bridge 36, Haswell 42, SkyLake 56). In order to improve scalability, several mechanisms were proposed to simplify the associative search operations <ref type="bibr" target="#b1">[2]</ref>, <ref type="bibr" target="#b2">[3]</ref>, <ref type="bibr" target="#b3">[4]</ref>, <ref type="bibr" target="#b4">[5]</ref>, <ref type="bibr" target="#b5">[6]</ref>, <ref type="bibr" target="#b6">[7]</ref>, <ref type="bibr" target="#b7">[8]</ref>, <ref type="bibr" target="#b8">[9]</ref> as well as completely removing the store queue <ref type="bibr" target="#b9">[10]</ref>, <ref type="bibr" target="#b10">[11]</ref>, <ref type="bibr" target="#b11">[12]</ref>.</p><p>NoSQ <ref type="bibr" target="#b9">[10]</ref> is one of these mechanisms which completely eliminates the store queue. The store in NoSQ is executed at the commit stage and then updates the cache. Therefore, the store is never issued to the out-of-order core. The inflight store-load communication is accomplished through a memory dependence predictor. A load which is predicted to be dependent on a prior store is renamed to the physical register of that store (memory cloaking <ref type="bibr" target="#b12">[13]</ref>). This collapses the DEFstore-load-USE dependence chain into a DEF-USE chain. In order to verify the memory dependence prediction, the load is re-executed at the retire stage if necessary. Given prior history, if the memory dependence prediction confidence is low, NoSQ delays the execution of the load until the store is committed and the cache is updated. Therefore, these delayed loads need to be kept in a reservation station-like structure and woken up by committed stores.</p><p>In this paper, we present Dynamic Memory Dependence Predication (DMDP) to completely eliminate the unnecessary delays and the overhead of keeping delayed loads. The basic idea is to create a new MicroOp to compare the addresses of the predicted load-store pair. If the addresses match, the load uses the store data directly. Otherwise, the data read from the cache is used. As a result, the false dependence between the load execution and the store commit is removed.</p><p>Removal of this false dependence is significant because the store commit latency increases drastically when memory consistency models <ref type="bibr" target="#b13">[14]</ref> are considered. Store-queue-free architectures eliminate the store queue which holds speculative stores before they are retired, but a store buffer still has to be provided to hold the retired stores until they update the cache. This buffer is essential for overlapping the penalty of store misses and properly implementing consistency models.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>II. MOTIVATION</head><p>It is possible to classify load-store dependencies into three categories: 1. Never Colliding (NC); 2. Always Colliding (AC); 3. Occasionally Colliding (OC). In NC, loads can always read from the cache without touching the store queue. For example, sweeping accesses through an array without changing the array values will generate many NC loads. Store-queue-free mechanisms work perfectly also in AC scenario due to the high dependence prediction accuracy. Examples of AC include register spilling, global variable accesses, stack accesses, etc. In contrast, OC is hard to predict since a correct prediction can not be achieved by simply observing the history of the memory dependencies. Figure <ref type="figure" target="#fig_1">1</ref>(a) shows a code example of OC cases. In each iteration, a new pointer is read from an array and the pointed content is incremented. Figure <ref type="figure" target="#fig_1">1</ref> (c)</p><p>x[ptr]++;</p><p>x[ptr]++;</p><p>x[ptr]++;</p><p>x[ptr]++; A common store queue free mechanism such as NoSQ initially would always read from the cache. When the first collision happens, the dependence is added and the increment instruction will be predicted to read the value from the previous iteration instead of the cache. However, if the pointers mismatch the next time, the forwarded data is probably wrong and the memory dependence is mispredicted as well. Frequent mispredictions on a certain load would impose a strict memory ordering. That is the load can not execute until the potentially aliasing store is committed. Figure <ref type="figure" target="#fig_1">1(c)</ref> shows that the increment instruction will not execute until the previous one commits. This strict ordering makes sure the load reads the correct value regardless of whether or not the store and load addresses match. However, this strict ordering may significantly hurt the program performance. First of all, if the store and the load addresses are different, the load and its dependent instructions suffer unnecessary latency. Even if the addresses are identical, the load has to wait until the store commits. Many unrelated events such as cache misses may delay the store committing and consequently affect the load execution time. Figure <ref type="figure" target="#fig_2">2</ref> illustrates a breakdown of load instructions based on how they get their values in NoSQ. The configuration of the evaluation is described in detail in Section V. In the figure, Direct access means the load gets its value directly from the cache. Bypassing means the load gets its value through memory cloaking. Delayed access means the load cannot get its value from the cache until the conflicting store commits. Note that bzip2, gcc, mcf, hmmer, h264ref and astar have more than 10% Delayed access loads. We also compare the average execution time of Bypassing and Delayed access loads where the load execution time is defined to be the number of cycles spent between renaming of the load and the load result becoming available. In Bypassing cases, the execution time might be negative since the store data is available even before the load is renamed. We set the execution time to be zero for these cases. The comparison is illustrated in Figure <ref type="figure" target="#fig_5">3</ref>. In this figure, if the ratio is greater than zero, Delayed access loads have longer average execution time. Otherwise, Bypassing loads are longer. The figure shows that Delayed access loads take significantly more cycles to execute in most benchmarks, except mcf. In mcf, the average execution time of Delayed access loads is 117.6 cycles and is 159.3 for Bypassing loads. This is because the colliding stores are always dependent on some other cache miss loads so that memory cloaking does not effectively work in these cases. Overall, the execution time of Delayed access loads is about 7 times longer than the Bypassing loads. If these Delayed access loads are on the critical path, the program will be forced to execute in an in-order manner.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>III. CONCEPT</head><p>Predication is a technique to convert control dependencies into data dependencies. It is widely applied in branch elimination where the branch result is computed as a predicate which can then be used to select the correct operand <ref type="bibr" target="#b14">[15]</ref>, <ref type="bibr" target="#b15">[16]</ref>, <ref type="bibr" target="#b16">[17]</ref>. When the store and load dependence is not consistent, NoSQ needs to conservatively wait until the data source becomes unambiguous or risk frequent mispredictions. Clearly, this problem is analogous to branch prediction where a difficult to predict branch is encountered. DMDP therefore dynamically inserts a predicate to compare the store and load addresses. The comparison result can then be used to guide the load to obtain the correct operand from either the cache or the in-flight store in a manner similar to a conditional move instruction. Figure <ref type="figure" target="#fig_4">4</ref> shows how the load gets its data in three different ways. The first load does not find any dependent store so it gets its data from the cache. The second load has a colliding store and the predictor is confident. Therefore, memory cloaking is applied and the load reuses the same physical register (P8) as its own destination physical register. The third load also has a colliding store except its prediction is not confident. The store and the load addresses are compared to drive a multiplexer for selecting the correct data. Since the multiplexer's output is a new definition, the load is assigned a new physical register (P10) as usual.</p><p>Table <ref type="table" target="#tab_0">I</ref> illustrates the difference between NoSQ and DMDP. The primary difference is how inconsistent store-load dependencies are handled. To be specific, the first row describes the situation when the load has never observed any dependence violation or the aliased store has committed and updated the cache when the load is renamed. DMDP converts all memory dependence into register data dependence so that loads do not need to check any store when it commits. The data is read from the cache directly.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Aliased store is predicted (high confidence)</head><p>The load reuses the physical register from the store. No cache read is necessary.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Aliased store is predicted (low confidence)</head><p>The data is not read from the cache until the store is committed.</p><p>Predication is inserted so that both the store's data and the data from the cache are forwarded to the predicate instruction. The correct one is selected to bypass to the load's physical register.</p><p>The use of the store data and address physical registers are not included in the original program semantics. These registers might have been released and re-allocated to other instructions at the time the predicated instruction is created. DMDP delays the release time of store registers until the store is committed and updates the cache so that any in-flight store can be utilized to create the predicate. For this purpose, DMDP assigns an extra physical register to each memory instruction to hold the computed address. This change simplifies the address comparison and the resulting microarchitecture as well, since the memory address can be directly read from the physical register file instead of doing a base register plus offset computation. The details of the implementation are described in the next section.</p><p>Note, when a load is predicted to be dependent on a store, there are two possible types of mispredictions. Either the load is independent of any in-flight store or the load is dependent on a different in-flight store. DMDP can only handle the former case for low confidence loads, not the latter one. We evaluated the Spec2006 benchmark suite and found that the first type of misprediction dominates the mispredictions. Therefore, applying predication can save most of the memory dependence mispredictions.</p><p>Figure <ref type="figure">5</ref> illustrates the memory dependence prediction results for low confidence loads. In this figure, IndepStore means the load is predicted to be dependent on a store but it is actually independent of any in-flight store; DiffStore means the load is dependent on a different in-flight store. Correct means the prediction is correct. It is apparent that IndepStore dominates IndepStore DiffStore Correct Fig. <ref type="figure">5</ref>. Memory dependence prediction results over low confidence loads every benchmark. In other words, if a load has a low confidence prediction, the load is most likely independent of any in-flight store. A naive solution would treat low confidence loads as independent loads and make them read directly from the cache. However, DiffStore and Correct would be mispredicted in this algorithm and the misprediction rate is considerable in some benchmarks such as lbm(28.6%) and milc(23.5%). The average misprediction rate is 11.4%. DMDP can correctly execute IndepStore and Correct which results in a misprediction rate of 3.7%. The delayed execution in NoSQ can also cover IndepStore and Correct. It can also cover some of DiffStore if the actual colliding store is older than the predicted store at the cost of drastically increased load latency.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>IV. MICROARCHITECTURE</head><p>The microarchitecture of DMDP is shown in Figure <ref type="figure">6</ref>. It tracks each store using a unique store sequence number (SSN) <ref type="bibr" target="#b17">[18]</ref> and three globally observable registers, SSN rename , SSN retire and SSN commit are used to track the store instruction states. When a store is renamed, the SSN rename is incremented and set as the store's SSN, hence a younger store has a larger SSN. When a store retires and commits, its SSN updates SSN retire and SSN commit respectively. The store buffer works like a queue to hold retired stores before they commit and loads never search the store buffer. Store Register Buffer holds the physical register numbers of every in-flight store instruction before they are committed. When a predicated MicroOp is created, the store's data and address physical register numbers are read from this buffer. In DMDP, store instructions have an extended physical register lifetime since the register might be read even after the store is retired. Therefore DMDP includes a Physical Register Reference Counter to manage the register release operations. For a load, its colliding store's SSN (SSN byp ) is predicted when the load is renamed. The relative store distance is predicted by the Store Distance Predictor and SSN byp equals SSN rename minus the store distance. When a load is executed and reads the data from the cache, the current SSN commit is kept with the load as SSN nvul . SSN nvul indicates the youngest store to which the load is not vulnerable. At the retire stage, the speculative load needs to verify its value by re-execution. In order to minimize the number of re-executions, a Tagged Store Sequence Bloom Filter (T-SSBF) is added. In the rest of the section, we are going to elaborate on the microarchitecture details starting with the basic operations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Store</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Basic Operations</head><p>In order to minimize the overhead of speculative load verification, we adopted the mechanism of Store Vulnerability Window (SVW) <ref type="bibr" target="#b17">[18]</ref> which only re-executes the load if necessary. The second part is a path-sensitive store distance predictor <ref type="bibr" target="#b9">[10]</ref>.</p><p>a) Store Vulnerability Window: When a load is speculative, its value has to be verified before the load is retired. A simple mechanism re-executes every load at the retire stage which doubles the bandwidth requirement for the cache. SVW substantially reduces the number of re-executions by only reexecuting the load if the colliding store committed after the load was executed.</p><p>When a store commits, it writes the data to the cache and updates the SSN commit . Therefore, any store whose SSN is smaller than or equal to SSN commit has updated the cache. When a load reads the data from the cache, it also reads SSN commit and keeps it as SSN nvul . During the retire time, if the colliding store's SSN is greater than the load's SSN nvul , that means the colliding store updated the cache after the load read from the cache. A potential RAW hazard is possible and the load needs to re-execute. If the re-execution provides a different value, a full penalty recovery is initiated. Otherwise, if the colliding store's SSN is smaller than or equal to the load's SSN nvul , that means the colliding store has committed its change to the cache and the load read the correct value. Hence, no re-execution is required.</p><p>b) Tagged Store Sequence Bloom Filter: As it is described before, when a load is retired, we need to identify its colliding store's SSN. Tagged Store Sequence Bloom Filter <ref type="bibr" target="#b18">[19]</ref> (T-SSBF) is used to efficiently detect the store's SSN. T-SSBF is similar to an N-way set-associative cache indexed by the (hashed) memory address. The difference is each set in T-SSBF is organized like a FIFO, containing the last N store's SSNs which map to that set. When a store is retired (not committed), it writes its SSN into the T-SSBF (T-SSBF[st.addr] = st.SSN). When a load is retired, it reads the T-SSBF to find its colliding store's SSN. If multiple instances with the same address are found, the largest SSN (the youngest) is selected. On the other hand, if no matching address is found, the smallest SSN in the same set is selected.</p><p>In order to detect collisions on partial-word accesses, each memory access maintains a word address and a Byte Access Bits (BAB). BAB is used to indicate which bytes in that word are accessed. BAB is also written into the T-SSBF along with the SSN. When the word address matches and store BAB &amp; load BAB is greater than zero, this load-store pair collides. c) Load Re-execution: When the colliding store's SSN is larger than the load's SSN nvul , a load re-execution is scheduled. Since the store buffer still holds some pending stores which have not yet updated the cache, the load re-execution is not issued until the store buffer is drained. This impact caused by the store buffer can significantly deteriorate the overall performance. Optimization in reducing the number of load re-executions is desirable and we will describe it later.</p><p>d) Memory Dependence Prediction: We need a mechanism to predict the colliding store's SSN when a load is renamed. In DMDP, we use Store Distance Predictor <ref type="bibr" target="#b19">[20]</ref> to predict the memory dependence. This structure is indexed using the load's PC and predicts how many stores there are between the aliased store and the load, assuming this distance is constant so the same load will always collide with the store at the same distance. With the predicted store distance, we can compute the colliding store's SSN as ld.SSN byp = SSN rename ld.dist byp . At the retire stage, the store distance prediction needs to be verified. The actual store distance is computed as SSN retire -T-SSBF[ld.addr]. If the prediction is wrong, the store distance predictor is updated with the actual distance.</p><p>Multiple branches between the store and the dependent load may cause the store distance to vary if the branches lead to different paths. A path-sensitive memory dependence predictor <ref type="bibr" target="#b9">[10]</ref> is used to handle the change in control flow which uses an identical structure except indexing its table by an XOR of load's PC and branch history bits. The pathsensitive predictor and the path-insensitive predictor are read simultaneously. Prediction from the path-sensitive predictor is selected if it is available. Otherwise, the path-insensitive prediction is used. If the load misses both predictors, the load is predicted to be independent and can directly read the cache when its address is available.</p><p>e) Memory Cloaking: Once a colliding store's SSN is predicted, the physical register which produces the store data is read from the Store Register Buffer. The load uses this physical register as its destination register. As a result, this load does not need to access the cache and only computes its address. In this approach, the DEF-store-load-USE dependence chain now is collapsed to DEF-USE and this is called memory cloaking <ref type="bibr" target="#b12">[13]</ref>. Memory Cloaking is a very powerful method, because the data is forwarded to the load even without knowing the address.</p><p>We implement a mechanism which splits memory operations at the decode stage into two MicroOps: an address computation and a memory access. In this design, the store queue and the load queue are completely eliminated. Figure <ref type="figure" target="#fig_7">7</ref> illustrates the MicroOp creation and the renaming procedure. Figure <ref type="figure" target="#fig_7">7(a)</ref> shows the original assembly code of the store and the load. In Figure <ref type="figure" target="#fig_7">7</ref>(b), an address generation MicroOp, ADDI, is added before each memory access, which eliminates the offset field in the memory MicroOps. Note that the logical destination register of the ADDI is $32, which is not defined in MIPS ISA ($0-$31). This register is only visible in the hardware and facilitates physical register renaming and release in the same way as a normal superscalar processor.</p><p>Figure <ref type="figure" target="#fig_7">7</ref>  not write to the cache until it is committed, hence it is not dispatched to the out-of-order core. Both the data physical register identity (P1) and the address physical register identity (P3) are kept in the Store Register Buffer so that when this store is committed it can read these two values from the register file and update the cache. The store queue is removed at the cost of an additional address physical register (in a typical superscalar processor, the address does not require a dedicated physical register but instead an entry in the store queue). Load instructions operate in a similar manner such that a dedicated address physical register is allocated. At the retire stage, both the data and the address physical registers are read to verify the memory dependence prediction (the data is required if a load re-execution verification is issued, and the address is required to read T-SSBF). The load queue is removed since the address is kept in the register file. Figure <ref type="figure" target="#fig_7">7(c)</ref> shows a bypassing load which reuses the store data register (P1) as its own destination physical register. Hence, this load is not dispatched to the out-of-order core either. The processor only verifies its value at the retire stage.</p><p>Our mechanism is different from NoSQ in how memory addresses are stored. In NoSQ, the address offset is kept in the ROB and the address has to be calculated at the retire stage (for non-bypassing loads, these are extra computations). In DMDP the address is kept in the register file and directly read at the retire/commit stage. Furthermore, the address generation instruction (AGI) translates the virtual address to a physical address by setting a special MicroOp flag, making it different from a normal ADDI. When the AGI is computed, it searches the TLB to find the physical address and stores the physical address in the address register. Therefore, at the retire/commit stage, physical addresses are available for memory ordering violation detection and no extra translation is needed. The drawback of this approach is the non-bypassing loads have to wait for the address translation and an extra delay is imposed. In order to remove this side effect, we use the virtual address to read the data array and the tag array simultaneously with the address translation. In the next cycle, the translated physical address is compared with the tag array output and the correct data is selected. This approach takes advantage of a VIPT cache organization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Predication insertion</head><p>A predicate is inserted at the load if the memory dependence prediction is not confident. Figure <ref type="figure" target="#fig_8">8</ref> shows an example of predicate creation and renaming. Figure <ref type="figure" target="#fig_8">8</ref>(a) shows the original assembly code of the store and the load. Figure <ref type="figure" target="#fig_8">8</ref>(b) presents the decoded MicroOps alongside with address generation MicroOps. Figure <ref type="figure" target="#fig_8">8</ref>(c) illustrates the predicate creation before renaming. Note that, in reality the predication insertion uses physical registers. We use logical registers in Figure <ref type="figure" target="#fig_8">8(c</ref>  In the figure, there are three new MicroOps inserted after the load: a comparison, CMP, which produces the predicate $34 and two conditional moves, one of which would update the load destination register $9. Logical register $33 keeps the data read from the cache and $34 serves as the predicate. The store address and the store data sections are marked with a question mark in the figure. Because logical register $7 and $32 may be modified after the store, only physical registers are available during the predication insertion process. The CMP instruction compares the store address with the load address and sets the predicate $34 to one if the addresses match. If the predicate is set, the CMOV instruction forwards the store data to $9. Otherwise, the loaded data $33 is forwarded.</p><p>Figure <ref type="figure" target="#fig_8">8</ref>(d) shows the renamed predication code. Note that the two CMOVs are mapped to the same physical register P8 since only one of them will write to the RF. Both CMOVs are dispatched to the out-of-order core. When the CMOV is woken up to execute, it first checks the predicate and only executes if the predicate is set. Otherwise, the CMOV is treated as a NOP and does not update the RF. The benefit of sharing one physical register is it reduces the data dependence and the number of the operands is two instead of three (a predicate and two operands selected by the predicate). The physical register P8 is defined twice, similar to a memory cloaking destination register. Its release algorithm is the same and we elaborate on the details next.</p><p>a) Physical Register Reference Counter: In superscalar processors, a physical register is defined once in its lifetime and is never read again after it is released. Since neither of these conditions are valid in DMDP, we incorporate Physical Register Reference Counters to guide the physical register allocation and release mechanism.</p><p>In DMDP, a given physical register might be defined multiple times in its lifetime. For example, a load might reuse the colliding store's data register as its own destination register in memory cloaking. A predication insertion creates two conditional moves which have the same destination register. A counter based algorithm <ref type="bibr" target="#b20">[21]</ref> is implemented in DMDP to track the number of definitions through the register's lifetime. This producer counter is incremented when the register is defined and decremented when the register is virtually released. Figure <ref type="figure" target="#fig_9">9</ref> demonstrates a simple example. P7 is defined twice so the counter number is two at the beginning. When the second instruction is retired, it virtually releases the previous definition, P7. Hence, the counter value is decremented to one. When the last instruction is retired, it also decrements the producer count of P7 and the counter becomes zero at that point. On the other hand, a physical register might be read even after it is released. For example, in Figure <ref type="figure" target="#fig_8">8(d)</ref>, P1 contains the store data and could be released before it is read by the conditional move. Another case happens in the store buffer. When a store is retired and transferred to the store buffer, its data and address physical registers might be released before the store is committed. We have to extend the lifetime of these physical registers in order to guarantee correct memory forwarding. A consumer counter is added for each physical register. When a consumer operand is renamed, the renamed physical register's counter is incremented. When the instruction which has that operand executes, the counter is decremented. The store executes when it is committed. The consumer counter was first proposed in <ref type="bibr" target="#b21">[22]</ref> which is used to make early physical register release. But in our scenario, it is used to delay the register release.</p><p>Overall, when a physical register has a producer counter of zero and a consumer counter of zero, it is released. We use a mechanism walking through squashed instructions to recover the counters during recoveries <ref type="bibr" target="#b0">[1]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>C. Load Re-execution Filter</head><p>When a speculative load is about to retire, its loaded data needs to be verified by a re-execution. The cost of load reexecution is too high as loads can not be issued until the store buffer is drained. As a result, we have to minimize the number of such re-executions. At the same time, we have to make sure that every potential collision is checked. Based on the data source, we can classify the loads into two categories: i) the loads which read their data from the cache; ii) the loads which get their data from an in-flight store. Table II lists the re-execution policy for these two kinds of loads. If the data is coming from the cache, ld.SSN nvul indicates the SSN commit when the load is executed. Therefore, if the actual colliding store's SSN is larger than ld.SSN nvul , a re-execution verification is required. If the data is forwarded by a predicted colliding store, then the actual colliding store's SSN must match with the predicted one. Otherwise, a re-execution verification is issued.</p><p>a) Silent Stores Effect: Silent stores <ref type="bibr" target="#b22">[23]</ref> can be detected in many of the programs, in which multiple stores write the same value into a particular memory location. This is mainly caused by the program redundancy. In DMDP, silent stores impose a lot of unnecessary load re-executions. Figure <ref type="figure" target="#fig_10">10</ref> shows a simple example, in which the two stores write the same value to the same address. The load also reads this address. This figure displays the status when the load is executed. Since store1 has committed (st1.SSN &lt; SSN commit ), the load reads the data updated by store1 from the cache. When the load is about to retire, it finds itself colliding with store2 (st2.SSN &gt; ld.SSN nvul ). Thus, a load re-execution is issued and no exception is set since the reloaded data is the same. The original design does not update the Store Distance Predictor unless an exception is reached. Consequently, this load will incur re-execution many times without creating any exception. In order to solve this problem, the memory dependence should be created even when no exception is observed. Whenever a load re-execution occurs, the Store Distance Predictor is updated. In Figure <ref type="figure" target="#fig_10">10</ref>, the store distance between store2 and the load is kept in the predictor. Thus, store2 will forward the data to the load and no load re-execution is required based on the policy in Table <ref type="table" target="#tab_0">II</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>D. Partial-word Forwarding</head><p>For memory predication to work, it must handle any kind of store-load forwarding, including partial-word forwarding. We use word address plus byte access bits (BAB) to detect partial-word forwarding violation. On a 32-bit machine, a word is composed of 4 bytes so 4 bits (BAB) are used to indicate which bytes are accessed. This BAB can be expanded to 8 bits for a 64-bit machine. When a store retires, its BAB, store BAB is written into the T-SSBF with other information. When a load retires, not only the word address but also the BAB is compared. Figure <ref type="figure" target="#fig_11">11</ref> shows how a partial-word forwarding is verified. If store BAB &amp; load BAB is equivalent to load BAB , that means the prior store contains the whole data section required by the load. The data forwarding is correct. On the other hand, if the store only modifies part of the data section, which means the needed data is separated by multiple stores, then a load re-execution is triggered as the load is retired.</p><p>A partial-word forwarding may cause the forwarded data to be shifted. For example, a store writes a whole word into the cache and the dependent load only reads the upper half word. In which case, the store data is right shifted 16 bits before the forwarding. In MIPS, the shift amount is decided by the least significant two bits of the memory address. The value of these two bits times eight is the shift amount. The store shifts left and the load shifts right. DMDP has a dedicated MicroOp, CMP, to compare the store and load address. When a CMP is executed, DMDP also puts the shift amount and direction information into the predicate (the predicate is a word-wide register, only one bit is used to guard the predicated instruction, other bits can be used). Therefore, the CMOV knows how to shift the operand before it is forwarded.</p><p>Other than address alignment, the forwarded data may be masked and sign/zero extended based on the load type. DMDP keeps the load type in the CMOV when it is created. So when CMOV is executed, the operand is trimmed properly. Moreover, partial-word loads, such as half word load or byte load, are prohibited from doing memory cloaking due to the alignment or sign/zero extension. Thus, these loads are forced to use predication for store-load communications. NoSQ inserts special "shift &amp; mask instruction" for partial-word communication. However, the store and the load addresses are unknown at the rename stage, thus the shift amount has to be predicted. Our partial-word mechanism can be easily adopted to other ISAs, since the store address, load address, store type and load type can be integrated into the predicate.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>E. Confidence Predictor</head><p>When a load is predicted to be dependent on a store, DMDP consults the confidence predictor to decide whether memory cloaking or memory predication should be used. The confidence predictor is embedded in the Store Distance Predictor and updated at the retire stage. The loads which cause load reexecutions or are predicted to be dependent on a store can update the confidence predictor. When the prediction is correct, the corresponding confidence counter is increased. Otherwise, the confidence counter is decreased. A common confidence predictor modifies the counter with a balanced strategy. In other words, it increases and decreases the counter by the same amount, for example, one. In DMDP, pushing instructions to predication only causes a trivial data dependence increase, but a dependence misprediction results in a full recovery penalty. Because the cost is biased, the confidence counter update should be biased as well. DMDP right shifts the counter by one bit (divided by two) whenever a misprediction is detected and only increments the counter by one in other cases. By applying this strategy, fewer mispredictions are experienced at the cost of more predications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>F. Memory Consistency</head><p>In a multi-core system, the cache lines might be invalidated by other cores. Therefore, even if the load satisfies the local memory dependence check, it may still need to be re-executed due to the stores from other cores <ref type="bibr" target="#b18">[19]</ref>. This makes two changes to the design: i) When a cache line is invalidated by another core, all the words in that cache line should update the T-SSBF as the invalidation message usually only contains the cache line address without word offset; ii) The word invalidated by another core should write SSN commit +1 as its SSN in the T-SSBF, i.e., all the in-flight loads which were executed before the invalidation should re-execute if their addresses match.</p><p>When we were designing our store buffer mechanism, we considered different memory consistency models, such as total store order (TSO) and relaxed memory order (RMO). In TSO, the stores in the store buffer are committed following the program order. When the store buffer is full, stores are not allowed to retire from the ROB. RMO mitigates the pressure of the store buffer and permits the stores to commit in any order. In either model, the load in NoSQ has to wait for the colliding store and its preceding stores to commit if the memory dependence prediction is not confident. DMDP is not constrained by the committing of the stores.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>V. SIMULATION METHODOLOGY</head><p>We simulated DMDP by using MIPS-I ISA without delayed branching. This ISA is very similar to PISA ISA, used by SimpleScalar <ref type="bibr" target="#b23">[24]</ref>. GCC 4.9.2 tailored to this ISA is used to compile the benchmarks and generate binary code with the highest optimization ("-O3") set. We choose Spec 2006 as our benchmark suite. All simulation models were designed with Architectural Description Language (ADL) <ref type="bibr" target="#b24">[25]</ref>. The ADL compiler can automatically generate the assembler, the disassembler and a cycle-accurate simulator which respects timing at the register transfer level from the description of the microarchitecture and its ISA specified in ADL language.</p><p>In order to efficiently simulate our mechanisms, we incorporated Simpoint 3.2 <ref type="bibr" target="#b25">[26]</ref>, <ref type="bibr" target="#b26">[27]</ref> to minimize the simulation time. For each benchmark, a set of checkpoint images were generated and each checkpoint image contained the complete memory data segment, the register file and the program counter (PC). Other architecture related structures were not included, such as cache, branch predictor, memory dependence predictor, etc. Hence, the simulation of each interval had a cold start. In order to compensate for this effect, we selected a large size, 100 million retired instructions, to simulate each interval. Since each interval simulation is independent of others, we simulated all of the intervals simultaneously to further shorten the simulation time. Currently, the file descriptors are not kept in the checkpoint. Therefore, we could not simulate an interval if it had file operations and the file descriptor was created before the checkpoint. When this happened, we replaced that checkpoint interval with the dominant checkpoint in that benchmark. In h264ref, we substituted one checkpoint (0.92% weight) for the dominant checkpoint (18.14% weight) and in hmmer, we substituted two checkpoints (0.22%, 0.43% weight) for the dominant checkpoint (98.9% weight). As the replaced intervals have very limited weights (&lt;1.0 %), we expect the impact of this substitution to be minimal. We also modified <ref type="bibr">McPAT 1.4 [28]</ref> to evaluate the dynamic energy consumption. T-SSBF and the memory dependence predictor which replace the load queue and the store queue were both modeled. DRAMSim2 <ref type="bibr" target="#b28">[29]</ref> was also embedded to evaluate the memory subsystem behavior. The simulated benchmarks are: Integer: perl, bzip, gcc, mcf, gobmk, hmmer, sjeng, lib, h264ref, astar; Float: bwaves, milc, zeusmp, gromacs, leslie3d, namd, Gems, tonto, lbm, wrf, sphinx3.</p><p>We simulated these benchmarks with the "ref" input. The remaining missing benchmarks were not included due to our linker's inability to link them. The processor configuration of the baseline architecture is listed in Table <ref type="table" target="#tab_0">III</ref> which we used as a reference for comparing with other models. The baseline architecture has a store queue and a load queue with unlimited entries. A store buffer is also implemented following TSO model. Store coalescing was implemented to alleviate the write port pressure. Since TSO is considered, only consecutive stores are coalesced. We used Store Set <ref type="bibr" target="#b29">[30]</ref> algorithm to predict the memory dependences in the baseline model. We simulated the following models which differ from the baseline in their store-load communication mechanism.</p><p>1. NoSQ: This architecture <ref type="bibr" target="#b9">[10]</ref> has no store and load queue which are replaced with a 4-way set associative, 128 entry T-SSBF. Each entry contains a 20 bit SSN, a 4 bit BAB and a 25 bit tag. The total size of T-SSBF is 6.125 Kbits. The Store Distance Predictor uses two 4-way associative, 1K entry tables. One of the tables is for path-insensitive predictions and the other is for path-sensitive predictions. The path-insensitive table is indexed by the load PC. The path-sensitive table is indexed by the XOR of the load PC and an 8 bit branch history. Each table entry contains a 7 bit confidence counter, a 22 bit tag and a 6 bit distance part. The predictor's total size is 8.75KB. The confidence counter is set to 64 by default. If the value is greater than 63, memory cloaking is used, or the load has to wait for the colliding store to commit. The number of delayed loads which can be kept in the core is unlimited. Silent-store-aware predictor update policy is used to match DMDP.</p><p>2. DMDP: DMDP has the same T-SSBF and dependence predictor as NoSQ. The only difference is that NoSQ decreases the confidence counter by one if a misprediction is detected. But DMDP divides the counter by two in the same case. Predicate is added when a low confidence prediction is made.</p><p>3. Perfect: This model has a perfect memory dependence predictor so that every load gets its data from either a colliding store or the cache. No delayed executions or mispredictions are experienced.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VI. EXPERIMENTAL RESULTS</head><p>Figure <ref type="figure" target="#fig_12">12</ref> illustrates the IPC performance of NoSQ, DMDP and Perfect models normalized to the baseline model. The geometric means of the Integer benchmarks are 0.975, 1.045 and 1.068, for NoSQ, DMDP and Perfect respectively, and the corresponding floating point benchmark performances are 1.008, 1.053 and 1.066. Clearly, DMDP is much closer to Perfect in terms of IPC performance.</p><p>a) NoSQ VS. Baseline: NoSQ can forward store data to the load by memory cloaking. That is the reason why it outperforms the baseline in some of the benchmarks. On the other hand, NoSQ has to stall the retire stage when a load re-execution is issued when the store buffer is not drained. Moreover, NoSQ may experience more memory dependence mispredictions due to its aggressive prediction strategy. Figure <ref type="figure" target="#fig_12">12</ref> shows NoSQ works more than 20% worse in hmmer. Analyzing the result, we found that NoSQ has a significant amount of memory dependence mispredictions (3.06 Mispredictions Per 1k Instructions). Further analysis showed that the silent store predictor update policy, which was described before, had a substantial impact in this benchmark. This policy would update the Store Distance Predictor whenever a load re-execution was triggered. If we change back to the original mechanism which only updates the predictor if the re-execution leads to an exception (the reloaded data is different), NoSQ has fewer mispredictions and higher performance in hmmer. However, it reduces the performance of other benchmarks.</p><p>Silent-store-aware predictor update policy is a double-edged sword. It reduces the number of load re-executions immensely but also might cause the increase of mispredictions. DMDP could compensate this shortcoming by using predication. From our evaluation, DMDP had much fewer mispredictions (1.03MPKI VS. 3.06MPKI) and it only had 1% lower performance than the baseline in hmmer.</p><p>b) DMDP VS. Baseline: DMDP surpasses the baseline in every benchmark except hmmer which is caused by the nontrivial memory dependence mispredictions as mentioned before. In the baseline model, loads have to read the data from the cache, store queue or store buffer. All of these structures have a constant access latency (4 cycles in our simulation). DMDP can use memory cloaking to bridge stores with loads if the predictions are confident. Even a low confidence load can obtain its data quicker if the data is from an in-flight store.</p><p>Table <ref type="table" target="#tab_0">IV</ref> lists the average execution time of the loads in baseline and DMDP. The execution time is the number of cycles spent between renaming and the load result becoming available. DMDP has a shorter execution time in every single benchmark and on average, saves more than 20% of the execution time for loads. Figure <ref type="figure" target="#fig_12">12</ref> shows that DMDP has the most improvements in wrf and bzip2 and in these two benchmarks, DMDP saves about half of the execution time of the loads. c) DMDP VS. NoSQ: DMDP outperforms NoSQ in every single benchmark. The geometric mean of the speed-up is 7.17% (Int) and 4.48% (FP). If a low confidence load is renamed, NoSQ has to wait until the predicted colliding store   In Figure <ref type="figure" target="#fig_12">12</ref>, DMDP surpasses NoSQ in wrf by 34.1%, which is the highest improvement. NoSQ works worse than not only DMDP but also the baseline. From our evaluation, the average execution time of all loads is 18.17 cycles, 13.85 cycles and 9.19 cycles for the baseline, NoSQ and DMDP respectively. The loads in NoSQ has a shorter execution time, but the overall performance is still worse than the baseline. One possible reason is the delayed loads in NoSQ are on the critical path of the program and slow down the rest of the instructions. Therefore, even the average load execution time is saved, the whole program runs slower. We evaluated the average execution time of all instructions and it is 19.53 cycles, 21.47 cycles and 12.74 cycles for the baseline, NoSQ and DMDP respectively. d) DMDP VS. Perfect: On geometric mean, DMDP loses 2.19% (Int) and 1.25% (FP) IPC compared to Perfect. There are three reasons why Perfect outperforms DMDP: i) DMDP has a large amount of memory dependence mispredictions in some benchmarks which Perfect does not have; ii) When a load verification triggers a load re-execution, DMDP has to wait for the store buffer to be drained whereas Perfect never re-executes any loads; iii) For low confidence loads, DMDP still needs to wait for the addresses being computed even if the addresses match. Perfect only has high confidence loads which receive their data by memory cloaking. Table VI lists the memory dependence misprediction rate in NoSQ and DMDP measured in terms of Mispredictions Per 1k Instructions (MPKI). On one hand, DMDP would have more low confidence loads since the confidence predictor has a biased update policy (Section IV-E). As a result, DMDP should have fewer mispredictions. On the other hand, NoSQ would delay the execution of low confidence loads. As a result, some mispredictions which can not be covered by DMDP can be covered by NoSQ. For example, if the load depends on a different in-flight store and that store is older than the predicted one, NoSQ can read the correct data through the cache. In the same case, DMDP might read the cache earlier but potentially the wrong value.</p><p>Note that DMDP has more dependence mispredictions than NoSQ in bzip2. A snapshot of the code which causes the most mispredictions is demonstrated in Figure <ref type="figure" target="#fig_13">13</ref>. In this code, LHU sequentially reads an array which contains a pointer ($9). After a series of computation, the pointed value is incremented by one. If the array has two identical values, they point to the same memory location and the increment operations collide with each other. During the execution, the distance between the colliding store and the load keeps changing. Therefore, a lot of mispredictions are observed in bzip2. Let us assume the colliding store is randomly distributed. Thus, when a misprediction happens, half of the time the actual colliding store is older than the predicted colliding store and the other half is younger. NoSQ can cover the former cases and DMDP mispredicts both cases. Table <ref type="table" target="#tab_0">VI</ref> shows NoSQ has about half of the mispredictions of DMDP. When a load is re-executed, the retire stage is stalled until the store buffer drains. Table VII lists the number of stalled cycles per 1000 committed instructions in NoSQ and DMDP. DMDP has more stalled cycles in every benchmark due to its early load execution. Since NoSQ delays the low confidence load execution, it has a much narrower vulnerable window and fewer load re-executions are issued.</p><p>DMDP loses the most performance in these three benchmarks: hmmer (-8.71%), bzip2 (-6.83%) and lbm (-5.23%) when compared with Perfect. The first two benchmarks have the most memory dependence mispredictions (Table <ref type="table" target="#tab_0">VI</ref>) and lbm has the most re-execution related stalls (Table <ref type="table" target="#tab_0">VII</ref>). These are the two major obstructions impeding DMDP to reach a higher performance.</p><p>e) Store Buffer Size: The loads in DMDP and NoSQ do not associatively search the store buffer which simplifies the design significantly. As a result, we can build a much larger store buffer and hide more cache misses imposed by stores. The store buffer size has a substantial impact on performance, especially for a multiprocessor <ref type="bibr" target="#b32">[33]</ref>, <ref type="bibr" target="#b13">[14]</ref>. We believe mechanisms, such as DMDP, can be easily adopted to a multiprocessor design and boost the performance of multithreaded workloads. Figure <ref type="figure" target="#fig_4">14</ref> depicts the performance of DMDP with a 32entry store buffer and a 64-entry store buffer normalized to another one with a 16-entry store buffer. Using a geometric mean, the 32-entry model outperforms the 16-entry model by 2.07% (Int) and 3.81% (FP), the 64-entry model outperforms the 16-entry model by 2.77% (Int) and 5.01% (FP). Through all the benchmarks, lbm has the highest performance improvement with a larger store buffer. Moreover, we estimated the number of stalled cycles incurred by a full store buffer. They are 503.1 cycles, 220.5 cycles and 75.0 cycles per 1000 committed instructions for a 16-entry, 32-entry and 64-entry store buffer accordingly. Apparently, a larger store buffer can immensely help with single-thread performance. We expect the ability to implement a larger store buffer to be more fruitful in multithreaded workloads.</p><p>f) Register File Pressure: The physical registers occupied by the store instructions are not released until these store instructions are committed from the store buffer. This change adds more pressure on the physical register file. On the other hand, memory cloaking shares the physical registers among multiple load instructions, which reduces the pressure on the physical register file. Our quantitative evaluation shows that the performance improvement of DMDP over the baseline is reduced to 4.24% from 4.94% when the physical register file size is cut in half (320?160).</p><p>g) Alternative Configurations: We also simulated DMDP with a 4-issue width. The IPC improvement over NoSQ shrunk to 4.56% (Int) and 2.41% (FP). This is because with a smaller issue width, the vulnerable window gets narrower and the inflight store-load communication is reduced. The number of the low confidence loads drops as well (23.4% is removed). As a result, it is less likely for DMDP to save delayed load executions.</p><p>A 512-entry ROB is also simulated, which yields more IPC improvement (7.56% Int, 6.35%). A larger ROB would help DMDP to bridge long distance store-load communications. This long distance store-load dependence is more difficult to predict and DMDP has slightly fewer mispredictions.</p><p>Consistency model RMO is simulated as well. Stores are allowed to commit in an out-of-order manner. SSN commit is set to the one preceding the oldest store in store buffer. When a store is committed, its corresponding entry in Store Register Buffer is invalidated and forwarding is prohibited. The results shows DMDP surpasses NoSQ by 7.67% (Int) and 4.08% (FP).</p><p>h) Power Efficiency: The original motivation to design DMDP was to eliminate unnecessary load delays. So we did not consider the power efficiency when we designed the microarchitecture. We wanted to make sure that the extra predicated instructions do not negatively affect the power efficiency. Figure <ref type="figure" target="#fig_15">15</ref>  As it can be seen, DMDP reduces the total execution time in every benchmark (Figure <ref type="figure" target="#fig_12">12</ref>) and slightly consumes more energy due to the extra predicated instructions. Overall, DMDP is more power efficient than NoSQ and saves 8.5% (Int) and 5.1% (FP) EDP on average. If we refer the EDP result to the memory dependence misprediction rate (Table VI), we find more mispredictions result in more energy consumption. DMDP has more mispredictions in bzip2 and that costs DMDP to consume about 3% more energy. On the other hand, DMDP saves around 2 MPKI in hmmer which leads to a 15% energy saving.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VII. RELATED WORK</head><p>Instruction predication was initially used to convert control dependencies to data dependencies <ref type="bibr" target="#b16">[17]</ref>, <ref type="bibr" target="#b14">[15]</ref>, so that vectorization could be applied even if a loop contained conditional branches. With the mechanism, qualified branches are converted to predicate computation instructions statically during the compilation. The control dependent instructions are guarded by these predicates to eliminate conditional branches. No branches means no mispredictions and no recovery penalties at all, especially if the eliminated branches are hard to predict. Dynamic predication is also proposed to insert predicates during the run time <ref type="bibr" target="#b15">[16]</ref> for processors which do not have a predicated Instruction Set Architecture (ISA).</p><p>Store-queue-free architectures were proposed when memory dependence prediction accuracy became acceptable. Sha et al. designed NoSQ <ref type="bibr" target="#b9">[10]</ref> to completely remove the store queue by using memory cloaking to communicate the in-flight stores and loads. When the dependence is inconsistent, NoSQ delays the load execution, therefore, NoSQ still needs a structure to hold all the delayed loads until they are ready to execute. In contrast, DMDP inserts predication which converts loadstore dependencies into simple data dependencies, therefore it does not need this extra storage at the expense of executing additional operations.</p><p>Subramaniam et al. proposed Fire-and-Forget (FnF) <ref type="bibr" target="#b10">[11]</ref> to eliminate the store queue in a different way. Instead of predicting the load, FnF predicts the store so that when a store is decoded, its consumer load is predicted and the store forwards its data to that load. We selected NoSQ as our reference design since some memory dependencies are path sensitive. When FnF is predicting a store, the branches between the store and the dependent load are not considered.</p><p>Several related works attempt to reduce the size of store queue or simplify it. The mechanism proposed by Sha et al. predicted the index of the colliding store in the store queue <ref type="bibr" target="#b3">[4]</ref>. This approach eliminates the need to search the store queue when a load is executed. Their mechanism is similar to DMDP in that both techniques require address comparison. The load retrieves its data from either the store queue or the data cache. The difference is that the address comparison is not triggered until the store is executed in their mechanism, whereas DMDP only waits for the store address computation.</p><p>Stone et al. separated the function of the store queue into three different structures <ref type="bibr" target="#b2">[3]</ref>: store forwarding cache (SFC) for memory forwarding; memory disambiguation table (MDT) for memory ordering violation detection; and a store FIFO for inorder store retirement. CAM structures are completely replaced by RAM structures since no associative search is needed. Garg et al. had a different view of the store queue and proposed SMDE (Slackened Memory Dependence Enforcement) <ref type="bibr" target="#b6">[7]</ref>. Their mechanism uses an L0 cache to bridge the in-flight loads and stores similar to a store queue. This simple design does not need any associative search so the size scales well. Sethumadhavan et al. proposed Late-Binding <ref type="bibr" target="#b33">[34]</ref> to allocate LSQ at the issue stage instead of the dispatch stage which reduces the demand for LSQ entries. Since the LSQ allocation is completely out-of-order, an age tag is explicitly integrated into each LSQ entry. The current commercial processors are still using store queue to disambiguate memory ordering. Kim et al. designed a mechanism, store dependence prediction (SDP) <ref type="bibr" target="#b34">[35]</ref>, to indicate which store is not likely to collide with any younger load so that the load does not need to wait for this store address computation.</p><p>Perais et al. expanded the store-load bypassing to load-load bypassing with a new register sharing mechanism <ref type="bibr" target="#b0">[1]</ref>. They introduced an Instruction Distance Predictor to predict the instruction which produces the load result. A TAGE-like <ref type="bibr" target="#b35">[36]</ref> predictor was designed and could also be tuned as a Store Distance Predictor and adopted to DMDP.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VIII. CONCLUSION</head><p>To the best of our knowledge, predication has never been employed to convert data dependencies through memory to register dependencies. DMDP is the first mechanism which does so without employing special buffers to hold memory instructions. DMDP converts a load to i) direct access to cache; ii) reuse of the colliding store data; iii) predication between cache and the colliding store data. Therefore, the only hardware change is predication insertion at the rename stage and a consumer counter for expanding the lifetime of store's physical registers. Our evaluation of the mechanism shows that DMDP surpasses NoSQ in all benchmarks (7.17% Int, 4.48% FP). Meanwhile, DMDP works more power efficiently as well and saves EDP (8.5% Int, 5.1% FP).</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head></head><label></label><figDesc>(b) shows two nearby iterations in which the increment instructions collide whenever the two pointers are the same. for( ) { ptr = a[i].addr; x[ptr]++; } ptr = a[n].addr; x[ptr]++; x[ptr]++;</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Fig. 1 .</head><label>1</label><figDesc>Fig. 1. OC dependence caused strict ordering.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Fig. 2 .</head><label>2</label><figDesc>Fig. 2. Load instruction distribution</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>p e r l b z i p 2 g c c m c f g o b m k h m m e r s j e n g l i b h 2 6 4 r e f a s t a r b w a v e s m i l c z e u s m p g r o m a c s l e s l i e 3 d n a m d G e m s t o n t o l b m w r f s p h i n x 3 1 Fig. 3 .</head><label>313</label><figDesc>Fig. 3. Delayed loads vs. bypassing loads</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Fig. 4 .</head><label>4</label><figDesc>Fig. 4. Three different ways to read data for loads.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>p e r l b z i p 2 g c c m c f g o b m k h m m e r s j e n g l i b h 2 6 4 r e f a s t a r b w a v e s m i l c z e u s m p g r o m a c s l e s l i e 3 d n a m d G e m s t o n t o l b m w r f s p h i n x 3</head><label>3</label><figDesc></figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head></head><label></label><figDesc>Fig. 6. DMDP Microarchitecture</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Fig. 7 .</head><label>7</label><figDesc>Fig. 7. Memory Cloaking</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Fig. 8 .</head><label>8</label><figDesc>Fig. 8. Memory predication insertion</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Fig. 9 .</head><label>9</label><figDesc>Fig. 9. The producer counter</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Fig. 10 .</head><label>10</label><figDesc>Fig. 10. Load re-execution incurred by silent store</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Fig. 11 .</head><label>11</label><figDesc>Fig. 11. The decision tree of partial-word forwarding detection</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Fig. 12 .</head><label>12</label><figDesc>Fig. 12. Spec 2006 Speedup over the baseline</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Fig. 13 .</head><label>13</label><figDesc>Fig. 13. A bzip2 code snapshot</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>p e r l b z i p 2 g c c m c f g o b m k h m m e r s j e n g l i b h 2 6 4 r e f a s t a r b w a v e s m i l c z e u s m p g r o m a c s l e s l i e 3 d n a m d G e m s t o n t o l b m w r f s p h i n x 3 Fig. 14 .</head><label>314</label><figDesc>Fig. 14. 32,64-entry SB VS. 16-entry SB</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>Fig. 15 .</head><label>15</label><figDesc>Fig. 15. The EDP of DMDP, normalized to NoSQ</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>TABLE I THE</head><label>I</label><figDesc>DIFFERENCE BETWEEN NOSQ AND DMDP ON DIFFERENT LOADS</figDesc><table><row><cell>NoSQ</cell><cell>DMDP</cell></row><row><cell>No dependence</cell><cell></cell></row><row><cell>or the store has</cell><cell></cell></row><row><cell>committed</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head></head><label></label><figDesc>) to improve readability. The insertion happens at the decode stage since the dependence is predicted at the same stage.</figDesc><table><row><cell></cell><cell></cell><cell cols="2">ADDI $32, $8, 8</cell><cell cols="2">ADDI $32, $8, 8</cell><cell cols="2">ADDI P3, P2, 8</cell></row><row><cell>SW</cell><cell>$7, 8($8)</cell><cell>SW</cell><cell>$7, ($32)</cell><cell>SW</cell><cell>$7, ($32)</cell><cell>SW</cell><cell>P1, (P3)</cell></row><row><cell></cell><cell></cell><cell cols="2">ADDI $32, $3, 4</cell><cell cols="2">ADDI $32, $3, 4</cell><cell cols="2">ADDI P5, P4, 4</cell></row><row><cell>LW</cell><cell>$9, 4($3)</cell><cell>LW</cell><cell>$9, ($32)</cell><cell>LW</cell><cell>$33, ($32)</cell><cell>LW</cell><cell>P6, (P5)</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">CMP $34, $32, ?</cell><cell cols="2">CMP P7, P5, P3</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">CMOV $9, $34, ?</cell><cell cols="2">CMOV P8, P7, P1</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">CMOV $9, !$34, $33</cell><cell cols="2">CMOV P8, !P7, P6</cell></row><row><cell></cell><cell>(a)</cell><cell></cell><cell>(b)</cell><cell></cell><cell>(c)</cell><cell></cell><cell>(d)</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc>DMDP can steer the load to find its correct data by predication, disregarding the store commit states. Table V lists the average execution time of the low confidence loads in NoSQ and DMDP. DMDP saves up to 79.25% execution time and the average is 54.48%. Lib is the only benchmark in which DMDP has a longer execution time. This data is not representative due to the fact lib has so few low confidence loads.</figDesc><table><row><cell></cell><cell></cell><cell cols="2">TABLE IV</cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="4">AVERAGE EXECUTION TIME OF ALL LOADS</cell><cell></cell></row><row><cell></cell><cell>baseline</cell><cell>DMDP</cell><cell></cell><cell>baseline</cell><cell>DMDP</cell></row><row><cell></cell><cell>(Cycles)</cell><cell>(Cycles)</cell><cell></cell><cell>(Cycles)</cell><cell>(Cycles)</cell></row><row><cell>perl</cell><cell>15.86</cell><cell>12.45</cell><cell>bzip2</cell><cell>36.67</cell><cell>19.48</cell></row><row><cell>gcc</cell><cell>44.98</cell><cell>35.04</cell><cell>mcf</cell><cell>112.44</cell><cell>104.00</cell></row><row><cell>gobmk</cell><cell>13.51</cell><cell>11.52</cell><cell>hmmer</cell><cell>11.20</cell><cell>7.47</cell></row><row><cell>sjeng</cell><cell>12.60</cell><cell>10.62</cell><cell>lib</cell><cell>125.23</cell><cell>124.73</cell></row><row><cell>h264ref</cell><cell>22.68</cell><cell>17.32</cell><cell>astar</cell><cell>21.18</cell><cell>13.77</cell></row><row><cell>bwaves</cell><cell>42.56</cell><cell>36.76</cell><cell>milc</cell><cell>73.40</cell><cell>61.18</cell></row><row><cell>zeusmp</cell><cell>26.97</cell><cell>21.21</cell><cell>gromacs</cell><cell>32.13</cell><cell>11.41</cell></row><row><cell>leslie3d</cell><cell>36.55</cell><cell>32.91</cell><cell>namd</cell><cell>20.22</cell><cell>18.94</cell></row><row><cell>Gems</cell><cell>14.78</cell><cell>11.62</cell><cell>tonto</cell><cell>20.31</cell><cell>12.89</cell></row><row><cell>lbm</cell><cell>72.17</cell><cell>31.15</cell><cell>wrf</cell><cell>18.17</cell><cell>9.19</cell></row><row><cell>sphinx3</cell><cell>51.95</cell><cell>50.47</cell><cell>Average</cell><cell>39.31</cell><cell>31.15</cell></row><row><cell>commits.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="funding">
+<div><p>*This work is supported in part by <rs type="funder">NSF</rs> grant <rs type="grantNumber">CCF-1533828</rs>.</p></div>
+			</div>
+			<listOrg type="funding">
+				<org type="funding" xml:id="_eRS5b5M">
+					<idno type="grant-number">CCF-1533828</idno>
+				</org>
+			</listOrg>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Cost effective physical register sharing</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Perais</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 IEEE International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<imprint>
+			<date type="published" when="2016-03">March 2016</date>
+			<biblScope unit="page" from="694" to="706" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Store buffer design in first-level multibanked data caches</title>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">F</forename><surname>Torres</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ibanez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vinals</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Llaberia</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2005.47</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2005.47" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32Nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05</title>
+		<meeting>the 32Nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="469" to="480" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Address-indexed memory disambiguation and store-to-load forwarding</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">S</forename><surname>Stone</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">M</forename><surname>Woley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">I</forename><surname>Frank</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2005.10</idno>
+		<ptr target="http://dx.doi.org/10.1109/MICRO.2005.10" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 38th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 38</title>
+		<meeting>the 38th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 38<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="171" to="182" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Scalable store-load forwarding via store queue index prediction</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">M K</forename><surname>Martin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 38th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 38</title>
+		<meeting>the 38th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 38<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="159" to="170" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Scalable hardware memory disambiguation for high ilp processors</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sethumadhavan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Desikan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Burger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">R</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<ptr target="http://dl.acm.org/citation.cfm?id=956417.956553" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 36th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 36</title>
+		<meeting>the 36th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 36<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page">399</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Reducing design complexity of the load/store queue</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">L</forename><surname>Ooi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">N</forename><surname>Vijaykumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 36th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 36</title>
+		<meeting>the 36th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 36<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page">411</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Slackened memory dependence enforcement: Combining opportunistic forwarding with decoupled verification</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Garg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">W</forename><surname>Rashid</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Huang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 33rd Annual International Symposium on Computer Architecture, ser. ISCA &apos;06</title>
+		<meeting>the 33rd Annual International Symposium on Computer Architecture, ser. ISCA &apos;06<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="142" to="154" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Scalable load and store processing in latency tolerant processors</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Akkary</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Rajwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">T</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32Nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05</title>
+		<meeting>the 32Nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="446" to="457" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Decomposing the load-store queue by function for power reduction and scalability</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Baugh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zilles</surname></persName>
+		</author>
+		<idno type="DOI">10.1147/rd.502.0287</idno>
+		<ptr target="http://dx.doi.org/10.1147/rd.502.0287" />
+	</analytic>
+	<monogr>
+		<title level="j">IBM J. Res. Dev</title>
+		<imprint>
+			<biblScope unit="volume">50</biblScope>
+			<biblScope unit="issue">2/3</biblScope>
+			<biblScope unit="page" from="287" to="297" />
+			<date type="published" when="2006-03">Mar. 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Nosq: Store-load communication without a store queue</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">M K</forename><surname>Martin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2006.39</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2006.39" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 39th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 39</title>
+		<meeting>the 39th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 39<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="285" to="296" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Fire-and-forget: Load/store scheduling with no store queue at all</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Subramaniam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">H</forename><surname>Loh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 39th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 39</title>
+		<meeting>the 39th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 39<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="273" to="284" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Decoupled store completion/silent deterministic replay: Enabling scalable data memory for cpr/cfp processors</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Hilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1555754.1555786</idno>
+		<ptr target="http://doi.acm.org/10.1145/1555754.1555786" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 36th Annual International Symposium on Computer Architecture, ser. ISCA &apos;09</title>
+		<meeting>the 36th Annual International Symposium on Computer Architecture, ser. ISCA &apos;09<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="page" from="245" to="254" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Speculative memory cloaking and bypassing</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Moshovos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">International Journal of Parallel Programming</title>
+		<imprint>
+			<biblScope unit="volume">27</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="427" to="456" />
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Mechanisms for store-wait-free multiprocessors</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Moshovos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 34th Annual International Symposium on Computer Architecture, ser. ISCA &apos;07</title>
+		<meeting>the 34th Annual International Symposium on Computer Architecture, ser. ISCA &apos;07<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="266" to="277" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Effective compiler support for predicated execution using the hyperblock</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">A</forename><surname>Mahlke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">Y</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">E</forename><surname>Hank</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">A</forename><surname>Bringmann</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 25th Annual International Symposium on Microarchitecture</title>
+		<meeting>the 25th Annual International Symposium on Microarchitecture<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society Press</publisher>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="45" to="54" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Dynamic hammock predication for non-predicated instruction set architectures</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Klauser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Austin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Grunwald</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings. 1998 International Conference on Parallel Architectures and Compilation Techniques (Cat. No.98EX192)</title>
+		<meeting>1998 International Conference on Parallel Architectures and Compilation Techniques (Cat. No.98EX192)</meeting>
+		<imprint>
+			<date type="published" when="1998-10">Oct 1998</date>
+			<biblScope unit="page" from="278" to="285" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Conversion of control dependence to data dependence</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">R</forename><surname>Allen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kennedy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Porterfield</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Warren</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/567067.567085</idno>
+		<ptr target="http://doi.acm.org/10.1145/567067.567085" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 10th ACM SIGACT-SIGPLAN Symposium on Principles of Programming Languages, ser. POPL &apos;83</title>
+		<meeting>the 10th ACM SIGACT-SIGPLAN Symposium on Principles of Programming Languages, ser. POPL &apos;83<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1983">1983</date>
+			<biblScope unit="page" from="177" to="189" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Store vulnerability window (svw): Re-execution filtering for enhanced load optimization</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32Nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05</title>
+		<meeting>the 32Nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="458" to="468" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Store vulnerability window (svw): A filter and potential replacement for load re-execution</title>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Instruction Level Parallelism</title>
+		<imprint>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="1" to="22" />
+			<date type="published" when="2006-09">Sep 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Speculation techniques for improving load related instruction scheduling</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Yoaz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Erez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ronen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jourdan</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/300979.300983</idno>
+		<ptr target="http://dx.doi.org/10.1145/300979.300983" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th Annual International Symposium on Computer Architecture, ser. ISCA &apos;99</title>
+		<meeting>the 26th Annual International Symposium on Computer Architecture, ser. ISCA &apos;99<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="42" to="53" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Physical register reference counting</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer Architecture Letters</title>
+		<imprint>
+			<biblScope unit="volume">7</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="9" to="12" />
+			<date type="published" when="2008-01">Jan 2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Increasing processor performance through early register release</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Ergin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Balkan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Ponomarev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ghose</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Conference on Computer Design: VLSI in Computers and Processors</title>
+		<imprint>
+			<date type="published" when="2004-10">2004. 2004. Oct 2004</date>
+			<biblScope unit="page" from="480" to="487" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Silent stores and store value locality</title>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">M</forename><surname>Lepak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">B</forename><surname>Bell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">H</forename><surname>Lipasti</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Computers</title>
+		<imprint>
+			<biblScope unit="volume">50</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<biblScope unit="page" from="1174" to="1190" />
+			<date type="published" when="2001-11">Nov 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">Evaluating future microprocessors: The simplescalar tool set</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Burger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">M</forename><surname>Austin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bennett</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1996">1996</date>
+		</imprint>
+		<respStmt>
+			<orgName>University of Wisconsin-Madison, Computer Sciences Department</orgName>
+		</respStmt>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Automatic generation of microarchitecture simulators</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>?nder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Gupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Conference on Computer Languages</title>
+		<meeting><address><addrLine>Chicago</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1998-05">May 1998</date>
+			<biblScope unit="page" from="80" to="89" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Using simpoint for accurate and efficient simulation</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Perelman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hamerly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Van Biesbrouck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sherwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/885651.781076</idno>
+		<ptr target="http://doi.acm.org/10.1145/885651.781076" />
+	</analytic>
+	<monogr>
+		<title level="m">SIGMETRICS Perform</title>
+		<imprint>
+			<date type="published" when="2003-06">Jun. 2003</date>
+			<biblScope unit="volume">31</biblScope>
+			<biblScope unit="page" from="318" to="319" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Basic block distribution analysis to find periodic behavior and simulation points in applications</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sherwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Perelman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2001 International Conference on Parallel Architectures and Compilation Techniques, ser. PACT &apos;01</title>
+		<meeting>the 2001 International Conference on Parallel Architectures and Compilation Techniques, ser. PACT &apos;01<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="3" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Mcpat: An integrated power, area, and timing modeling framework for multicore and manycore architectures</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">H</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">D</forename><surname>Strong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">B</forename><surname>Brockman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">P</forename><surname>Jouppi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1669112.1669172</idno>
+		<ptr target="http://doi.acm.org/10.1145/1669112.1669172" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 42Nd Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting>the 42Nd Annual IEEE/ACM International Symposium on Microarchitecture<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="volume">42</biblScope>
+			<biblScope unit="page" from="469" to="480" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Dramsim2: A cycle accurate memory system simulator</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Rosenfeld</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Cooper-Balis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Jacob</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer Architecture Letters</title>
+		<imprint>
+			<biblScope unit="volume">10</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="16" to="19" />
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Memory dependence prediction using store sets</title>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">Z</forename><surname>Chrysos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">S</forename><surname>Emer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 25th Annual International Symposium on Computer Architecture, ser. ISCA &apos;98</title>
+		<meeting>the 25th Annual International Symposium on Computer Architecture, ser. ISCA &apos;98<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="1998">1998</date>
+			<biblScope unit="page" from="142" to="153" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<ptr target="https://www.micron.com/resource-details/" />
+		<title level="m">Micron</title>
+		<imprint>
+			<date type="published" when="2664">e570d65b-2664-4037a141-620a6f2e58e7</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">the 1st Championship Branch Prediction</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Inria</surname></persName>
+		</author>
+		<ptr target="https://team.inria.fr/alf/members/andre-seznec/branch-prediction-research/" />
+		<imprint/>
+	</monogr>
+	<note>Branch prediction research</note>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Store memory-level parallelism optimizations for commercial applications</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Chou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Spracklen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">G</forename><surname>Abraham</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 38th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 38</title>
+		<meeting>the 38th Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO 38<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="183" to="196" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Late-binding: Enabling unordered load-store queues</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sethumadhavan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Roesner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">S</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Burger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 34th Annual International Symposium on Computer Architecture, ser. ISCA &apos;07</title>
+		<meeting>the 34th Annual International Symposium on Computer Architecture, ser. ISCA &apos;07<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="347" to="357" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Method and apparatus for store dependence prediction</title>
+		<author>
+			<persName><forename type="first">H.-S</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">S</forename><surname>Chappell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">Y</forename><surname>Soo</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017-11">Apr. 11 2017</date>
+			<biblScope unit="page">750</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">A case for (partially) tagged geometric history length branch prediction</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Seznec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Michaud</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Instruction Level Parallelism</title>
+		<imprint>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="page" from="1" to="23" />
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

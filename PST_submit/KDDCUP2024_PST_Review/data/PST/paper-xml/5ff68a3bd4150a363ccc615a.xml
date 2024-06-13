@@ -1,0 +1,2036 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">This paper is included in the Proceedings of the 14th USENIX Symposium on Operating Systems Design and Implementation</title>
+				<funder>
+					<orgName type="full">MIT Robert J. Shillman Fund Fellowship</orgName>
+				</funder>
+				<funder ref="#_T45xBWr">
+					<orgName type="full">Google Faculty Award</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date>November 4-6, 2020</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Zhenyuan</forename><surname>Ruan</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Mit</forename><surname>Csail</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Malte</forename><surname>Schwarzkopf</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">Brown University ? VMware Research</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Marcos</forename><forename type="middle">K</forename><surname>Aguilera</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Vmware</forename><surname>Research</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Adam</forename><surname>Belay</surname></persName>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<orgName type="institution">Brown University</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">This paper is included in the Proceedings of the 14th USENIX Symposium on Operating Systems Design and Implementation</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published">November 4-6, 2020</date>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:46+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>High-Performance, Application-Integrated Far Memory</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Memory is the most contended and least elastic resource in datacenter servers today. Applications can use only local memory-which may be scarce-even though memory might be readily available on another server. This leads to unnecessary killings of workloads under memory pressure and reduces effective server utilization.</p><p>We present application-integrated far memory (AIFM), which makes remote, "far" memory available to applications through a simple API and with high performance. AIFM achieves the same common-case access latency for far memory as for local RAM; it avoids read and write amplification that paging-based approaches suffer; it allows data structure engineers to build remoteable, hybrid near/far memory data structures; and it makes far memory transparent and easy to use for application developers.</p><p>Our key insight is that exposing application-level semantics to a high-performance runtime makes efficient remoteable memory possible. Developers use AIFM's APIs to make allocations remoteable, and AIFM's runtime handles swapping objects in and out, prefetching, and memory evacuation.</p><p>We evaluate AIFM with a prototypical web application frontend, a NYC taxi data analytics workload, a memcachedlike key-value cache, and Snappy compression. Adding AIFM remoteable memory to these applications increases their available memory without performance penalty. AIFM outperforms Fastswap, a state-of-the-art kernel-integrated, pagingbased far memory system [6] by up to 61?.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Memory (RAM) is the most constrained resource in today's datacenters. For example, the average memory utilization on servers at Google <ref type="bibr" target="#b70">[73]</ref> and Alibaba <ref type="bibr" target="#b44">[46]</ref> is 60%, with substantial variance across servers, compared to an average CPU utilization of around 40%. But memory is also the most inelastic resource: once a server runs out of available memory, some running applications must be killed. In a month, 790k jobs at Google had at least one instance killed, in many cases due to memory pressure <ref type="bibr" target="#b70">[73]</ref>. A killed instance's work and accumulated state are lost, wasting both time and energy. This waste happens even though memory may be available on other servers in the cluster, or even locally: around 30% of server memory are "cold" and have not been accessed for minutes <ref type="bibr" target="#b39">[41]</ref>, suggesting they could be reclaimed.</p><p>Operating systems today support memory elasticity primarily through swap mechanisms, which free up RAM by pushing unused physical memory pages to a slower tier of memory, Throughput [accesses/sec] 64B object 4KB object Paging-based (Fastswap <ref type="bibr" target="#b5">[6]</ref>) 582K 582K AIFM 3,975K 1,059K</p><p>Figure <ref type="figure">1</ref>: AIFM achieves 6.8? higher throughput for 64B objects and 1.81? higher throughput for 4KB objects, compared to Fastswap <ref type="bibr" target="#b5">[6]</ref>, a page-granular, kernel-integrated far memory approach. AIFM performs well since it (i) avoids IO amplification and (ii) context switches while waiting for data.</p><p>such as disks or remote memory. But OS swap mechanisms operate at a fixed and coarse granularity and incur substantial overheads. To swap in a page, the OS must handle a page fault, which requires entering the kernel and waiting until the data arrives. Figure <ref type="figure">1</ref> shows the throughput a recent pagebased far memory system (viz., Fastswap <ref type="bibr" target="#b5">[6]</ref>) achieves when accessing remote objects using up to four CPU cores. Kernel swapping happens at the granularity of 4KB pages, so page-based far memory suffers read/write amplification when accessing small objects, as at least 4KB must always be transferred. Moreover, the Linux kernel spins while waiting for data from swap to avoid the overheads of context switch and interrupt handling. That means the wait time (about 15-20k cycles with Fastswap's RDMA backend) is wasted. We describe a fundamentally different approach: application-integrated far memory (AIFM), which ties swapping to individual application-level memory objects, rather than the virtual memory (VM) abstraction of pages. Developers write remoteable data structures whose backing memory can be local and "far"-i.e., on a remote serverwithout affecting common-case latency or application throughput. When AIFM detects memory pressure, its runtime swaps out objects and turns all pointers to the objects into remote pointers. When the application dereferences a remote pointer, a lightweight green threads runtime restores the object to local memory. The runtime's low context switch cost permits other green threads to make productive use of the wait cycles, which hides remote access latency and maintains high throughput. Due to these fast context switches, AIFM achieves 81% higher throughput than page-based approaches when accessing 4KB objects, and because AIFM avoids amplification, it achieves 6.8? higher throughput for small objects (Figure <ref type="figure">1</ref>). AIFM's programming interface is based on four key ideas: a fast, low-overhead remoteable pointer abstraction, a pauseless memory evacuator, runtime APIs that allow data struc-tures to convey semantic information to the runtime, and a remote device interface that helps offload light computations to remote memory. These AIFM APIs allow data structure engineers to build hybrid local/remote data structures with ease, and provide a developer experience similar to C++ standard library data structures. The pauseless memory evacuator ensures that application threads never experience latency spikes due to swapping. Because data structures convey their semantics to the runtime, AIFM supports custom prefetching and caching policies-e.g., prefetching remote data in a remoteable list and streaming of remote data that avoids polluting the local memory cache. Finally, AIFM's offloading reduces data movement and alleviates the network bottleneck that most far-memory systems experience.</p><p>The combination of these ideas allows AIFM to achieve object access latencies bounded only by hardware speed: if an object is local, its access latency is comparable to an ordinary pointer dereference; when it is remote, AIFM's access latency is close to the hardware device latency.</p><p>We evaluate AIFM with a real-world data analytics workload built on DataFrames <ref type="bibr" target="#b15">[16]</ref>, a synthetic web application frontend that uses several remoteable data structures, as well as a memcached-style workload, Snappy compression, and microbenchmarks. Our experiments show that AIFM maintains high application request throughput and outperforms a stateof-them-art, page-based remote memory system, Fastswap, by up to 61?. In summary, our contributions are:</p><p>1. Application-integrated far memory (AIFM), a new design to extend a server's effective memory size using "far" memory on other servers or storage devices. 2. A realization of AIFM with convenient APIs for development of applications and remoteable data structures. 3. A high-performance runtime design using green threads and a pauseless memory evacuator that imposes minimal overhead on local object accesses and avoids wasting cycles while waiting for remote object data. 4. Evaluation of our AIFM prototype on several workloads, and microbenchmarks that justify our design choices. Our prototype is limited to unshared far memory objects on a single memory server. Future work may add multi-server support, devise strategies for dynamic sizing of remote memory, or investigate sharing.</p><p>2 Background and Related Work OS swapping and far memory. Operating systems today primarily achieve memory elasticity by swapping physical memory pages out into secondary storage. Classically, secondary storage consisted of disks, which are larger and cheaper but slower than DRAM. The use of disk-based swap has been rare in datacenters, since it incurs a large performance penalty. More recent efforts consider swapping to a faster tier of memory or far memory, such as the remote memory of a host <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b5">6,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b30">31,</ref><ref type="bibr" target="#b38">40,</ref><ref type="bibr" target="#b43">45,</ref><ref type="bibr" target="#b46">48,</ref><ref type="bibr" target="#b65">67]</ref> or a compression cache <ref type="bibr" target="#b23">[24,</ref><ref type="bibr" target="#b39">41,</ref><ref type="bibr" target="#b78">81,</ref><ref type="bibr" target="#b79">82]</ref>. Since swapping is integrated with the kernel virtual memory subsystem, it is transparent to user-space applications. But this transparency also forces swapping granularity to the smallest virtual memory primitive, a 4KB page. Combined with memory objects smaller than 4KB, this leads to I/O amplification: when accessing an object, the kernel must swap in a full 4KB page independent of the object's actual memory size. Moreover, supplying application semantic information, such as the expected memory access pattern, the appropriate prefetch strategy, or memory hotness, is limited to coarse and inflexible interfaces like madvise.</p><p>AIFM uses far memory in a different way from swapping, by operating at object granularity rather than pagegranularity-an idea that we borrow from prior work on distributed shared memory (see below), memory compression <ref type="bibr" target="#b72">[75]</ref>, and SSD storage <ref type="bibr" target="#b0">[1]</ref>. These investigations all point to page-level I/O amplification as a key motivation.</p><p>AIFM provides transparent access to far memory using smart pointers and dereference scopes inspired by C++ weak pointers [69], and Folly RCU guards <ref type="bibr" target="#b25">[26]</ref>.</p><p>Disaggregated and distributed shared memory. Disaggregated memory <ref type="bibr" target="#b56">[58]</ref> refers to a hardware architecture where a fast fabric connects hosts to a pool of memory <ref type="bibr" target="#b28">[29,</ref><ref type="bibr" target="#b32">33]</ref>, which is possibly managed by a cluster-wide operating system <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b64">66]</ref>. Disaggregated memory requires new hardware that has not yet made it to production. AIFM focuses on software solutions for today's hardware.</p><p>Distributed shared memory (DSM) provides an abstraction of shared memory implemented over message passing <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b9">10,</ref><ref type="bibr" target="#b42">44,</ref><ref type="bibr" target="#b48">50,</ref><ref type="bibr" target="#b62">64,</ref><ref type="bibr" target="#b63">65]</ref>. Like far memory, DSM systems can be pagebased or object-based. DSM differs from far memory both conceptually and practically. Conceptually, DSM provides a different abstraction, where data is shared across different hosts (the "S" in DSM). Practically, this abstraction leads to complexity and inefficiency, as DSM requires a cache coherence protocol that impairs performance. For instance, accessing data must determine if a remote cache holds a copy of the data. By contrast, data in far memory is private to a host-a stricter abstraction that makes it possible to realize far memory more efficiently. Finally, DSM systems were designed decades ago, and architectural details and constants of modern hardware differ from their environments.</p><p>Technologies to access remote data. TCP/IP is the dominant protocol for accessing data remotely, and AIFM currently uses TCP/IP. Faster alternatives to TCP/IP exist, and could be used to improve AIFM further, but these technologies are orthogonal or complementary to AIFM's key ideas.</p><p>RDMA is an old technology that has recently been commoditized over Ethernet <ref type="bibr" target="#b31">[32]</ref>, generating new interest. Much work is devoted to using RDMA efficiently in general <ref type="bibr" target="#b37">[39,</ref><ref type="bibr" target="#b49">51,</ref><ref type="bibr" target="#b73">76]</ref> or for specific applications, such as key-value stores (e.g., <ref type="bibr" target="#b36">[38,</ref><ref type="bibr" target="#b47">49]</ref>) or database systems <ref type="bibr" target="#b10">[11]</ref>. Smart NICs use CPUs or FPGAs <ref type="bibr" target="#b45">[47,</ref><ref type="bibr" target="#b50">52,</ref><ref type="bibr" target="#b67">70]</ref> to provide programmable remote functionality <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b41">43,</ref><ref type="bibr" target="#b66">68]</ref>. AIFM requires no specialized hardware.</p><p>Abstractions for remote data. Remote Procedure Calls (RPCs) <ref type="bibr" target="#b11">[12]</ref> are widely used to access remote data, including over RDMA <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b68">71]</ref> or TCP/IP <ref type="bibr" target="#b35">[37]</ref>. Memory-mapped files can offer remote memory behind a familiar abstraction <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b65">67]</ref>, while data structure libraries for remote data <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b14">15]</ref>, offer maps, sets, multisets, lists, and other familiar constructs to developers. This is similar in spirit to data structure libraries for persistent memory <ref type="bibr" target="#b57">[59,</ref><ref type="bibr" target="#b60">62]</ref>. AIFM offers a lower-level service that helps programmers develop such data structures. I/O amplification. As mentioned, page-based access leads to I/O amplification, a problem studied extensively in the context of storage systems <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b59">61]</ref> and far-memory systems <ref type="bibr" target="#b16">[17]</ref>, where hardware-based solutions can reduce amplification by tracking accesses at the granularity of cache lines.</p><p>Garbage collection and memory evacuation. Moving objects to remote memory in AIFM ("evacuation") is closely related to mark-compact garbage collection (GC) in managed languages. The main difference is that AIFM aims to increase memory capacity by moving cold, but live objects to remote memory, while GCs focus on releasing dead, unreferenced objects' memory. AIFM uses referencing counting to free dead objects, avoiding the need for a tracing stage. Instead of inventing a new evacuation algorithm, AIFM borrows ideas from the GC literature and adapts them to far-memory systems. Like GCs, AIFM leverages a read/write barrier to maintain object hotness <ref type="bibr" target="#b4">[5,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b33">34]</ref>, but AIFM uses a one-byte hotness counter instead of a one-bit flag, allowing more fine-grained replacement policies. Like AIFM, some copying collectors optimize data locality by separating hot and cold data during GC, but target different memory hierarchies; e.g., the cache-DRAM hierarchy <ref type="bibr" target="#b33">[34]</ref>, the DRAM-NVM hierarchy <ref type="bibr" target="#b4">[5,</ref><ref type="bibr" target="#b76">79,</ref><ref type="bibr" target="#b77">80]</ref>, and the DRAM-disk hierarchy <ref type="bibr" target="#b13">[14]</ref>. Finally, memory evacuation interferes with user tasks and impacts their performance. To reduce the interference, AIFM adopts an approach similar to the pauseless GC algorithms in managed languages <ref type="bibr" target="#b19">[20]</ref>, as opposed to the stop-the-world GC algorithms <ref type="bibr" target="#b34">[36]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Motivation</head><p>Kernel paging mechanisms impose substantial overheads over the fundamental cost of accessing far memory.</p><p>Consider Figure <ref type="figure">2</ref>, which breaks down the costs of Linux (v5.0.0) retrieving a swapped-out page from an SSD. The device's hardware latency is about 6?s, but Linux takes over 15?s (2.5?) due to overheads associated with locking (P1, P5), virtual memory management (P2, P3, P5), accounting (P4), and read IO amplification (P3). Moreover, due to the high cost of context switches, Linux spins while waiting for data (P3), wasting 11.7?s of possible compute time.</p><p>AIFM, by contrast, provides low-overhead abstractions and an efficient user-space runtime that avoid these costs, bringing its latency (6.8?s) close to the hardware limit of 6?s. We explain these concepts in the next two sections. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">AIFM Design</head><p>The goal of Application-Integrated Far Memory (AIFM) is to provide an easy-to-use, efficient interface for far memory without the overheads of page-granular far memory.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Overview</head><p>AIFM targets two constituencies: application developers and data structure developers. AIFM provides application developers with data structures with familiar APIs, allowing developers to treat these remoteable data structures mostly as black boxes; and AIFM provides simple, but powerful APIs to data structure engineers, allowing them to implement a variety of efficient remoteable memory data structures. Figure <ref type="figure">3</ref> shows a high-level overview of AIFM's design: applications interact with data structures (gray) implemented using primitives and APIs provided by the AIFM runtime (yellow).</p><p>For an application developer, programming applications that use far memory should feel almost the same as programming with purely local data structures. In particular, the developer should not need to be aware of whether an object is currently local or remote (i.e., far memory is transparent), and remoteable memory data structures should offer the same performance as local ones in the common case. For example, idiomatic C++ code for reading several hash table entries and an array element computed from them might look as follows: The remoteable memory data structures themselves (RemHashtable and RemArray above) are written by data structure engineers, who use AIFM's runtime APIs to include remoteable memory objects in their data structures. When memory becomes tight, AIFM's runtime moves some of these memory objects to remote memory; when the data structure needs to access remote objects, the AIFM runtime fetches them. Data structure engineers have substantial design freedom: they can rely entirely on AIFM to fetch remote objects, or they can deploy custom logic on the remote side.</p><p>Remote servers store the actual remote data in their memory, and run a counterpart AIFM runtime, which may call into custom data structure logic. This is helpful, e.g., if the remoteable memory data structure needs to chase pointers, which would otherwise require multiple round-trips.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Remoteable Memory Abstractions</head><p>AIFM is designed around four core abstractions: remoteable pointers, dereference scopes, evacuation handlers, and remote devices. We designed the abstractions such that they impose minimal overheads (as low as three micro-ops) on "hot path" access to local objects, and try to ensure that the "cold path" remote access incurs little latency above hardware limits.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.1">Remoteable Pointers</head><p>A remoteable pointer represents a memory object (i.e., an allocation) that is currently either local, or remote (in "far" memory). AIFM supports unique and shared remoteable pointers, whose interface makes them suitable for use in any place where a data structure would use an ordinary, local pointer.   Memory representation. Unique remoteable pointers, which correspond to C++'s std::unique_ptr, have the same size as ordinary 64-bit pointers, while shared pointers are 128-bits wide (like std::shared_ptr). Figure <ref type="figure" target="#fig_1">4</ref> shows the memory layout of a remoteable unique pointer. Depending on whether a remoteable pointer is local or remote, we adopt a different format. If the memory is local (Figure <ref type="figure" target="#fig_1">4a</ref>), the pointer contains a virtual memory address in its lower 47 bits (enough to represent user-space addresses), and control bits in the upper 17 bits, including standard dirty (D) and present (P) bits (cf. page tables). It also contains bits to track whether the pointer is hot (H) and whether it is being concurrently evacuated (E). For unique pointers, the shared (S) bit is set to 0. We byte-align the D, E, and H bits, allowing each of them to be accessed by mutators and runtime evacuators concurrently and atomically, as a byte is the smallest read/write unit.</p><p>If the memory is remote (Figure <ref type="figure" target="#fig_1">4b</ref>), it contains metadata to assist in retrieving the object from remote memory, such as the data structure ID, the object size, and the object ID. Each data structure instance has a unique data structure ID managed by the runtime. The object ID refers to a data structure-specific object identifier (such as a key in a hash table), which is used by the remote memory server to identify the object.</p><p>AIFM's remoteable shared pointer, which allows pointer aliasing and corresponds to C++'s std::shared_ptr differs from the unique pointer in two ways. First, its S bit is set to 1; and second, the pointer has an additional 8 bytes for chaining the shared pointers to the same object. When AIFM's runtime evacuates the referred object or moves it locally ( ?5.3), it traverses the chain to update all shared pointers. API. Listing 1 shows the API of the remoteable unique pointer (the shared pointer's API is largely identical).</p><p>RemUniquePtr has two constructors: one for already-local objects and one for currently remote objects. The second constructor allows data structures to form remoteable pointers to objects that are currently remote. This helps data structure engineers reference remote objects from their data structures without having to fetch those objects.</p><p>To turn a remote pointer into a local one, the programmer dereferences it via the deref and deref_mut API methods. Dereferencing. When the dereferencing methods are called, the runtime inspects the present bit of the remoteable pointer. If the object is local, it sets the hot bit and returns the address stored in the pointer. Otherwise, the runtime fetches it from the remote server, sets the hot bit and dirty bit (in deref_mut), and returns a local pointer to the data.</p><p>AIFM's hot path for local access is carefully optimized and takes five x86-64 machine instructions: one mov to load the pointer, one andl to check present and evacuating bits, a conditional branch to the cold path if neither is set, a shift (shrq) to extract the object address, and a mov to return it. Modern x86-64 processors macro-fuse the second and third instructions (test and branch), so the hot path requires four micro-ops, a three-micro-op overhead over an ordinary pointer dereference. The cold path is slower, as it calls into the AIFM runtime to potentially swap in a remote object.</p><p>One challenge to making this API work is managing the local lifetime of the dereferenced data: while the application holds a pointer returned from dereferencing a RemUniquePtr, the runtime must never swap out the object. This is hard to achieve in unmanaged languages like C/C++, since after getting the raw address, application code could store it virtually anywhere (e.g., on the heap, stack, or even in registers). The runtime lacks sufficient information to detect whether any such pointer continues to exist, and thus whether the data is still being used. The Boehm garbage collector <ref type="bibr" target="#b12">[13]</ref> tackles a similar reference lifetime problem by scanning the whole address space to find any possible references. Such scans would impose an unacceptable performance overhead for AIFM. Our solution is to instead leverage application semantics to tie the lifetime of the local, dereferenced data to the lifetime of the AIFM's dereference scopes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.2">Dereference Scopes</head><p>Listing 2 demonstrates the usage of DerefScope. Before accessing the remoteable object, the developer must construct a DerefScope. AIFM container's API provides a compile-time check by taking a DerefScope&amp; argument. (This is also why the remoteable pointer has its own dereferencing methods, rather than overloading operator*.)</p><p>Under the hood, DerefScope's constructor creates an evacuation fence, which blocks upcoming evacuations until it is destructed. The lifetime of all local dereferenced data is therefore tied to the scope lifetime. Accessing dereferenced data RemVector&lt;value_t&gt; vec; // ... for (uint64_t i = 0; i &lt; vec.size(); i++) { { DerefScope scope; auto&amp; value = vec-&gt;at(i, scope); // process value } // scope destroyed, can evacuate value's object } Listing 2: AIFM dereference scope example.</p><p>outside the dereference scope is undefined behavior. In the future, AIFM might leverage static analysis to catch lifetime violations, as in the Rust compiler <ref type="bibr" target="#b75">[78]</ref>.</p><p>Our scope API is familiar to C/C++ programmers; it shares similarity with C++11's std::weak_ptr and, e.g., the rcu_reader guard in Facebook's RCU API <ref type="bibr" target="#b25">[26]</ref>. Note that the lifetime of the DerefScope is separate from the lifetime of the remoteable pointer: a remoteable pointer may still be alive even when its data has been swapped to the remote. This is unlike, e.g., std::unique_ptr, where the pointer's destructor terminates the lifetime of the object data.</p><p>Dereference scopes require developers to modify the application code. An alternative API might avoid the need for a dereference scope at the cost of copying the object into local memory on dereference. AIFM's core APIs aim to achieve maximum performance, so we avoid copying by default. The overhead of a copying API is highly application-dependent; our experiments suggest that 3-8% overhead are typical for applications with high compute/memory access ratios.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.3">Evacuation Handlers</head><p>When an object is not protected by a DerefScope, AIFM's runtime may evacuate it to far memory. Evacuation changes the pointer to this object from local to remote status, and future dereferences will cause AIFM to swap the object back in. But some use cases may wish to implement custom behavior on evacuation. For example, when AIFM evacuates an object contained in a hash table, the hash table may register an evacuation handler to remove the key and object pointer to save local space. (In this case, future lookup misses for the key will reconstitute the key and pointer, and add them to the hash table.) AIFM offers evacuation handlers for this purpose, enabling developers to incorporate the data structure semantics into the runtime evacuator.</p><p>Evacuation handlers are also critical for handling embedded remoteable pointers inside objects. For example, data structure engineers can use evacuation handlers to support embedded remoteable unique pointers in objects that are themselves remoteable. When an object is remoted, any embedded remoteable pointers must either be moved to the local heap, or the object it references must be moved to remote memory, and the remoteable pointer must be updated with an identifier to later retrieve the remote object from a remote device ( ?4.2.4). As a result, the evacuator never has to retrieve remote memory // The AIFM runtime will invoke the handler on evacuating // the object to the remote server (phase 4 in Section 5.3). using EvacHandler = std::function&lt; void(Object&amp;, const Runtime::CopyToRemoteFn&amp;)&gt;; // Registers an evacuation handler for a data structure ID. void Runtime::RegisterEvacHandler(DSID id, EvacHandler h); Listing 3: AIFM evacuation handler API.</p><p>to update a remoteable pointer.</p><p>AIFM provides an evacuation handler API (Listing 3). The evacuation handler gets invoked on evacuating the object to the remote server (phase 4 in ?5.3), right before the runtime frees the object's local memory. The runtime passes two arguments to EvacHandler-the object to be evacuated and the function that triggers the runtime to copy the object to the remote side. The first argument allows the handler to mutate the object data before copying (e.g., modify the state of its embedded pointers) and further cleanup the local data structure after copying (e.g., remove its pointer from the hash table index). The second argument offers the flexibility in the timing of copying the object to remote.</p><p>Data structure developers register their evacuation handlers by invoking RegisterEvacHandler. An evacuation handler is tied to a unique data structure ID, which each data structure allocates in its constructor, and which data structure engineers must use consistently. This way, different data structures or instances of the same data structure coexist in the same application, while the runtime invokes the appropriate handler.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.4">Remote Devices</head><p>AIFM's RemDevice provides functionality at the remote memory server (Listing 4). The remote device, by default, uses a key-value store abstraction: when the client dereferences a remote pointer, the runtime sends the data structure ID and object ID to the remote server, which looks up the object by data structure ID and object ID, and sends the object data back. When evacuating an object, the runtime sends IDs and object data to the remote server, which inserts the object.</p><p>AIFM also gives datastructure engineers the flexibility to override this default behavior to integrate custom active components at the remote server. This is accomplished by registering their implementation on their own data structure type to the remote device (register_active_component). A custom active component is especially beneficial when the application's compute intensity is low, as this setting often makes it more efficient to perform operations on remote memory than paying the cost of bringing the objects into local memory. After registering the active component at the remote, data structure engineers invoke RemDevice's client-side bindings to interact with the remote components. They use construct and destruct to instantiate and destroy remote components. If an object is not present when dereferencing a remote pointer, the runtime invokes the read_obj to swap in the missing object. On evacuation, the evacuator invokes write_obj to swap out cold objects and delete_obj to release dead objects. In Listing 4: AIFM remoteable device API. addition, the compute method invokes a custom function, executing a lightweight computation on the remote server. This is useful, for example, for efficiently aggregating a sum across objects in a data structure without wasting network bandwidth to bring all objects into local memory first.</p><p>We implemented remote active components to improve the performance of hashtables ( ?8.2.1) and DataFrames ( ?8.1.2).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.5">Semantic Hints AIFM's APIs allow injecting information about applicationand object-specific semantics into the runtime.</head><p>Hotness tracking. To dereference a remoteable pointer, the user invokes our library, which sets the hot bit of the pointer. Under memory pressure, the memory evacuator uses this hotness information to ensure that frequently accessed objects are local. On evacuation, the evacuators clear the hot bit. AIFM initialization allows developers to customize the number of hot bits to use in the pointer (up to eight) and the replacement policy by data structure ID. With several hot bits, AIFM supports, e.g., a CLOCK replacement policy <ref type="bibr" target="#b69">[72]</ref>.</p><p>Prefetching. AIFM includes a library that data structures can use to maintain a per-thread window of the history of dereferenced locations and predict future accesses using a finite-state machine (FSM). It updates the window and the FSM on each dereference. The FSM detects patterns of sequential access and strided access. When a pattern is detected, it starts prefetcher threads that swap in objects from the remote server. With enough prefetching, application threads always access local memory when dereferencing remoteable pointers. The library estimates the prefetch window size conservatively using the network bandwidth-delay product. Data structure engineers can also add custom prefetching policies.</p><p>Nontemporal Access 1 . For remoteable pointers to objects without temporal locality, it makes sense to limit the local memory used to store their object data. This avoids polluting local memory, which multiple data structures may share, with data that a data structure engineer knows is unlikely to be accessed again. To achieve this, AIFM's pointer API supports non-temporal dereferences (Listing 5). This immediately marks the object pointed to by rmt_ptr as reclaimable, though the actual evacuation happens only after the DerefScope scope; // non-temporal dereference ? allows immediate reclaim T* p1 = rmt_ptr1.deref_mut&lt;true&gt;(scope); // temporal deref; deref_mut(scope) works too T* p2 = rmt_ptr2.deref_mut&lt;false&gt;(scope);</p><p>Listing 5: Non-temporal and temporal dereferences.</p><p>DerefScope ends. Without a hint, a dereference is temporal by default; ?8.1.1 evaluates the benefit of the hint.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">AIFM Runtime</head><p>AIFM's runtime is built on "green" threads (light-weight, user-level threading), a kernel-bypass TCP/IP networking stack, and a pauseless memory evacuator. Applications link the runtime into their user-space process. This allows us to co-design the runtime with AIFM's abstractions and provides high-performance far memory without relying on any OS kernel abstractions.</p><p>Two high-level objectives guide our runtime design: (i) the runtime should productively use the cycles spent waiting during the inevitable latency when fetching objects from remote memory; and (ii) application threads should never have to wait for the memory evacuator.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Hiding Remote Access Latency</head><p>We want to hide the latency of fetching data from far memory by doing useful work during the fetch.</p><p>Existing OS kernel threads pay high context-switching costs: e.g., on Linux, rescheduling a task takes around 500ns. These costs are a nontrivial fraction of remote memory latency, so Linux and Fastswap adopt a design where they busy-spin while waiting for a network response <ref type="bibr" target="#b5">[6]</ref>. This avoids contextswitch overheads, but also wastes several microseconds of processing time. This approach also places tremendous pressure on network providers to support even lower latency to reduce the amount of wasted cycles <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b27">28]</ref>. AIFM takes a different approach: it relies on low-overhead green threads to do application work while waiting for remote data fetches.</p><p>Consistent with literature on garbage collection (GC), we refer to normal application threads as mutator threads in the following. Each mutator thread accesses far memory, blocking whenever it needs to fetch a remote object. When that happens, another mutator thread can run and make productive use of available CPU cycles. Moreover, AIFM's runtime spawns prefetcher threads to pull in objects that it predicts will be dereferenced in the future, allowing it to avoid blocking mutator threads when the predictions are correct.</p><p>Using green threads, AIFM tolerates network latency without sacrificing application-level throughput, wasting fewer cycles than systems that busy-poll for network completion.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Remoteable Memory Layout</head><p>For the local memory managed by AIFM, its runtime embraces the idea of log-structured memory <ref type="bibr" target="#b61">[63]</ref>, which splits There are three global lists: a free list, a temporal used list, and a non-temporal used list. Each list stores many logs, and each log stores many objects. There is a per-core allocation buffer (PCAB) that keeps two free logs to allocate new objects, one log for temporal objects, the other for non-temporal ones.</p><p>and manages the local remoteable memory in the granularity of logs (Figure <ref type="figure" target="#fig_2">5</ref>). The log size is 2MB, which helps reduce TLB misses by allocating huge pages. The runtime maintains three global lists: a free list, a non-temporal used list, and a temporal used list. Each list stores many logs. For core scalability, each core owns two logs for new allocations: one log for temporal objects, the other for non-temporal ones. The logs are kept in a per-core allocation buffer (PCAB). To allocate an object, the runtime first tries to allocate from a log in the PCAB. If that log runs out of space, the runtime appends the log to the global non-temporal or temporal used list, and obtains a new log from the global free list. To free an object, the runtime marks the object as free. AIFM leverages a markcompact evacuator to achieve a low memory fragmentation ratio, as shown with other copying log allocators <ref type="bibr" target="#b61">[63]</ref>.</p><p>A log has a 1B header indicating whether it stores nontemporal or temporal data. The remaining space stores objects. Each object has a Hdr Len bytes header and a Data Len bytes data. The 6-byte Head Ptr Addr stores the address of the remoteable pointer that points to the object. For a unique pointer, Head Ptr Addr stores the address of the only pointer; for a shared pointer, it stores the address of the first shared pointer in the chain. Dead objects have Head Ptr Addr set to nullptr. The variable-sized Object ID stores the object's unique identifier. The header is used on evacuation, when the runtime passes the object ID to write/delete endpoints on the remote device and the remoteable pointer address to the evacuation handler, and when the runtime swaps in an object and passes the object ID to the remote device.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Pauseless Memory Evacuator</head><p>Upon memory pressure, the runtime's memory evacuator moves cold objects to the remote server. Like with many garbage collectors in managed languages, a key feature of AIFM is to allow mutator threads to run concurrently while the runtime evacuates local memory. The evacuator executes four phases in sequence, described in the following paragraphs. To ensure correctness under race conditions, the evacuator maintains an invariant: it only starts to move object O after setting the mutator-side synchronization barrier on accessing O. The evacuator sets the barrier by setting the pointer evacuation bit (phase 2). The RCU writer wait (phase 3) ensures all mutators have observed the set bits to enforce the timing order in the invariant.</p><p>1. Log Selection Phase. The goal of the evacuator is to maintain the local free memory ratio above the min_free_ratio (0.12 by default). The master thread of the evacuator picks total_log_cnts?(current_free_ratio-min_free_ratio) of logs to be evacuated. The evacuator picks logs in FIFO order from the global non-temporal used list, and then picks from the global temporal used list if necessary, to prioritize nontemporal objects. AIFM could also use more sophisticated schemes, e.g., prioritizing logs by occupancy and age <ref type="bibr" target="#b22">[23]</ref>.</p><p>2. Concurrent Marking Phase. The master evacuation thread spawns worker threads and divides the previouslyselected logs among them. Each worker thread iterates through the objects in its logs to find live objects. For each such object, the worker sets the evacuation bit of all remoteable pointers of the object by traversing the pointer chain starting from the head pointer address (i.e., the Head Ptr Addr field). This marks the object for evacuation.</p><p>3. Evacuator Waiting Phase. The runtime can evacuate objects only when they are not being dereferenced by mutator threads. Rather than following a naive approach of having mutators and the evacuator to acquire a per-object lock-which would impose high overhead on the hot path of mutators accessing local objects-AIFM uses an approach inspired by read-copy-update (RCU) synchronization. AIFM's runtime treats mutators as RCU readers and the evacuator master thread as an RCU writer, thereby moving the synchronization overhead to the evacuator. This choice makes sense because (i) the mutators do application work, so AIFM should steer overhead away from them; and (ii) evacuation is a rare event. The result is that the evacuator master thread waits for a quiescent period to ensure all mutator threads have witnessed the newly-set evacuation bits.</p><p>If a mutator thread subsequently dereferences a pointer to an object that the runtime is evacuating, the mutator sees that the evacuation bit is set. A naive approach would now block the mutator thread while the evacuation bit is set. Instead, AIFM opts for an approach that avoids such pauses: the mutator copies the object to another log in its PCAB, and then executes a compare-and-swap (CAS) on the head remoteable pointer (which serves as a synchronization point) to simultaneously clear the evacuation bit, set the present bit, and set the new data location. This CAS will race with the evacuator (see next phase below). If the CAS succeeds, the mutator copied an intact object, so it obtains a local reference. The mutator then updates all pointers in the pointer chain with the head pointer metadata and continues executing. If the CAS fails, the evacuator has already changed the remoteable pointer to remote status, so the mutator's copy of the object may be corrupt. Consequently, the mutator frees the copy it made and obtains a remote reference.</p><p>4. Concurrent Evacuation Phase. The master thread spawns more worker threads to evacuate objects and run their evacuation handlers. Again, the master divides the previously selected logs among the workers. Each worker iterates through each log and each object within the log. For each cold object, the worker copies the object to the remote and executes a CAS on the head remoteable pointer to simultaneously clear the presence bit and set the remote pointer metadata. If the CAS succeeds, the object has been evacuated, and the worker updates all pointers in the pointer chain with the head pointer metadata and invokes the evacuation handler. Otherwise, a mutator thread succeeded with a racing CAS and has copied the object to another location. Either way, the log entry is now unused and reclaimable. For each hot object, the worker compacts and copies it into a new log, updates the object address in the remoteable pointers, and resets the hot bits.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Co-design with the Thread Scheduler</head><p>Evacuation is an urgent task when the runtime is under memory pressure. With a naive thread scheduler, evacuation can be starved by mutator threads, leading to out-of-memory errors and application crashes. There are two challenges that we need to address. First, a large number of mutator threads may allocate memory faster than evacuation can free memory. Second, evacuation sometimes blocks on mutator threads in a dereference scope, and this creates a dilemma. On one hand, the scheduler needs to execute mutator threads so they can unblock evacuation. On the other hand, executing mutator threads may consume more memory.</p><p>To address these issues, we co-design the runtime's green thread scheduler with AIFM to prioritize the activities necessary for evacuation, both in mutator threads and evacuation threads. First, each thread keeps a status field that is set by the AIFM runtime and read by the scheduler, which allows the scheduler to know whether a thread is in a dereference scope. The scheduler runs a multi-queue algorithm and assigns the first priority to mutators in a dereference scope, second priority to evacuation threads, and third priority to other mutator threads. Second, to avoid priority inversion <ref type="bibr" target="#b40">[42]</ref> when the system is short of memory, the allocation function in the AIFM runtime triggers a signal to all running threads to force them to yield their cores back to the scheduler for re-scheduling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Remoteable Data Structure Examples</head><p>We implemented six remoteable AIFM data structures.</p><p>Array. The remoteable array consists of a native array of RemUniquePtrs. Each pointer points to an array element to enable fine-grained data placement decisions. Alternatively, users can configure the pointed object as multiple consecutive array elements to reduce the memory overhead of pointer metadata. The object IDs of pointers are their remote-side object addresses. The prefetcher records accessed indices at all array access APIs; it starts prefetching when detecting a strided access pattern.</p><p>Vector. The remoteable vector is similar to the remoteable array except that it is dynamically sized, and uses a std::vector to store RemUniquePtrs. Additionally, the vector has an active remote component that supports offloading operations like copies and aggregations, which are used by the DataFrame application ( ?8.1.2).</p><p>List. The remoteable list is similar to the remoteable vector, except that it uses a local list that stores RemUniquePtrs to support efficient insert and erase operations. The list supports traversals in forward and reverse directions, which offers strong semantic hints to the prefetcher. When detecting a direction, the prefetcher walks through the local list in the same direction to prefetch remote list objects.</p><p>Stack and Queue. The remoteable stack and queue are simple wrappers around remoteable lists.</p><p>Hashtable. The remoteable hashtable consists of a table index (stored on the local heap) and key-value data (stored in AIFM's remoteable heap). In the index, each hash bucket stores a RemUniquePtr to a key-value object. The object IDs of pointers are their hashtable keys. The hashtable has an active remote component that maintains a separate hashtable in remote memory. In this architecture, the local hashtable is a cache (inclusive or exclusive) of its remote counterpart. When the referenced object is missing from the local cache, the active remote component assists the chain lookup at the remote hashtable to avoid multiple network round-trips. Data structure engineers might also realize different hashtable designs via AIFM's APIs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Implementation</head><p>AIFM's implementation consists of the core runtime library ( ?5) and the data structure library ( ?6). The core runtime is built on top of Shenango <ref type="bibr" target="#b53">[55]</ref> to leverage its fast user-level threading runtime and I/O stack. AIFM is written in C and C++, with 6,451 lines in the core runtime, 5,535 lines in the data structure library, and 750 lines of modifications to the Shenango runtime. The system runs on unmodified Linux.</p><p>We integrated two far memory backends into AIFM: a remote memory server based on a DPDK-based TCP stack, and an NVMe SSD using an SPDK-based storage stack. Unlike the remote memory backend, the SSD backend does not support active remote components (since the storage drive does not have a general compute unit), and it has an inherent I/O amplification because it is limited to a fixed block size. Our evaluation focuses on the remote memory backend.</p><p>The current implementation has some limitations. First, we do not support TCP offloading or RDMA, which would reduce CPU overhead of our runtime. Second, a local compute server connects to a single remote memory server, and the remote memory cannot be shared by different clients. Finally, the local and remote memory size cannot be changed at runtime. We plan to address them in the future.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">Evaluation</head><p>Our evaluation of AIFM seeks to answer three questions:</p><p>1. What performance does AIFM achieve for end-to-end applications, including ones that combine multiple remoteable data structures? ( ?8.1) 2. How does AIFM's performance compare to a state-ofthe-art far memory system, Fastswap <ref type="bibr" target="#b5">[6]</ref>? ( ?8.1- ?8.2) 3. What factors contribute to AIFM's performance? ( ?8.3)</p><p>Setup. We run experiments on two xl170 nodes on Cloud-Lab <ref type="bibr" target="#b24">[25]</ref> with 10-core Intel Xeon E5-2640 v4 CPUs (2.40 GHz), 64GB RAM, and a 25 Gbits/s Mellanox ConnectX-4 Lx MT27710 NIC. We enabled hyper-threads, but disabled CPU C-states, dynamic CPU frequency scaling, transparent huge pages, and kernel mitigations for speculation attacks in line with prior work <ref type="bibr" target="#b53">[55]</ref>. We use Ubuntu 18.04.3 (kernel v5.0.0) and DPDK 18.11.0, except for experiments with Fastswap, which use Linux kernel v4.11, the latest version Fastswap supports. All AIFM experiments use the default configuration settings and the default built-in prefetchers of remoteable data structures. We do not tune prefetching policy specifically for evaluated applications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.1">End-to-end Performance</head><p>We evaluate AIFM's end-to-end performance with two applications. First, we designed a synthetic application that mimics a typical web service frontend to understand AIFM's performance with multiple remoteable data structures and the impact of semantic hints. Second, we also ported an open-source C++ DataFrame library <ref type="bibr" target="#b15">[16]</ref> with an interface similar to Pandas <ref type="bibr" target="#b54">[56]</ref> to AIFM, and use it to understand the porting effort required and AIFM's performance for an existing application.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.1.1">Synthetic Web Service Frontend</head><p>In response to client requests, the application fetches structured data (e.g., a list of user IDs) from an in-memory keyvalue store, and then uses the retrieved values to compute an index into a large collection of 8KB objects (e.g., profile pictures). Finally, the application fetches one 8KB object, encrypts it, and compresses it for the response to the client. This application uses our remoteable hashtable (for the keyvalue pairs) and our remoteable array (for the 8KB objects). Each client request looks up 32 keys in the hashtable and fetches a single 8KB array element. We load the hashtable with 128M key-value pairs (10GB total data, of which 6GB are index data and 4GB are value data), and create an array of 2M objects of 8KB each (16GB total). The two data structures share 5GB of available local memory, i.e., the local memory size is 19% of the total data set size. We generate closed-loop client requests from a Zipf distribution with parameter s: a uni-  form distribution corresponds to s = 0, while values of s close to 1 indicate high skew. Each request accesses Zipf-distributed keys in the hashtable and uses their values to calculate an (also Zipf-distributed) array index to access; the request then encrypts the array data via AES-CBC using crypto++ <ref type="bibr" target="#b21">[22]</ref> and compresses the result using Snappy <ref type="bibr" target="#b29">[30]</ref>. We compare two AIFM settings-with and without non-temporal dereferences for array elements-against Fastswap <ref type="bibr" target="#b5">[6]</ref> and an idealized baseline with all 26GB in local memory. A good result for AIFM would show improved performance over Fastswap, a benefit to non-temporal array accesses, and performance not much lower than keeping the entire data in local memory.</p><p>Figure <ref type="figure" target="#fig_4">6a</ref> shows a throughput-latency plot for a Zipf parameter of s = 0.8 (i.e., a skewed distribution). The x-axis shows the offered load in the system, and the y-axis plots the measured 90 th percentile latency. Each setup eventually encounters a "hockey-stick" when it can no longer keep up with the offered load. Fastswap tolerates a load of up to 19k requests/second, but its overheads and the amplification for the hashtable lookups quickly dominate. AIFM with a temporal array dereference scales 7? further, but fails to keep up beyond 140k requests/second because the 8KB array accesses pollute its local memory. To make room for an 8KB array element, the runtime often evicts hundreds of hashtable entries, causing a high miss rate on hashtable lookups. AIFM with non-temporal access to the array, however, scales to 370k requests/second (20? Fastswap's maximum throughput). This is 16% lower throughput than the 440k requests/second achieved by an idealized setup with 26GB in local memory. In other words, AIFM achieves 84% of the performance of an entirely local setup with 5? less local memory.</p><p>Additional local memory helps bring AIFM performance closer to the in-memory ideal. Figure <ref type="figure" target="#fig_4">6b</ref> shows the percentage of the all-local memory throughput achieved by the nontemporal version of AIFM when varying the local memory size (on the x-axis, as a fraction of 26GB). While Fastswap's throughput starts near zero and grows roughly in proportion to the local memory size, AIFM's throughput starts at 30% of the ideal and quickly reaches 85% of the in-memory throughput at 5.0GB local memory (20% of 26GB).</p><p>Figure <ref type="figure" target="#fig_4">6c</ref> illustrates why this happens. At the left-hand side of the plot (5% local memory), AIFM sees high miss rates in both hashtable (52%) and array (89%). But as local memory grows, the hashtable miss rate quickly drops to nearzero, since AIFM's non-temporal dereferences for the array ensure that most of the local memory is dedicated to hash table entries. Correspondingly, the array miss rate drops more slowly and in proportion to the local memory available. By contrast, Fastswap (not shown here) has high miss rates in both data structures, as its page-granular approach manages local memory inefficiently.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.1.2">DataFrame Application</head><p>The DataFrame abstraction, popularized in Pandas <ref type="bibr" target="#b54">[56]</ref>, provides a convenient set of APIs for data science and ML workloads. A DataFrame is a table-structured, in-memory datastructure exposing various slicing, filtering, and aggregation operations. DataFrames often have hundreds of columns and millions of rows, and their full materialization in memory often pushes the limits of available memory on a machine <ref type="bibr" target="#b52">[54,</ref><ref type="bibr" target="#b55">57,</ref><ref type="bibr" target="#b58">60]</ref>. By making remote memory available, AIFM can help data scientists interactively explore DataFrames without worrying about running out of memory.</p><p>We ported a popular open-source C++ DataFrame library <ref type="bibr" target="#b15">[16]</ref> to AIFM's APIs. The primary data structure used in the library is an std::vector storing DataFrame columns and indexes, and we replaced this vector with the AIFMenabled equivalent. In addition, we also added support for offloading key operations with low compute intensity but high memory access frequency to the remote side. We achieve this by offloading three operations using AIFM's remote device  <ref type="table" target="#tab_5">1</ref>). To achieve coverage sufficient to run the New York City taxi trip analysis workload <ref type="bibr" target="#b51">[53]</ref>, we modified 1,192 lines of code in the DataFrame library (which has 24.3k lines), and wrote 233 lines of remote device code. These modifications took one author about five days. We benchmark our AIFM-enabled DataFrame with the Kaggle NYC taxi trip analysis workload <ref type="bibr" target="#b51">[53]</ref>, which explores trip dimensions including the number of passengers, trip durations, and distances, on the NYC taxi trip dataset <ref type="bibr" target="#b71">[74]</ref> (16GB). The workload's full in-memory working set is 31GB. In the experiment, we vary the size of available local memory between 1GB and 31GB. We compare AIFM with Fastswap and a baseline with all data in local memory. In addition, we also investigate the impact of offloading on this workload, which consists of an operation with low compute intensity (Aggregate in Table <ref type="table" target="#tab_5">1</ref>) and some pure memory-copy operations (Copy and Shuffle). We would hope to find AIFM outperform Fastswap and come close to the local memory baseline.</p><p>Figure <ref type="figure">7</ref> shows the results. AIFM achieves 78% of inmemory throughput even with 1GB of local memory (3.2%) and exceeds 95% of ideal performance from about 20% (6GB) local memory. Fastswap, by contrast, achieves only 20% of inmemory performance at 1GB and only comes close to it once  <ref type="table" target="#tab_5">1</ref>. AIFM benefits most from offloading Copy, which increases throughput by 18-38%. over 90% of the working set are in local memory. AIFM's high performance comes from avoiding Fastswap's page fault overheads, and from reducing expensive data movements over network by offloading operations with low compute intensity. Without offloading, AIFM outperforms Fastswap until 60% of the working set are local, as Fastswap incurs frequent minor faults. Beyond 60%, the fault rate in Fastswap drops sufficiently for most memory accesses to outperform AIFM's dereference-time overhead for low compute intensity operations (e.g., memory copies). Offloading these operations to the remote side helps AIFM avoid this cost, while high compute-intensity operations amortize the dereference cost and happen locally. We also prototyped a batched API for AIFM that amortizes the dereference overhead across groups of vector elements when offloading is not possible, and found that it improves AIFM's throughput without offloading to 60-80% of in-memory throughput. We believe this could make a good future addition to AIFM's API to speed up low compute intensity operations if they must be performed locally.</p><p>Figure <ref type="figure" target="#fig_5">8</ref> breaks down the effect of offloading. Offloading Copy contributes the largest throughput gains (18%-38%); offloading shuffle contributes 2.9%-13%; and offloading Aggregate contributes 4.5%-12%. These results show that AIFM achieves high performance with small local memory for a real-world workload, and that AIFM's operation offloading is crucial to good performance when a workload includes operations with low compute intensity.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.2">Data Structures</head><p>We pick two representative data structures-the hashtable and the array-from ?6. We evaluate them in isolation, and explore the impact of prefetching, non-temporal local storage, and read/write amplification-reducing techniques.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.2.1">Hashtable</head><p>Hash tables provide unordered maps that typically see random accesses, often with high temporal locality. A remoteable hash table should benefit from temporal caching of popular key-value (KV) pairs in local memory. Note that with AIFM, the caching policy is controlled by the data structure engi- neer, while with Fastswap (or any swap-based far memory system), the caching policy is determined by the kernel pagereclamation policy, which in turn is based on page-granular hotness information.</p><p>Comparison. We evaluate the hashtable over Fastswap and AIFM with a memcached-style workload that issues GET requests, with keys sampled from a Zipf distribution whose parameter s we vary. Our key and value sizes are based on those reported for Facebook's USR memcached pool <ref type="bibr" target="#b7">[8]</ref>. We load the hash table with 128M KV pairs (10GB total data), and compare performance to a baseline that keeps the entire hash table in local memory. Fastswap and AIFM instead allow a maximum of 5GB local data, split as follows. In Fastswap, the OS manages the both hashtable index (6GB) and value data (4GB) in swapable memory, with least recently used (LRU) <ref type="bibr" target="#b74">[77]</ref> eviction at page granularity to decide on remote pages. In AIFM, we provision 3GB local memory region for index data and the other 2GB local memory region for value data; the runtime manages them separately. The hashtable's own object-granular CLOCK replacement algorithm guides AIFM's memory evacuator to pick KV pairs to evict to remote memory. In this experiment, we use a hashtable configured as an exclusive cache, i.e., the evacuation handler removes local index entries for remote key-value pairs.</p><p>Figure <ref type="figure">9</ref> shows the throughput achieved as a function of the Zipf parameter s, ranging from near-uniform at zero to highly skewed at s = 1.35. AIFM achieves about 17M operations/second at low skew (? 60% miss rate at s = 0), about one third of the 53M operations/second that a fully-local hash table achieves. As skew increases and the miss rate drops, AIFM comes closer to local-only performance: for example, at s = 0.8 (1% miss rate), it reaches 57M operations/second; and from s = 0.8, it matches the performance of the local-only hashtable. Fastswap, by contrast, sees a throughput of 0.54M operations/second at s = 0 (30? less than AIFM) and only matches the local-only baseline beyond s = 1.3. At s = 0.8, AIFM has its largest advantage over Fastswap (61?).  This difference comes from three factors against Fastswap: (i) amplification due to page-granular swapping, (ii) lack of per-KV pair hotness information, and (iii) the overheads of kernel paging. Since a page contains 128 key-value pairs, page-granular swapping incurs up to 128? read and write amplification. This amplification increases the network bandwidth required and pollutes the local memory, increasing Fastswap's miss rate with identical memory available. For example, at s = 1.25, Fastswap still uses 140MB/s of network bandwidth, while AIFM's bandwidth use rapidly drops beyond s = 0.8. Fastswap also cannot swap out only cold key-value pairs, as a page contains entries with varying hotness, but the kernel tracks access only at page granularity. Finally, Fastswap incurs the cost of kernel crossings, page faults, identifying and reclaiming victim pages (38% of cycles at s = 0.8) and wasted cycles waiting for I/O (49%). AIFM's overheads are limited to running the evacuator (0.8% of cycles at s = 0.8), TCP stack overheads (1.7%), and thread scheduler overhead (14%).</p><p>Microbenchmarks. Figure <ref type="figure" target="#fig_7">10a</ref> shows how hash table performs at different miss rates when requests are uniformly, rather than Zipf-distributed. It achieves a best-case throughput of 53M requests/second, reduced to 10M requests/second when it is close to 100% miss rate. Figure <ref type="figure" target="#fig_7">10b</ref> measures, for the same uniform distribution and an 80% miss rate, the throughput AIFM achieves with an increasing number of application threads. Up to 160 threads, AIFM extracts more throughput by scheduling additional requests while it waits for requests to complete.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.2.2">Array</head><p>Depending on the access pattern, an array may benefit from caching (for random access with temporal locality), prefetching (for sequential access), and non-temporal storage (if there is no temporal locality).</p><p>We evaluate our array with the Snappy library <ref type="bibr" target="#b29">[30]</ref>. The benchmark performs in-memory compression/decompression by reading input files from a RemArray and writing output files to another RemArray. For benchmarking compression, we use 16 input files of 1GB each. For decompression, we use  30 input files of 0.5GB each. The compression ratio is around 2. Both operations perform streaming, sequential access to the array and never revisit any object. We compare Fastswap and an ideal, completely local in-memory baseline.</p><p>AIFM's array prefetcher captures application semantics through the array access APIs and performs prefetching entirely in user space. OS-based paging systems, by contrast, must rely on page faults (major faults for unprefetched pages and minor faults for prefetched pages) to pass application semantics, which imposes high overheads. For each system, we measure performance with different amounts of local memory available (for Fastswap, we restrict memory via cgroups; for AIFM, we set the local memory size). A good result would avoid AIFM's slow path, as every far pointer dereference would find local data already.</p><p>Figure <ref type="figure" target="#fig_9">11</ref> shows the results. We see that AIFM achieves performance close to the in-memory baseline, independent of the local memory size, while Fastswap's performance depends on local memory size and only matches AIFM when nearly all memory is local. This demonstrates the benefit of AIFM's non-temporal access and prefetching.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.3">Design Drill-Down</head><p>We now evaluate specific aspects of the AIFM design using microbenchmarks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.3.1">Fast/Slow Path Costs</head><p>AIFM seeks to provide access to local objects with latency close to normal memory access. This means that AIFM's remoteable pointer must minimize overheads on the "fast path", when no remote memory access is required.</p><p>We measured the hot path latency of dereferencing a</p><p>RemUniquePtr and compared it to the latency for dereferencing a C++ unique_ptr, both when the pointer and data pointed to are cached and uncached. Figure <ref type="figure" target="#fig_10">12a</ref> shows that AIFM offers comparable latency to an ordinary C++ smart pointer. For an object in L1 cache, AIFM has a 4? latency overhead: four micro-ops vs. a single pointer dereference operation. In practice, modern CPU's instruction-level parallelism  hides some of this latency, and we observe a 2? throughput overhead for L1 hits. We also measured AIFM's cold path latency, and compared it to Fastswap's. Fastswap always fetches at least 4KB from the remote server, but its RDMA backend is faster than AIFM's TCP backend. This might amortize some of the overheads associated with page-granular far memory that Fastswap suffers from. A good result would show AIFM with comparable latency to Fastswap for large objects (4KB), and lower latency for small objects (64B).</p><p>Figure <ref type="figure" target="#fig_10">12b</ref> shows the results. While Fastswap's raw data transfers are indeed faster than AIFM's, AIFM achieves lower latency for cache-line-sized (64B) objects due to its 10? lower overheads. For 4KB objects, AIFM is close to Fastswap, but has 10% higher latency on reads; AIFM with an RDMA backend would come closer. In addition, AIFM can productively use its wait cycles, which yields a 1.8-6.8? throughput increase over Fastswap (Figure <ref type="figure">1</ref>).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.3.2">Operating Point</head><p>AIFM is designed for applications that perform some compute for each remoteable data structure access, as this compute allows AIFM to hide the latency of far memory by prefetching. But if an application has a huge amount of compute per data structure access, AIFM will offer limited benefit over pagegranular approaches like Fastswap, despite their overheads. We ran a sensitivity analysis with a synthetic application that spins for a configurable amount of time in between sequential accesses into a remoteable array. This should allow AIFM's prefetcher to run ahead and load successive elements before they are dereferenced. We compare to Fastswap, which we configure with the maximum prefetching window (32 pages).</p><p>Figure <ref type="figure">13</ref> shows the results, normalized to the benchmark runtime against a purely in-memory array. AIFM becomes competitive with local memory access from about 1.2?s of compute between array accesses. Fastswap's overheads amor-  tize more slowly-its line converges with AIFM's around 50?s of compute per array access. This demonstrates that AIFM supports efficient remote memory in a wider range of applications than page-granular approaches like Fastswap.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.3.3">Memory Evacuator</head><p>We evaluate two key aspects of AIFM's memory evacuator design: the choice to never pause mutator threads ( ?5.3) and the thread scheduler co-design ( ?5.4).</p><p>Pauseless Evacuation. In this experiment, we run 10 mutator threads (the number of physical CPU cores in our machine) that keep entering the dereference scope, dereferencing and marking dirty 4MB of data each time. Therefore, the runtime periodically triggers memory evacuation. We compare AIFM's pauseless evacuator design to a stop-the-world memory evacuator, and measure the latency per mutator iteration (4MB write). Figure <ref type="figure" target="#fig_1">14</ref> shows that a stop-the-world evacuator design causes periodic mutator latency spikes up to 340ms. By contrast, AIFM's pauseless evacuator consistently runs an iteration in about 25ms. (The tiny spikes of the pauseless line are mainly caused by hyperthread and cache contention between evacuators and mutators.) This confirms that a pauseless evacuator is essential to consistent application performance. Figure <ref type="figure" target="#fig_2">15</ref>: Thread prioritization in the runtime is essential to ensure that evacuation always succeeds. 12% free memory is the threshold for AIFM to trigger evacuation.</p><p>Thread Scheduler Co-design. In this experiment, we run 100 mutator threads that each iterates to read 1MB of data from a remoteable array and perform 20ms of computation. We run AIFM with the scheduler's thread prioritization ( ?5.4) enabled and disabled, and measure the free local memory over time. For a responsive system, local memory should never run out entirely, and the evacuator should be able to free memory fast enough to keep up with the mutators. Figure <ref type="figure" target="#fig_2">15</ref> shows that the runtime without prioritization fails to keep up and runs out of memory after around 0.7 seconds. AIFM's prioritizing scheduler, on the other hand, ensures that sufficient memory remains available. This illustrates that the benefit of co-locating thread scheduler and memory evacuator in a user-space runtime.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9">Conclusion</head><p>We presented Application-Integrated Far Memory (AIFM), a new approach to extending a server's available RAM with high-performance remote memory. Unlike prior, kernel-based, page-granular approaches, AIFM integrates far memory with application data structures, allowing for fine-grained partial remoting of data structures without amplification or high overheads. AIFM is based on four key components: (i) the remote pointer abstraction; (ii) the pauseless memory evacuator; (iii) the data structure APIs with rich semantics; (iv) and the remote device abstraction. All parts work together to deliver high performance and convenient APIs for application developers and data structure engineers.</p><p>Our experiments show that AIFM delivers performance close to, or on par with, local DRAM at operating points that prior far memory systems could not efficiently support.</p><p>AIFM is available as open-source software at https:// github.com/aifm-sys/aifm.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>( b )</head><label>b</label><figDesc>Remote (swapped-out) object. DS ID means data structure ID.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Remoteable unique pointer representations for local and remote objects. AIFM inverts the H/P/D bit meaning (0 = hot/present/dirty) for a more efficient hot path execution.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: The layout of local remoteable memory in AIFM.There are three global lists: a free list, a temporal used list, and a non-temporal used list. Each list stores many logs, and each log stores many objects. There is a per-core allocation buffer (PCAB) that keeps two free logs to allocate new objects, one log for temporal objects, the other for non-temporal ones.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head></head><label></label><figDesc>AIFM miss rates in Figure6b.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: In a web frontend-like application with a hashtable and array, AIFM outperforms Fastswap by 20? (a) and achieves 90% of local memory performance with 5? less memory (b), as non-temporal array access avoids polluting local memory (c). "AIFM(NT)": non-temporal access; "AIFM(T)": temporal access; "Local Only": entire working set in local memory.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 8 :</head><label>8</label><figDesc>Figure8: Performance gains from offloading the operations in Table1. AIFM benefits most from offloading Copy, which increases throughput by 18-38%.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head></head><label></label><figDesc>GET throughput as a function of thread count (80% miss rate).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: AIFM hash table microbenchmarks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 11 :</head><label>11</label><figDesc>Figure11: AIFM achieves nearly identical performance to local memory when compressing/decompressing an array with Snappy<ref type="bibr" target="#b29">[30]</ref> (sequential access), and outperforms Fastswap.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: AIFM is competitive with an ordinary pointer dereference, and it has lower overheads than Fastswap.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 13 :Figure 14 :</head><label>1314</label><figDesc>Figure13: AIFM becomes competitive with local memory access at around 1.2?s of compute per sequential far memory access (4KB object) in a microbenchmark, while kernel-based swapping mechanisms require higher compute ratios (ca. 50?s per memory access; not shown) to compete.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0"><head></head><label></label><figDesc></figDesc><graphic url="image-1.png" coords="1,-9.00,-10.01,630.00,255.87" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0"><head></head><label></label><figDesc></figDesc><graphic url="image-2.png" coords="1,-9.00,543.00,630.00,259.01" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 1 :</head><label>1</label><figDesc>DataFrame APIs (rows) and the offloaded operations they use via AIFM's remote device API (columns). Copy and Shuffle are memory-only operations, while Aggregate performs light remote-side computation.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">Offloaded Rem. Dev. Operations</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Copy</cell><cell>Shuffle</cell><cell>Aggregate</cell></row><row><cell>DataFrame</cell><cell>API</cell><cell cols="3">Filter Range extraction Add column/index Sort by column GroupBy</cell><cell></cell><cell></cell><cell></cell></row><row><cell>Normalized Throughput</cell><cell>0.0 0.2 0.4 0.6 0.8 1.0</cell><cell>0 Local only</cell><cell>20</cell><cell>AIFM</cell><cell>40</cell><cell cols="2">60 AIFM w/o offload 80</cell><cell>100 Fastswap</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="4">Local Memory [% of 31GB]</cell></row><row><cell cols="9">Figure 7: An AIFM-enabled DataFrame library [16] achieves 78-97% of in-memory throughput for a data analytics work-load [53], outperforming Fastswap. Offloading operations with low compute intensity is crucial to AIFM's performance.</cell></row><row><cell cols="9">API ( ?4.2.4). The Copy and Shuffle operations copy a vector (i.e., a DataFrame column), with shuffle also reordering rows by index positions in another column; Aggregate computes aggregate values (sums, averages, etc.). These three opera-tions are used in five DataFrame API calls, including filters, column creation, sorts, and aggregations (Table</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head></head><label></label><figDesc>An AIFM hash table is competitive with local memory when the access distribution is skewed (Zipf factors ? 0.8), and outperforms a hashtable in Fastswap by up to 61? as Fastswap suffers from amplification and other overheads.</figDesc><table><row><cell>Throughput [ops/sec]</cell><cell>0 100M 200M</cell><cell cols="3">All in local memory AIFM Fastswap</cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.0</cell><cell>0.2</cell><cell>0.4</cell><cell>0.6</cell><cell>0.8</cell><cell>1.0</cell><cell>1.2</cell><cell>1.4</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="4">Zipf skew parameter (s)</cell><cell></cell></row><row><cell cols="2">Figure 9:</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>We use "nontemporal" in the sense of x86's nontemporal load/store instructions[35], which conceptually bypass the CPU cache to avoid pollution.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>Acknowledgements</head><p>We thank our shepherd <rs type="institution">Emmett Witchel</rs>, the anonymous reviewers, and members of the <rs type="institution">MIT PDOS group</rs> for their helpful feedback. We appreciate Cloudlab [25] for providing the experiment platform used. This work was supported in part by a <rs type="grantName">Facebook Research Award</rs> and a <rs type="funder">Google Faculty Award</rs>. <rs type="person">Zhenyuan Ruan</rs> was supported by an <rs type="funder">MIT Robert J. Shillman Fund Fellowship</rs>.</p></div>
+			</div>
+			<listOrg type="funding">
+				<org type="funding" xml:id="_T45xBWr">
+					<orgName type="grant-name">Facebook Research Award</orgName>
+				</org>
+			</listOrg>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">FlatFlash: Exploiting the Byte-Accessibility of SSDs within a Unified Memory-Storage Hierarchy</title>
+		<author>
+			<persName><forename type="first">Ahmed</forename><surname>Abulila</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vikram</forename><surname>Sharma Mailthody</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zaid</forename><surname>Qureshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nam</forename><forename type="middle">Sung</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinjun</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wen-Mei</forename><surname>Hwu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Remote regions: a simple abstraction for remote memory</title>
+		<author>
+			<persName><forename type="first">Marcos</forename><forename type="middle">K</forename><surname>Aguilera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nadav</forename><surname>Amit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Irina</forename><surname>Calciu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xavier</forename><surname>Deguillard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stanko</forename><surname>Novakovi?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arun</forename><surname>Ramanathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pratap</forename><surname>Subrahmanyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lalith</forename><surname>Suresh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kiran</forename><surname>Tati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajesh</forename><surname>Venkatasubramanian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Wei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference (ATC)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Remote Memory in the Age of Fast Networks</title>
+		<author>
+			<persName><forename type="first">Marcos</forename><forename type="middle">K</forename><surname>Aguilera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nadav</forename><surname>Amit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Irina</forename><surname>Calciu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xavier</forename><surname>Deguillard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pratap</forename><surname>Subrahmanyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lalith</forename><surname>Suresh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kiran</forename><surname>Tati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajesh</forename><surname>Venkatasubramanian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Wei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Cloud Computing (SoCC)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Designing far memory data structures: Think outside the box</title>
+		<author>
+			<persName><forename type="first">Marcos</forename><forename type="middle">K</forename><surname>Aguilera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kimberly</forename><surname>Keeton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Workshop on Hot Topics in Operating Systems (HotOS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note>Stanko Novakovic, and Sharad Singhal</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Write-Rationing Garbage Collection for Hybrid Memories</title>
+		<author>
+			<persName><forename type="first">Shoaib</forename><surname>Akram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jennifer</forename><forename type="middle">B</forename><surname>Sartor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Can Far Memory Improve Job Throughput?</title>
+		<author>
+			<persName><forename type="first">Emmanuel</forename><surname>Amaro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Branner-Augmon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhihong</forename><surname>Luo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amy</forename><surname>Ousterhout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marcos</forename><forename type="middle">K</forename><surname>Aguilera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aurojit</forename><surname>Panda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sylvia</forename><surname>Ratnasamy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Shenker</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Conference on Computer Systems (EuroSys)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Treadmarks: Shared memory computing on networks of workstations</title>
+		<author>
+			<persName><forename type="first">Cristiana</forename><surname>Amza</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alan</forename><forename type="middle">L</forename><surname>Cox</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sandhya</forename><surname>Dwarkadas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pete</forename><surname>Keleher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Honghui</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ramakrishnan</forename><surname>Rajamony</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Weimin</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Willy</forename><surname>Zwaenepoel</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computer</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="1996">1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Workload Analysis of a Large-Scale Key-Value Store</title>
+		<author>
+			<persName><forename type="first">Berk</forename><surname>Atikoglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuehai</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eitan</forename><surname>Frachtenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Paleczny</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGMETRIC-S/PERFORMANCE Joint International Conference on Measurement and Modeling of Computer Systems</title>
+		<imprint>
+			<publisher>SIG-METRICS</publisher>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Attack of the killer microseconds</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Luiz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Barroso</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Marty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Patterson</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">60</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Munin: Distributed Shared Memory Based on Type-specific Memory Coherence</title>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">K</forename><surname>Bennett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">B</forename><surname>Carter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Willy</forename><surname>Zwaenepoel</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Principles and Practice of Parallel Programming (PPoPP)</title>
+		<imprint>
+			<date type="published" when="1990">1990</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">The End of Slow Networks: It&apos;s Time for a Redesign</title>
+		<author>
+			<persName><forename type="first">Carsten</forename><surname>Binnig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Crotty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Galakatos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Kraska</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erfan</forename><surname>Zamanian</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the VLDB Endowment</title>
+		<meeting>the VLDB Endowment</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">9</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Implementing Remote Procedure Calls</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">D</forename><surname>Birrell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bruce</forename><surname>Jay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nelson</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Computer Systems (TOCS)</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">1</biblScope>
+			<date type="published" when="1984">1984</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Garbage collection in an uncooperative environment</title>
+		<author>
+			<persName><forename type="first">Hans-Juergen</forename><surname>Boehm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Weiser</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Software: Practice and Experience</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">9</biblScope>
+			<date type="published" when="1988">1988</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Tolerating Memory Leaks</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Bond</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Mckinley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">43</biblScope>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">BCL: A cross-platform distributed container library</title>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Brock</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ayd?n</forename><surname>Bulu?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katherine</forename><surname>Yelick</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Parallel Processing (ICPP)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">C++ DataFrame for statistical, Financial, and ML analysis</title>
+		<ptr target="https://github.com/hosseinmoein/DataFrame" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Project PBerry: FPGA Acceleration for Remote Memory</title>
+		<author>
+			<persName><forename type="first">Irina</forename><surname>Calciu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ivan</forename><surname>Puddu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aasheesh</forename><surname>Kolli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Nowatzyk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pratap</forename><surname>Subrahmanyam</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Workshop on Hot Topics in Operating Systems (HotOS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">A cloud-scale acceleration architecture</title>
+		<author>
+			<persName><forename type="first">Adrian</forename><forename type="middle">M</forename><surname>Caulfield</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><forename type="middle">S</forename><surname>Chung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Putnam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hari</forename><surname>Angepat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeremy</forename><surname>Fowers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Haselman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Heil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matt</forename><surname>Humphrey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Puneet</forename><surname>Kaur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joo-Young</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Lo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todd</forename><surname>Massengill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kalin</forename><surname>Ovtcharov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Papamichael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lisa</forename><surname>Woods</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sitaram</forename><surname>Lanka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><surname>Chiou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Doug</forename><surname>Burger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Scalable RDMA RPC on Reliable Connection with Efficient Resource Sharing</title>
+		<author>
+			<persName><forename type="first">Youmin</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youyou</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiwu</forename><surname>Shu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Conference on Computer Systems (EuroSys)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">The pauseless GC algorithm</title>
+		<author>
+			<persName><forename type="first">Cliff</forename><surname>Click</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gil</forename><surname>Tene</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Wolf</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM/USENIX international conference on Virtual execution environments (VEE)</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">A New Design for Distributed Systems: The Remote Memory Model</title>
+		<author>
+			<persName><forename type="first">Douglas</forename><surname>Comer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jim</forename><surname>Griffioen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Summer USENIX Conference</title>
+		<imprint>
+			<date type="published" when="1990">1990</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">Crypto++ Library 8.2</title>
+		<ptr target="https://www.cryptopp.com/" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Garbage-First Garbage Collection</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Detlefs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christine</forename><surname>Flood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steve</forename><surname>Heller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tony</forename><surname>Printezis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Memory Management (ISMM)</title>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">The compression cache: Using on-line compression to extend physical memory</title>
+		<author>
+			<persName><forename type="first">Fred</forename><surname>Douglis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Winter USENIX Conference</title>
+		<imprint>
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">The Design and Operation of CloudLab</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Duplyakin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Ricci</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aleksander</forename><surname>Maricq</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gary</forename><surname>Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Duerig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Eide</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Leigh</forename><surname>Stoller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Hibler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kirk</forename><surname>Webb</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Akella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kuangching</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Glenn</forename><surname>Ricart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Larry</forename><surname>Landweber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chip</forename><surname>Elliott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Zink</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Emmanuel</forename><surname>Cecchet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Snigdhaswin</forename><surname>Kar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prabodh</forename><surname>Mishra</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference (ATC)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Facebook Folly RCU Library</title>
+		<ptr target="https://github.com/facebook/folly/blob/master/folly/synchronization/Rcu.h" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">The Network RamDisk: Using Remote Memory on Heterogeneous NOWs</title>
+		<author>
+			<persName><forename type="first">Michail</forename><forename type="middle">D</forename><surname>Flouris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Evangelos</forename><forename type="middle">P</forename><surname>Markatos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Cluster Computing</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Network Requirements for Resource Disaggregation</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Peter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akshay</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sagar</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joao</forename><surname>Karandikar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sangjin</forename><surname>Carreira</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rachit</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sylvia</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Ratnasamy</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Shenker</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Operating Systems Design and Implementation</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">Gen-Z: hardware architecture for disaggregated memory</title>
+		<ptr target="https://genzconsortium.org" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">Google&apos;s fast compressor/decompressor</title>
+		<ptr target="https://github.com/google/snappy" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Efficient Memory Disaggregation with Infiniswap</title>
+		<author>
+			<persName><forename type="first">Juncheng</forename><surname>Gu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youngmoon</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiwen</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mosharaf</forename><surname>Chowdhury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kang</forename><forename type="middle">G</forename><surname>Shin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Networked Systems Design and Implementation</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">RDMA over Commodity Ethernet at Scale</title>
+		<author>
+			<persName><forename type="first">Chuanxiong</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haitao</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhong</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gaurav</forename><surname>Soni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianxi</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jitu</forename><surname>Padhye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marina</forename><surname>Lipshteyn</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM Conference on Applications, Technologies, Architectures, and Protocols for Computer Communications (SIGCOMM)</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">HPE Powers Up The Machine Architecture</title>
+		<ptr target="https://www.nextplatform.com/2017/01/09/hpe-powers-machine-architecture" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">The Garbage Collection Advantage: Improving Program Locality</title>
+		<author>
+			<persName><forename type="first">Xianglong</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><forename type="middle">M</forename><surname>Blackburn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eliot</forename><forename type="middle">B</forename><surname>Moss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhenlin</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Perry</forename><surname>Cheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Systems, Languages, and Applications (OOPSLA)</title>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Java SE documentation. Chapter 6: The Parallel Collector</title>
+		<ptr target="https://docs.oracle.com/javase/8/docs/technotes/guides/vm/gctuning/parallel.html" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Datacenter RPCs can be General and Fast</title>
+		<author>
+			<persName><forename type="first">Anuj</forename><surname>Kalia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Andersen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Networked Systems Design and Implementation (NSDI)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Using RDMA Efficiently for Key-value Services</title>
+		<author>
+			<persName><forename type="first">Anuj</forename><surname>Kalia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM Conference on Applications, Technologies, Architectures, and Protocols for Computer Communications (SIGCOMM)</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note>Andersen</note>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Design Guidelines for High Performance RDMA Systems</title>
+		<author>
+			<persName><forename type="first">Anuj</forename><surname>Kalia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference (ATC)</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Dodo: A User-level System for Exploiting Idle Memory in Workstation Clusters</title>
+		<author>
+			<persName><forename type="first">Samir</forename><surname>Koussih</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anurag</forename><surname>Acharya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjeev</forename><surname>Setia</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Symposium on High Performance Distributed Computing (HPDC)</title>
+		<imprint>
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Software-Defined Far Memory in Warehouse-Scale Computers</title>
+		<author>
+			<persName><forename type="first">Andres</forename><surname>Lagar-Cavilla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Junwhan</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Suleiman</forename><surname>Souhlal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Neha</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Radoslaw</forename><surname>Burny</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shakeel</forename><surname>Butt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jichuan</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashwin</forename><surname>Chaugule</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nan</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Junaid</forename><surname>Shahid</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Greg</forename><surname>Thelen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Kamil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Yurtsever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ternational Conference on Architectural Support for Programming Languages and Operating Systems (AS-PLOS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Experience with processes and monitors in Mesa</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Butler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">D</forename><surname>Lampson</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Redell</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">23</biblScope>
+			<date type="published" when="1980">1980</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">KV-Direct: High-Performance In-Memory Key-Value Store with Programmable NIC</title>
+		<author>
+			<persName><forename type="first">Bojie</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhenyuan</forename><surname>Ruan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wencong</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuanwei</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yongqiang</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Putnam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Enhong</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lintao</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Operating Systems Principles (SOSP)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<title level="m" type="main">Memory Coherence in Shared Virtual Memory Systems</title>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Hudak</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1989">1989</date>
+			<biblScope unit="page">4</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Swapping to Remote Memory over Infini-Band: An Approach using a High Performance Network Block Device</title>
+		<author>
+			<persName><forename type="first">Shuang</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ranjit</forename><surname>Noronha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dhabaleswar</forename><forename type="middle">K</forename><surname>Panda</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Conference on Cluster Computing (CLUSTER)</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Imbalance in the cloud: An analysis on alibaba cluster trace</title>
+		<author>
+			<persName><forename type="first">Chengzhi</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kejiang</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guoyao</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cheng-Zhong</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tongxin</forename><surname>Bai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Conference on Big Data (Big Data</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<monogr>
+		<title level="m" type="main">Mellanox Innova-2 Flex Open Programmable Smart-NIC</title>
+		<ptr target="https://www.mellanox.com/products/smartnics/innova-2-flex" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Implementing Global Memory Management in a Workstation Cluster</title>
+		<author>
+			<persName><forename type="first">Feeley</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">E</forename><surname>Morgan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frederic</forename><forename type="middle">H</forename><surname>Pighin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anna</forename><forename type="middle">R</forename><surname>Karlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Henry</forename><forename type="middle">M</forename><surname>Levy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Operating Systems Principles (SOSP)</title>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Using One-Sided RDMA Reads to Build a Fast, CPU-Efficient Key-Value Store</title>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Mitchell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yifeng</forename><surname>Geng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinyang</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference (ATC)</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Latency-tolerant Software Distributed Shared Memory</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Nelson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brandon</forename><surname>Holt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brandon</forename><surname>Myers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Preston</forename><surname>Briggs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luis</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Kahan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Oskin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference (ATC)</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Storm: a fast transactional dataplane for remote data structures</title>
+		<author>
+			<persName><forename type="first">Stanko</forename><surname>Novakovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yizhou</forename><surname>Shan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aasheesh</forename><surname>Kolli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiying</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haggai</forename><surname>Eran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Pismenny</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Liran</forename><surname>Liss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Tsafrir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marcos</forename><forename type="middle">K</forename><surname>Aguilera</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM International Conference on Systems and Storage (SYSTOR)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<monogr>
+		<title level="m" type="main">NVIDIA Mellanox BlueField DPU</title>
+		<ptr target="https://www.mellanox.com/products/bluefield-overview" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<monogr>
+		<title level="m" type="main">NYC Taxi Trips -Exploratory Data Analysis</title>
+		<ptr target="https://www.kaggle.com/kartikkannapur/nyc-taxi-trips-exploratory-data-analysis/notebook" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<monogr>
+		<title level="m" type="main">Opening a 20GB file for analysis with pandas</title>
+		<ptr target="https://datascience.stackexchange.com/questions/27767/opening-a-20gb-file-for-analysis-with-pandas/" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Shenango: Achieving High CPU Efficiency for Latency-sensitive Datacenter Workloads</title>
+		<author>
+			<persName><forename type="first">Amy</forename><surname>Ousterhout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joshua</forename><surname>Fried</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Behrens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Belay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hari</forename><surname>Balakrishnan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Networked Systems Design and Implementation (NSDI)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<monogr>
+		<title level="m" type="main">pandas -Python Data Analysis Library</title>
+		<ptr target="https://pandas.pydata.org/" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<monogr>
+		<title level="m" type="main">Pandas: Scaling to large datasets</title>
+		<ptr target="https://pandas.pydata.org/pandas-docs/stable/user_guide/scale.html" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">Exploring the disaggregated memory interface design space</title>
+		<author>
+			<persName><forename type="first">Nathan</forename><surname>Pemberton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Workshop on Resource Disaggregation (WORD)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<monogr>
+		<title level="m" type="main">Persistent Memory Development Kit</title>
+		<ptr target="https://pmem.io/pmdk/" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<title level="m" type="main">Isanyone -successful -in -using -Python -Pandas-while-dealing-with-millionsof-rows-or-more-than-a-billion-Ifnot-what-else-did-you-do</title>
+		<ptr target="https://www.quora.com/" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+	<note>Quora: Is anyone successful in using Python Pandas while dealing with millions of rows or more than a billion?</note>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">PebblesDB: Building Key-Value Stores Using Fragmented Log-Structured Merge Trees</title>
+		<author>
+			<persName><forename type="first">Pandian</forename><surname>Raju</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rohan</forename><surname>Kadekodi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Chidambaram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ittai</forename><surname>Abraham</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Operating Systems Principles (SOSP)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Persistent memory programming</title>
+		<author>
+			<persName><forename type="first">Andy</forename><surname>Rudoff</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Login: The Usenix Magazine</title>
+		<imprint>
+			<biblScope unit="volume">42</biblScope>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<analytic>
+		<title level="a" type="main">Log-structured Memory for DRAM-based Storage</title>
+		<author>
+			<persName><forename type="first">Stephen</forename><forename type="middle">M</forename><surname>Rumble</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankita</forename><surname>Kejriwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Ousterhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Conference on File and Storage Technologies (FAST)</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<analytic>
+		<title level="a" type="main">Shasta: A Low Overhead, Software-only Approach for Supporting Fine-grain Shared Memory</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Daniel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kourosh</forename><surname>Scales</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chandramohan</forename><forename type="middle">A</forename><surname>Gharachorloo</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Thekkath</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="1996">1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<analytic>
+		<title level="a" type="main">Fine-grain Access Control for Distributed Shared Memory</title>
+		<author>
+			<persName><forename type="first">Ioannis</forename><surname>Schoinas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alvin</forename><forename type="middle">R</forename><surname>Lebeck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">R</forename><surname>Larus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Wood</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="1994">1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<analytic>
+		<title level="a" type="main">LegoOS: A Disseminated, Distributed OS for Hardware Resource Disaggregation</title>
+		<author>
+			<persName><forename type="first">Yizhou</forename><surname>Shan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yutong</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yilun</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiying</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Symposium on Operating Systems Design and Implementation (OSDI)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">Distributed shared persistent memory</title>
+		<author>
+			<persName><forename type="first">Yizhou</forename><surname>Shan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shin-Yeh</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiying</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Cloud Computing (SoCC)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<analytic>
+		<title level="a" type="main">StRoM: smart remote memory</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Sidler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zeke</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Monica</forename><surname>Chiosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amit</forename><surname>Kulkarni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gustavo</forename><surname>Alonso</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Conference on Computer Systems (EuroSys)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<monogr>
+		<title level="m" type="main">Stingray SmartNIC Adapters and IC</title>
+		<ptr target="https://www.broadcom.com/products/ethernet-connectivity/smartnic" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b68">
+	<monogr>
+		<author>
+			<persName><forename type="first">Patrick</forename><surname>Stuedi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Animesh</forename><surname>Trivedi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bernard</forename><surname>Metzler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonas</forename><surname>Pfefferle</surname></persName>
+		</author>
+		<title level="m">ACM Symposium on Cloud Computing (SoCC)</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note>DaRPC: Data Center RPC</note>
+</biblStruct>
+
+<biblStruct xml:id="b69">
+	<monogr>
+		<title level="m" type="main">Modern Operating Systems</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Andrew</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Herbert</forename><surname>Tanenbaum</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Bos</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b70">
+	<analytic>
+		<title level="a" type="main">Borg: The next Generation</title>
+		<author>
+			<persName><forename type="first">Muhammad</forename><surname>Tirmazi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Barker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nan</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Md</forename><forename type="middle">E</forename><surname>Haque</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gene</forename><surname>Zhijing</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><surname>Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mor</forename><surname>Hand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Harchol-Balter</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Wilkes</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Conference on Computer Systems (Eu-roSys)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b71">
+	<monogr>
+		<title level="m" type="main">TLC Trip Record Data</title>
+		<ptr target="https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b72">
+	<analytic>
+		<title level="a" type="main">Compress Objects, Not Cache Lines: An Object-Based Compressed Memory Hierarchy</title>
+		<author>
+			<persName><forename type="first">Po-An</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Sanchez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b73">
+	<analytic>
+		<title level="a" type="main">LITE Kernel RDMA Support for Datacenter Applications</title>
+		<author>
+			<persName><forename type="first">Shin-Yeh</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiying</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM Symposium on Operating Systems Principles (SOSP)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b74">
+	<monogr>
+		<title level="m" type="main">Understanding the Linux Virtual Memory Manager, Chapter 10 Page Frame Reclamation</title>
+		<ptr target="https://www.kernel.org/doc/gorman/html/understand/understand013.html" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b75">
+	<monogr>
+		<title level="m" type="main">Validating References with Lifetimes</title>
+		<ptr target="https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html" />
+		<imprint>
+			<date type="published" when="2020">10/15/2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b76">
+	<analytic>
+		<title level="a" type="main">Efficient Management for Hybrid Memory in Managed Language Runtime</title>
+		<author>
+			<persName><forename type="first">Chenxi</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ting</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Zigman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fang</forename><surname>Lv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunquan</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaobing</forename><surname>Feng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Network and Parallel Computing (NPC)</title>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Guang</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Depei</forename><surname>Gao</surname></persName>
+		</editor>
+		<editor>
+			<persName><surname>Qian</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Xinbo Gao, Barbara Chapman, and Wenguang Chen</publisher>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b77">
+	<analytic>
+		<title level="a" type="main">Panthera: Holistic Memory Management for Big Data Processing over Hybrid Memories</title>
+		<author>
+			<persName><forename type="first">Chenxi</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huimin</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ting</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Zigman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haris</forename><surname>Volos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fang</forename><surname>Lv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaobing</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guoqing</forename><forename type="middle">Harry</forename><surname>Xu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b78">
+	<analytic>
+		<title level="a" type="main">Operating System Support for Small Objects</title>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Wilson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Workshop on Object Orientation in Operating Systems (IWOOOS)</title>
+		<imprint>
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b79">
+	<analytic>
+		<title level="a" type="main">The Case for Compressed Caching in Virtual Memory Systems</title>
+		<author>
+			<persName><forename type="first">Paul</forename><forename type="middle">R</forename><surname>Wilson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><forename type="middle">F</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yannis</forename><surname>Smaragdakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference (ATC)</title>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,1132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Fast and Accurate Model Scaling</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2021-03-11">11 Mar 2021</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Piotr</forename><surname>Dollár</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Mannat</forename><surname>Singh</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ross</forename><surname>Girshick</surname></persName>
+						</author>
+						<title level="a" type="main">Fast and Accurate Model Scaling</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2021-03-11">11 Mar 2021</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2103.06877v1[cs.CV]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T12:49+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>In this work we analyze strategies for convolutional neural network scaling; that is, the process of scaling a base convolutional network to endow it with greater computational complexity and consequently representational power. Example scaling strategies may include increasing model width, depth, resolution, etc. While various scaling strategies exist, their tradeoffs are not fully understood. Existing analysis typically focuses on the interplay of accuracy and flops (floating point operations). Yet, as we demonstrate, various scaling strategies affect model parameters, activations, and consequently actual runtime quite differently. In our experiments we show the surprising result that numerous scaling strategies yield networks with similar accuracy but with widely varying properties. This leads us to propose a simple fast compound scaling strategy that encourages primarily scaling model width, while scaling depth and resolution to a lesser extent. Unlike currently popular scaling strategies, which result in about O(s) increase in model activation w.r.t. scaling flops by a factor of s, the proposed fast compound scaling results in close to O( √ s) increase in activations, while achieving excellent accuracy. Fewer activations leads to speedups on modern memory-bandwidth limited hardware (e.g., GPUs). More generally, we hope this work provides a framework for analyzing scaling strategies under various computational constraints.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Advances in modern hardware for training and running convolutional neural networks over the past several years have been impressive. Highly-parallel hardware accelerators, such as GPUs and TPUs, allow for training and deploying ever larger and more accurate networks.</p><p>Interestingly, this rapid advancement has greatly benefited our ability to optimize models for the low-compute regime. In particular, whether via manual design, random search, or more complex neural architecture search strategies <ref type="bibr" target="#b38">[36]</ref>, it has become feasible to train a large number of small models and select the best one, in terms of both accuracy and speed. At intermediate-compute regimes, efficient search <ref type="bibr" target="#b18">[16]</ref> or efficient design spaces <ref type="bibr" target="#b23">[21,</ref><ref type="bibr" target="#b24">22]</ref> can still pro- compound scaling (dwr), in which the width, depth, and resolution are all scaled in roughly equal proportions; depth and width scaling (dw); and the proposed fast compound scaling (dW r), which emphasizes scaling primarily, but not only, the model width.</p><p>(Top): We apply the four scaling strategies to two base models (EfficientNet-B0 and RegNetZ-500MF). Compound and fast scaling result in highest accuracy models, and both outperform width scaling. (Bottom-left): The scaling strategies have asymptotically different behavior in how they affect model activations. Given a scale factor of s, activations increase with about O( √ s) for w and dW r scaling compared to almost O(s) for dwr and dw scaling. (Bottom-right): Runtime of a model (EfficientNet-B0) scaled using the four scaling strategies. Fast scaling results in models nearly as fast as w scaling (but with higher accuracy), and much faster than dwr and dw scaling, closely reflecting model activations.</p><p>vide the ability to directly optimize neural networks. However, regardless of computational resources, there will necessarily exist a high-compute regime where it may only be feasible to train a handful of models, or possibly even only a single model. This regime motivates our work.</p><p>In the high-compute regime, network scaling, the process by which a lower-complexity model is enlarged by expanding one or more of its dimensions (e.g., depth or width), becomes essential. Scaling has proven effective in terms of obtaining larger models with good accuracy <ref type="bibr" target="#b33">[31]</ref>. However, existing work on model scaling focuses on model accuracy. In this work, we are interested in large, accurate models that are fast enough to deploy and use in practice.</p><p>The concept of network scaling emerged naturally in deep learning, with early work focused on scaling networks by increasing depth <ref type="bibr" target="#b28">[26,</ref><ref type="bibr" target="#b30">28,</ref><ref type="bibr" target="#b11">9]</ref>. However, gains from depth scaling plateaued, leading to explorations of scaling width <ref type="bibr" target="#b36">[34]</ref> and resolution <ref type="bibr" target="#b13">[11]</ref>. More recently scaling multiple dimensions at once, coined compound scaling <ref type="bibr" target="#b33">[31]</ref>, has been shown to achieve excellent accuracy.</p><p>Existing explorations of model scaling typically focus on maximizing accuracy versus flops. Yet as we will show, two scaled models with the same flops can have very different runtime on modern accelerators. This leads us to the central question explored in our work: can we design scaling strategies that optimize both accuracy and model runtime?</p><p>Our first core observation is that there exists multiple scaling strategies that can yield similar accuracy models at the same flops. In Figure <ref type="figure" target="#fig_0">1</ref>, top, we show that there exist multiple scaling strategies that can result in models with high accuracy. We will expand on this result in §6.</p><p>However, scaling a model to a fixed target flops using two scaling strategies can result in widely different runtimes, see Figure <ref type="figure" target="#fig_0">1</ref>, bottom-right. To better understand this behavior at a more fundamental level, in §3 we develop a framework for analyzing the complexity of various scaling strategies, in terms of not just flops, but also parameters and activations. In particular, we show that different strategies scale activations at different asymptotic rates relative to flops. E.g., when scaling a model from f flops to sf flops by scaling width, activations increase by O( √ s), compared to nearly O(s) for compound scaling. Figure <ref type="figure" target="#fig_0">1</ref>, bottom-left, shows this asymptotic behavior for a few select strategies.</p><p>In §4 we will show that within a flop range of practical interest, on modern accelerators the runtime of a scaled model is more strongly correlated with activations than flops. We emphasize that this correlation holds over a diverse set of scaling strategies, which enables us to use activations as a proxy for predicting a scaled model's runtime.</p><p>Based on our analysis, in §5 we introduce a new family of scaling strategies parameterized by a single parameter α that controls the relative scaling along model width versus other dimensions. This lets us carefully control the asymptotic rate at which model activations scale. We show 0 α &lt; 1 yields models that are both fast and accurate. We refer to this scaling strategy as fast compound model scaling, or simply fast scaling for brevity.</p><p>As we will show in §6, fast scaling allows us to obtain large models that are as accurate as the state-of-the-art but faster. As a concrete example, we apply fast scaling to scale a RegNetY-4GF <ref type="bibr" target="#b24">[22]</ref> model to 16GF (gigaflops), and find it uses less memory and is faster (and more accurate) than EfficientNet-B4 <ref type="bibr" target="#b33">[31]</ref> -a model with 4× fewer flops.</p><p>In order to facilitate future research we will release all code and pretrained models introduced in this work. <ref type="foot" target="#foot_0">1</ref></p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Related Work</head><p>Manual network design. Since the impressive success of AlexNet <ref type="bibr" target="#b17">[15]</ref>, and with the steady progress of hardware accelerators, the community has pushed toward ever larger and more accurate models. Increasing model depth led to rapid gains, notable examples include VGG <ref type="bibr" target="#b28">[26]</ref> and Inception <ref type="bibr" target="#b30">[28,</ref><ref type="bibr" target="#b31">29]</ref>. This trend culminated with the introduction of residual networks <ref type="bibr" target="#b11">[9]</ref>. Next, wider models proved not only effective but particularly efficient <ref type="bibr" target="#b36">[34,</ref><ref type="bibr" target="#b13">11]</ref>. The use of depthwise <ref type="bibr" target="#b5">[3]</ref> and group convolution <ref type="bibr" target="#b34">[32]</ref> enabled even higher capacity models. Other notable design elements that led to larger and more accurate models include the inverted bottleneck <ref type="bibr" target="#b27">[25]</ref>, SE <ref type="bibr" target="#b14">[12]</ref>, and new nonlinearities <ref type="bibr" target="#b12">[10,</ref><ref type="bibr" target="#b25">23]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Automated network design.</head><p>With the rapid advancement of hardware for training deep models, it has become more feasible to automate network design. Neural architecture search <ref type="bibr" target="#b38">[36,</ref><ref type="bibr" target="#b39">37,</ref><ref type="bibr" target="#b26">24]</ref> has turned into a thriving research area and led to highly efficient models, especially in the lowcompute regime. Model search is computationally expensive when training larger models, this has led to interest in developing efficient search algorithms <ref type="bibr" target="#b18">[16,</ref><ref type="bibr" target="#b22">20,</ref><ref type="bibr" target="#b19">17]</ref>. For example, DARTS <ref type="bibr" target="#b19">[17]</ref> proposed a differentiable search strategy that does not require training multiple separate models to optimize model structure. Nevertheless, in practice search is most effective in low or medium compute regimes.</p><p>Design space design. Despite the effectiveness of model search, the paradigm has limitations. The outcome of a search is a single model instance tuned to a specific setting (e.g., dataset or flop regime). As an alternative, Radosavovic et al. <ref type="bibr" target="#b24">[22]</ref> recently introduced the idea of designing design spaces, and designed a low-dimensional design space consisting of simple, easy-to-tune models. Given a new dataset or compute regime, a model can be selected from this design space by tuning a handful of parameters, allowing for highly efficient random search. This allows for optimizing models directly in fairly high-compute regimes. We utilize these efficient design spaces in our experiments.</p><p>Network scaling. Regardless of the model design strategy, there will exist some computational regime in which it is not feasible to train and compare a large number of models. Thus model scaling becomes crucial. Popular scaling strategies include scaling depth <ref type="bibr" target="#b28">[26,</ref><ref type="bibr" target="#b30">28,</ref><ref type="bibr" target="#b11">9]</ref>, width <ref type="bibr" target="#b36">[34,</ref><ref type="bibr" target="#b13">11]</ref> and resolution <ref type="bibr" target="#b13">[11,</ref><ref type="bibr" target="#b15">13]</ref>. The recently introduced compound scaling strategy <ref type="bibr" target="#b32">[30]</ref>, which scales along all three dimensions at once, achieves an excellent accuracy versus flops tradeoff and serves as a core baseline in our work.</p><p>Going bigger. There is substantial interest in scaling to massive datasets <ref type="bibr" target="#b29">[27,</ref><ref type="bibr" target="#b20">18]</ref> and compute regimes <ref type="bibr" target="#b15">[13]</ref>. Moreover, recent progress in unsupervised learning <ref type="bibr">[8, 2,</ref> 1] may create the potential to train with essentially unlimited data. These efforts motivate our work: we aim to enable scaling models to the size necessary for these brave new regimes. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Complexity of Scaled Models</head><p>In this section we present a general framework for analyzing the complexity of various network scaling strategies. While the framework is simple and intuitive, it proves powerful in understanding and extending model scaling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.">Complexity Metrics</head><p>The three most relevant properties of models we consider are their flops (f ), parameters (p), and activations (a). Following common practice, we use flops to mean multiplyadds and parameters to denote the number of free variables in a model. We define activations as the number of elements in the output tensors of convolutional (conv) layers.</p><p>Flops and parameters are popular complexity measures of neural networks. We note, however, that parameters of a convolution are independent of input resolution and hence do not fully reflect the actual capacity or runtime of a convolutional network. Therefore, given that we study networks with varying input resolution, we report parameters but we focus on flops as a primary complexity measure.</p><p>Activations are less often reported but as we demonstrate play a key role in determining network speed on modern memory-bandwidth limited hardware. Hence, we carefully analyze the interplay between scaling and activations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.">Network Complexity</head><p>While conv networks are composed of many heterogeneous layers, we focus our complexity analysis on conv layers. First, many layers such as normalization, pooling, or activation often account for a small percentage of a model's compute. Second, the number and complexity of these layers tends to be proportional to the number and size of conv layers (e.g., every conv may be followed by an activation). For these reasons analyzing convs serves as an excellent proxy of how model scaling affects an entire network.</p><p>Consider a k×k conv layer with width (number of channels) w and spatial resolution r. The layer takes in a feature map of size r×r×w, and for each of the r 2 patches of size k×k×w the network applies w dot products of size wk 2 . Therefore the complexity of a conv layer is given by:</p><formula xml:id="formula_0">f = w 2 r 2 k 2 , p = k 2 w 2 , a = wr 2 (1)</formula><p>As k is not scaled, we let k = 1 without loss of generality.  <ref type="table">2</ref>. Compound scaling: Complexity of compound scaling strategies with uniform scaling along each dimension, where the relative flops increase of scaling along each dimension is equal. Scaling uniformly along all dimensions, which closely resembles compound scaling <ref type="bibr" target="#b33">[31]</ref>, results in near linear scaling of activations.</p><p>Common networks are composed of stages, where each stage consists of d uniform conv layers, each with the same w and r. The complexity of a stage of depth d is:</p><formula xml:id="formula_1">f = dw 2 r 2 , p = dw 2 , a = dwr 2<label>(2)</label></formula><p>In subsequent analysis we will show how different scaling strategies affect the complexity of a single stage. For simplicity, we use the same scaling for each network stage, thus our complexity analysis applies to the entire network.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.">Complexity of Simple Scaling</head><p>We define simple scaling of a stage as scaling a stage along a single dimension. In particular, we consider width (w), depth (d), and resolution (r) scaling. In addition to the scaling dimension, we define the scaling factor s to be the amount by which scaling increases model flops. Increasing d by s, w by √ s, or r by √ s all increase flops by s (for simplicity we ignore quantization effects).</p><p>Table <ref type="table">1</ref> shows the complexity of scaling a stage by a factor of s along different scaling dimensions. While in each case the resulting flops are the same (by design), the parameters and activations vary. In particular, activations increase by √ s when scaling width compared to by s when scaling along resolution or depth. This observation will play a central role in how we design new scaling strategies.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.">Complexity of Compound Scaling</head><p>Rather than scaling along a single dimension, an intuitive approach is to scale along multiple dimensions at once. Coined compound scaling by <ref type="bibr" target="#b33">[31]</ref>, such an approach has been shown to achieve higher accuracy than simple scaling.</p><p>In Table <ref type="table">2</ref> we show the complexity for scaling along either two or three dimensions. In each case, we select ratios such that scaling is uniform w.r.t. flops along each dimension. E.g., if scaling along all dimensions (dwr), we scale d by <ref type="foot" target="#foot_1">3</ref><ref type="foot" target="#foot_2">3</ref>√ s, w by Table <ref type="table">3</ref>. Group width scaling: Complexity of scaling a group conv by scaling only width w, only group width g, or both (we assume g ≤ w). Scaling only g does not impact activations; scaling uniformly in both w and g results in √ s increase in activations. Unless noted, we scale g proportionally to w for group conv.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.5.">Complexity of Group Width Scaling</head><p>Many top-performing networks rely heavily on group conv and depthwise conv. A group conv with channel width w and group width g is equivalent to splitting the w channels into w/g groups each of width g, applying a regular conv to each group, and concatenating the results. Depthwise conv is a special case with g = 1. Therefore, its complexity is:</p><formula xml:id="formula_2">f = wgr 2 , p = wg, a = wr 2 .</formula><p>(</p><formula xml:id="formula_3">)<label>3</label></formula><p>In Table <ref type="table">3</ref> we show three basic strategies for scaling group conv. We observe that to obtain scaling behavior similar to scaling regular conv, both channel width and group width must be scaled. Therefore, unless otherwise noted, we scale g proportionally to w. For networks that use depthwise conv (g = 1), as in previous work <ref type="bibr" target="#b33">[31]</ref>, we do not scale g. Finally, we note that when scaling g, we must ensure w is divisible by g. To address this, we set g = w if g &gt; w and round w to be divisible by g otherwise (w will change by at most 1/3 under such a strategy <ref type="bibr" target="#b24">[22]</ref>).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Runtime of Scaled Models</head><p>Our motivation is to design scaling strategies that result in fast and accurate models. In §3 we analyzed the behavior of flops, parameters, and activations for various scaling strategies. In this section we examine the relationship between these complexity metrics and model runtime. This will allow us to design new fast scaling strategies in §5.</p><p>How are the complexity metrics we analyzed in §3 related to model runtime on modern accelerators? To answer this question, in Figure <ref type="figure" target="#fig_2">2</ref> we report runtime for a large number of models scaled from three base models as a function of flops, parameters, and activations. From these plots we can make two observations: flops and parameters are only weakly predictive of runtime when scaling a single model via different scaling strategies; however, activations are strongly predictive of runtime for a model regardless of the scaling strategy. See Figure <ref type="figure" target="#fig_2">2</ref> for additional details.</p><p>This simple result leads us to use model activations as a proxy for runtime. Specifically, for scaled versions of a single model, the Pearson correlation between runtime and activations is r ≥ 0.99, regardless of the scaling strategy, while correlation with flops and parameters is far lower (r   We scale EfficientNet-B0 (EN-B0) using four scaling strategies (dwr, dw, dW r, w) with a wide range of scaling factors (s &lt; 100). For each scaling strategy we plot epoch time versus flops for each model (along with a best fit line). For a single scaling strategy (e.g., w), runtime is highly correlated with flops (e.g., Pearson's r = 0.99). However, when comparing scaled versions of the same model using different scaling strategies, flops are only weakly predictive of runtime (r = 0.81). (Top-right): Using the same set of models, we plot runtime versus parameters, and again observe parameters are even more weakly correlated with runtime (r = 0.56). (Bottom-left): Repeating the same analysis for runtime versus activations, we see that activations are strongly predictive of runtime regardless of the scaling strategy (r = 0.99).</p><p>(Bottom-right): We repeat the analysis of runtime versus activations for three models (see §6.1 for model details). For scaled versions of each model, activations are highly predictive of runtime (r ≥ 0.99), and only very large models tend to be flop bound. This makes activations an excellent proxy for runtime. We note, however, that activations are less predictive of runtime when comparing scaled versions of different models (r = 0.95).</p><p>of 0.81 and 0.56, respectively). We caution, however, that activations cannot perfectly predict runtime across heterogeneous models (r = 0.95), as models may use operations with different runtimes, e.g. ReLU vs. SiLU. Moreover, some big models have runtimes higher than predicted from their activations indicating these models are flop bound.</p><p>Implementation details. We report the time to perform one epoch of training on ImageNet <ref type="bibr" target="#b8">[6]</ref> which contains ∼1.2M training images. For each model, we use the largest batch size that fits in memory. We note that inference time is highly correlated with training time, but we report epoch time as it is easy to interpret (inference performance depends heavily on the use case). We time all models using PyTorch and 8 32GB Volta GPUs. Runtime is of course hardware dependent; however, we believe timing on GPUs is reasonable for two reasons. First, hardware accelerators (such as GPUs, TPUs, etc.) are highly prevalent. Second, accelerators are extremely efficient in terms of compute but tend to be memory-bandwidth bound <ref type="bibr" target="#b35">[33]</ref>, and this trend is expected to become more pronounced. . The new regime we explore in this work is 1/3 &lt; α &lt; 1. In particular, using α near 1 results in fewer activations and thus faster networks (see Figure <ref type="figure" target="#fig_2">2</ref>). In our experiments, we find α = 0.8 results in an excellent tradeoff between speed and accuracy. We use dW r to denote fast scaling to emphasize scaling is primarily, but not only, along w.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Fast Compound Model Scaling</head><p>Given the strong dependency of runtime on activations, we aim to design scaling strategies that minimize the increase in model activations. As our results from Tables <ref type="table">1-3</ref> indicate, of all scaling strategies that involve scaling width, depth, and resolution, scaling a network by increasing its channel width and group width results in the smallest increase in activations. Indeed, it is well known that wide networks are quite efficient in wall-clock time <ref type="bibr" target="#b36">[34]</ref>. Unfortunately, wide networks may not always achieve top results compared to deeper or higher-resolution models <ref type="bibr" target="#b11">[9,</ref><ref type="bibr" target="#b33">31]</ref>.</p><p>To address this, in this work we introduce the concept of fast compound model scaling, or simply fast scaling for brevity. The idea is simple: we design and test scaling strategies that primary increase model width, but also increase depth and resolution to a lesser extent.</p><p>We formalize this by introducing a family of scaling strategies parameterized by α. Given α we define:</p><formula xml:id="formula_4">e d = 1−α 2 , e w = α, e r = 1−α 2 , (<label>4</label></formula><p>) and when scaling a network by a factor of s, we set:</p><formula xml:id="formula_5">d = s e d d, w = √ s ew w, r = √ s er r.</formula><p>(5) If using group conv, we also set g = √ s ew g (same scaling as for w). The resulting complexity of the scaled model is:</p><formula xml:id="formula_6">f = sdw 2 r 2 , p = s 1+α 2 dw 2 , a = s 2−α 2 dwr 2 . (<label>6</label></formula><p>) Instantiations for scaling strategies using various α are shown in Table <ref type="table" target="#tab_4">4</ref>. Setting α = 1 results in width (w) scaling (lowest activations). Setting α = 0 results in depth and resolution (dr) scaling (highest activations). α = 1/3 corresponds to uniform compound scaling (dwr).</p><p>The interesting new regime we explore is 1/3 &lt; α &lt; 1. In particular, we refer to scaling strategies with α near 1 as fast scaling. Unless specified, we use α = 0.8 by default, which we denote using dW r. Next, in §6 we show that fast scaling results in good speed and accuracy.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Experiments</head><p>In this section we evaluate the effectiveness of our proposed fast scaling strategy. We introduce the baseline networks we test along with optimization settings in §6.1. In §6.2, we evaluate existing scaling strategies, then we perform extensive experiments and comparisons of fast scaling in §6.3. Finally we compare scaling vs. random search in §6.4 and compare larger models in §6.5.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1.">Baselines and Optimization Settings</head><p>Baseline networks. In this work we evaluate scaling strategies on three networks families: EfficientNet <ref type="bibr" target="#b33">[31]</ref>, Reg-NetY <ref type="bibr" target="#b24">[22]</ref>, and RegNetZ (described below). We chose these models as they are representative of the state-of-the-art and are well suited for our scaling experiments. Moreover, Ef-ficientNet was introduced in the context of model scaling work <ref type="bibr" target="#b33">[31]</ref>, making it an excellent candidate for our study.</p><p>EfficientNet. EfficientNets have been shown to achieve a good flop-to-accuracy tradeoff. These models use inverted bottlenecks <ref type="bibr" target="#b27">[25]</ref>, depthwise conv, and the SiLU nonlinearity <ref type="bibr" target="#b12">[10]</ref> (also popularly known as Swish <ref type="bibr" target="#b25">[23]</ref>). An Efficient-Net is composed of seven stages with varying width, depth, stride and kernel size. The original model (EfficientNet-B0) was optimized in the mobile regime (400MF) using neural architecture search <ref type="bibr" target="#b32">[30]</ref> and scaled to larger sizes (B1-B7) via compound scaling. For further details, please see <ref type="bibr" target="#b33">[31]</ref>.</p><p>Note that EfficientNets are specified by ∼30 parameters (input resolution, 7 stages with 4 parameters each, and stem and head width). Given this high-dimensional search space, optimizing an EfficientNet is only feasible in a low-compute regime, and scaling must be used to obtain larger models.</p><p>RegNets. As an alternative to neural architecture search, Radosavovic et al. <ref type="bibr" target="#b24">[22]</ref> introduced the idea of designing design spaces, where a design space is a parameterized population of models. Using this methodology, <ref type="bibr" target="#b24">[22]</ref> designed a design space consisting of simple, regular networks called RegNets that are effective across a wide range of block types and flop regimes. Importantly for our work, a RegNet model is specified by a handful of parameters (∼6), which then allows for fast model selection using random search. Thus, unlike EfficientNets, RegNets allow us to compare large models obtained either via scaling or random search.</p><p>A RegNet consists of a stem, a body with four stages, and a head. Each stage consists of a sequence of identical blocks. The block type can vary depending on the model (the two block types we use are shown in Figure <ref type="figure" target="#fig_3">3</ref>). Importantly, the widths and depths of a RegNet are not specified independently per stage, but are determined by a quantized linear function which has 4 parameters (d, w 0 , w a , w m ), for details see <ref type="bibr" target="#b24">[22]</ref>. Any other block parameters (like group width or bottleneck ratio) are kept constant across stages.  <ref type="bibr" target="#b34">[32]</ref>. Each block consists of a 1×1 conv, a 3×3 group conv, and a final 1×1 conv. The 1×1 convs can change w via the bottleneck ratio b, however, we set b = 1 following <ref type="bibr" target="#b24">[22]</ref>. BatchNorm <ref type="bibr" target="#b16">[14]</ref> and ReLU follow each conv. (c-d) We introduce the Z block based on inverted bottlenecks <ref type="bibr" target="#b27">[25]</ref>. The Z block is similar to the Y block with 4 differences: no nonlinearity follows the final 1×1 conv, (2) SiLU <ref type="bibr" target="#b12">[10]</ref> is used in place of ReLU, (3) the stride 2 variant of the block has no residual, and (4) b &lt; 1 (we use b = 1/4 in all experiments). Finally, a Squeezeand-Excitation (SE) op <ref type="bibr" target="#b14">[12]</ref> (reduction ratio of 1/4) follows the 3×3 conv for both the Y and Z blocks (not shown).</p><p>RegNetY. The RegNetY block (Y) is shown in Figure <ref type="figure" target="#fig_3">3 (ab</ref>). The Y block resembles the standard residual bottleneck block with group conv <ref type="bibr" target="#b34">[32]</ref>. Additionally it uses a Squeezeand-Excitation (SE) layer <ref type="bibr" target="#b14">[12]</ref>. Following <ref type="bibr" target="#b24">[22]</ref>, we set the bottleneck ratio b to 1 (effectively no bottleneck). A Reg-NetY model is thus fully specified with 5 parameters: d, w 0 , w a , w m , and g. Unlike <ref type="bibr" target="#b24">[22]</ref>, we additionally vary the image input resolution r (bringing the total parameters to 6).</p><p>RegNetZ. We introduce a new Z block based on inverted bottlenecks <ref type="bibr" target="#b27">[25]</ref>. The Z block resembles the Y block except it omits the last nonlinearity and inverts the bottleneck (we use b = 1/4 in all experiments). See Figure <ref type="figure" target="#fig_3">3 (c-d</ref>) for additional details. A RegNetZ model, built using the Z block, is fully specified with the same 6 parameters as a RegNetY model. We note that EfficientNet also uses inverted bottlenecks, but we introduce RegNetZ to allow us to compare large models obtained via scaling and random search.</p><p>Optimization settings. Our goal is to enable fair and reproducible results. However, we also aim to achieve state-ofthe-art results. This creates a tension between using a simple yet weak optimization setup (e.g., <ref type="bibr" target="#b24">[22]</ref>) versus a strong setup that yields good results but may be difficult to reproduce (e.g., <ref type="bibr" target="#b33">[31]</ref>). To address this, we use a training setup that effectively balances between these two objectives.</p><p>Our setup is as follows: we use SGD with a momentum of 0.9, label smoothing with = 0.1 <ref type="bibr" target="#b31">[29]</ref>, mixup with α = 0.2 <ref type="bibr" target="#b37">[35]</ref>, AutoAugment <ref type="bibr" target="#b6">[4]</ref>, stochastic weight averaging (SWA) <ref type="bibr" target="#b7">[5]</ref>, and mixed precision training <ref type="bibr" target="#b21">[19]</ref>. For all models we use 5 epochs of gradual warmup <ref type="bibr" target="#b9">[7]</ref>. We use an exponential learning rate schedule with a batch size of  <ref type="table">5</ref>. EfficientNet reproduction. The first set of results includes the originally reported errors (from ICML <ref type="bibr" target="#b33">[31]</ref> and updated numbers later reported on arXiv), the second set our reproduction under three schedule lengths (1× corresponds to 100 epochs), averaged over 3 trials. Our results match or outperform the originally reported results (for the biggest nets they slightly lag the updated arXiv errors). We emphasize that unlike the results in <ref type="bibr" target="#b33">[31]</ref>, we use the same, easy to reproduce optimization setup for all models. 1024 (distributed on 8 32GB GPUs), learning rate λ = 2.0, and decay β = 0.02. 2 For RegNets we use a weight decay of 2e-5 and for EfficientNets we use 1e-5. Batch norm parameters are not decayed. For large models we reduce the batch size and learning rate proportionally as in <ref type="bibr" target="#b9">[7]</ref>. For reproducibility, we will release code for our setup.</p><p>EfficientNet baselines. In Table <ref type="table">5</ref>, we report Efficient-Net results using our optimization setup versus results from <ref type="bibr" target="#b33">[31]</ref>. We report our results using a '1×', '2×', or '4×' schedule (corresponding to 100, 200, and 400 epochs, respectively). Our 2× schedule achieves competitive results, our 4× schedule outperforms the originally reported results for all but the largest model tested. We use the 2× schedule in all following experiments unless otherwise noted.</p><p>RegNet baselines. In Table <ref type="table" target="#tab_6">6</ref> we report results for baseline RegNet models. We obtain these models via random search as in <ref type="bibr" target="#b24">[22]</ref>. 3 Note that there are two versions of the 4GF RegNets (using default and discovered resolutions). 2 We parameterize the exponential learning rate via λt = λβ t T , where t is the current epoch, T the final epoch, λ is the initial learning rate, and λβ is the final learning rate. We use this parameterization (as opposed to λt = λγ t ) as it allows us to use a single setting for the decay β regardless of the schedule length T (setting γ = β 1/T makes the two equivalent). 3 We sample RegNet model configurations until we obtain 32 models in a given flop regime, train each of these model using the 1× schedule, and finally select the best one. Sampling just 32 random models in a given flop regime is typically sufficient to obtain accurate models as shown in <ref type="bibr" target="#b24">[22]</ref>. (Right) Models obtained with w scaling are much faster than those from dwr scaling. Both of these results are expected. However, as we will show, it is possible to obtain models that are both fast and accurate. For reference, we also show the original EfficientNet models (orig) obtained via non-uniform compound scaling <ref type="bibr" target="#b33">[31]</ref>, the results closely match uniform compound scaling (dwr). Compound scaling: RegNet. We apply simple and compound scaling to RegNetY-500MF (left) and RegNetZ-500MF (right). As in Figure <ref type="figure" target="#fig_4">4</ref>, dwr scaling achieves the best error, but at significant increase in runtime (see appendix) relative to w scaling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2.">Simple and Compound Scaling</head><p>We now turn to evaluation of simple and compound scaling <ref type="bibr" target="#b33">[31]</ref> described in §3.3 and §3.4, respectively. For these experiments we scale the baseline models from §6.1.</p><p>In Figure <ref type="figure" target="#fig_4">4</ref>, we evaluate the accuracy (left) and runtime (right) of EfficientNet-B0 scaled either via simple scaling along width (w), depth (d), or resolution (r) or via uniform compound scaling (dwr). As expected, dwr scaling provides the best accuracy, but results in slower models than w scaling. This suggests a tradeoff between speed and accuracy, but as we will show shortly, this need not be the case. Finally, we tested uniform scaling along pairs of dimensions (see Table <ref type="table">2</ref>), but dwr scaling proved best (not shown).</p><p>We also compare uniform compound scaling (dwr) to the original compound scaling rule (orig) from <ref type="bibr" target="#b33">[31]</ref>, which empirically set the per-dimension scalings factors. As expected from our analysis in §3.4, dwr scaling is close in both accuracy and runtime to the original compound scaling rule without the need to optimize individual scaling factors.</p><p>In Figure <ref type="figure" target="#fig_5">5</ref> we repeat the same experiment but for the RegNetY-500MF and RegNetZ-500MF baselines. We see a similar behavior, where dwr scaling achieves the strongest results. Runtimes (see appendix) exhibit very similar behaviors (w scaling is much faster). Note that as discussed, group width g is scaled proportionally to width w. . Fast scaling: EfficientNet. We test scaling EfficientNet-B0 using our family of scaling strategies parameterized by α (see Table <ref type="table" target="#tab_4">4</ref>). (Left) Scaling with any α &lt; 1 achieves good accuracy and results in a sizable gap in error to scaling with α = 1 (w). The exact value of α &lt; 1 does not greatly influence the error. (Right) While all scaling strategies with α &lt; 1 give good accuracy, their runtime differ substantially. A setting of α = 4/5 (dW r) gives the best of both worlds: models that are both fast and accurate.  <ref type="figure" target="#fig_6">6</ref>, dW r scaling yields good accuracy and speed (see appendix for rutnimes). We note that α may potentially be be further tuned to tradeoff speed and accuracy, but we use α = 4/5 in this work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3.">Fast Scaling</head><p>We now perform an empirical analysis of the effectiveness of our fast scaling strategy. Recall that in §5 we introduced a family of scaling strategies parameterized by α that interpolates between uniform compound scaling (dwr) when α = 1/3 to width scaling (w) when α = 1. As α goes toward 1, the model activations increase least as we scale a model, resulting in faster models. In particular, we define α = 4/5 as fast scaling, and denote it by dW r.</p><p>In Figure <ref type="figure" target="#fig_6">6</ref>, we evaluate the accuracy (left) and runtime (right) of EfficientNet-B0 scaled with various settings of α. Interestingly, for all tested values of α &lt; 1 model accuracy was quite similar and substantially higher than for w scaling (α = 1), especially for larger models. In terms of runtime, dW r scaling is nearly as fast as w scaling, and substantially faster than dwr scaling. We emphasize that the differences in memory and speed increase asymptotically, hence the difference in runtime for models scaled with different α becomes more pronounced at larger scales.</p><p>In Figure <ref type="figure" target="#fig_7">7</ref> we repeat the same experiment but for the RegNet baselines. Results are similar, dW r scaling (α = 4/5) achieves excellent accuracy and runtime. Finally, we observe that for RegNets, w scaling is more effective than for EfficientNet. This can be partially explained as for Reg-Nets we scale the group width g along width w (Efficient-Net always uses g = 1), indeed setting g = 1 and scaling RegNets by just w performs worse (see appendix). Table <ref type="table">7</ref>. Scaling vs. Search. Models optimized for a given flop regime (via random search) outperform scaled models (rows 1-4). Nevertheless, scaling is necessary in flop regimes where optimization is computationally prohibitive. A hybrid approach is to optimize a model in an intermediate regime (e.g. 4GF) prior to scaling to a higher flop regime (e.g. 16GF), as in rows 5-6. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4.">Scaling versus Search</head><p>How do scaled models compare to models obtained via random search? Recall that RegNets only have 6 free parameters, so optimizing a RegNet directly by random search in an intermediate flop regime is feasible (see §6.1).</p><p>Table <ref type="table">7</ref> compares three sets of models. First, we compare RegNetY at 4GF obtained either via dW r scaling (denoted by RegNetY-500MF→4GF) or search (RegNetY-4GF) in rows 1-2. The best sampled model outperforms the scaled model by 0.6% with a 4× schedule. We repeat this analysis for RegNetZ (rows 3-4) and find the best sampled model outperforms the scaled model by 0.1%. These results indicate that scaling a high-accuracy model is not guaranteed to yield an optimal model. Nevertheless, scaling is often necessary for targeting high compute regimes where model optimization is not feasible.</p><p>The above results suggest a hybrid scaling strategy, in which we optimize a model at an intermediate flop regime prior to scaling the model to larger scales. In Table <ref type="table">7</ref>, rows 5-6, we compare two 16GF RegNetY models, one scaled by 32× from a 500MF model and one scaled 4× from an optimized 4GF model. The model obtained with the hybrid strategy of scaling an intermediate model is 0.3% better.</p><p>Finally, observe that the best sampled models have far fewer parameters than the scaled models. We found that at higher flop regimes, optimized models have fewer blocks in the last stage, which greatly reduces their parameters. This shows a limitation of uniformly scaling model stages without redistributing blocks across stages. Table <ref type="table">8</ref>. Large models. For reference and reproducibility, we list details of our scaled 4GF and 16GF models models trained using our 1×, 2×, and 4× schedules. For reference, we also retrain ResNet50 <ref type="bibr" target="#b11">[9]</ref> and ResNeXt50 <ref type="bibr" target="#b34">[32]</ref> using our strong setup (and obtain an ∼3% reduced error than originally reported).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.5.">Comparison of Large Models</head><p>The primary benefit of model scaling is it allows us to scale to larger models where optimization is not feasible. In Figure <ref type="figure">8</ref>, we scale four models up to 16GF using fast scaling. We make the following observations:</p><p>1. Model ranking is consistent across flop regimes, with scaled versions RegNetZ achieving the best accuracy. 2. All models obtained via fast scaling (dW r) are asymptotically faster than the original EfficientNet models, including our scaled versions of EfficientNet-B0. 3. The gap between the highest and lowest error models (RegNetY and RegNetZ) shrinks from 2.2% at 500MF to 0.8% at 16GF, implying that on ImageNet model optimization may be less important at high flop regimes. 4. The hybrid approach of scaling an intermediate flop regime model to higher flops (4GF→16GF) closes much of the gap between RegNetY and RegNetZ. 5. RegNetY is the fastest model tested and a good choice if runtime is constrained, especially at higher flops. In Table <ref type="table">8</ref> we give further details of the 4GF and 16GF models we tested, along with additional baselines. We note that RegNetY-4GF→16GF uses less memory and is faster than EfficientNet-B4, even though this RegNetY model has ∼4× as many flops. This emphasizes the importance of looking at metrics beyond flops when comparing models.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Discussion</head><p>In this work we presented a general framework for analyzing model scaling strategies that takes into account not just flops but also other network properties, including activations, which we showed are highly correlated with runtime on modern hardware. Given our analysis, we presented a fast scaling strategy that primarily, but not exclusively, scales model width. Fast scaling results in accurate models that also have fast runtime. While the optimal scaling approach may be task dependent, we hope our work provides a general framework for reasoning about model scaling. To study this difference, we introduce RegNetZ-G1 which is like RegNetZ but uses depthwise conv. At higher flops, RegNetZ shows gains over RegNetZ-G1 and EfficientNet, demonstrating that group conv may be a better option at higher compute regimes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Appendix</head><p>Large models additional analysis. In Figure <ref type="figure">9</ref> we show further analysis of the models from Figure <ref type="figure">8</ref>. The left plot shows error versus runtime, with RegNetY and RegNetZ offering the best speed versus accuracy tradeoff. While offering a useful perspective, the relative ranking of methods is implementation dependent and may change with additional optimizations. For example, group conv seems to be underoptimized relative to depthwise or full-width conv, so a better implementation could lead to speedups for models that rely on group conv. On the other hand, activations are highly predictive of runtime of a scaled model (right plot), which we expect to hold regardless of implementation.</p><p>Group vs. depthwise conv. EfficientNet <ref type="bibr" target="#b18">[16]</ref> uses depthwise conv while RegNetZ uses group conv. Does this explain the accuracy difference between them? To answer this, we introduce a variant RegNetZ which is constrained to use depthwise conv, denoted as RegNetZ-G1.</p><p>In Figure <ref type="figure" target="#fig_0">10</ref> we plot scaled versions of EfficientNet-B0, RegNetZ-500MF, and RegNetZ-G1-500MF (using dW r scaling). Interestingly, RegNetZ-G1 achieves better accuracy then EfficientNet, which is surprising as they use similar components and EfficientNet-B0 was obtained with a more sophisticated search. Nevertheless, we see that indeed much of the improvement of RegNetZ over EfficientNet, especially at higher flops, comes from using group conv. This is expected since activations and timings are highly correlated (see §4). Second, as expected, in Figure <ref type="figure" target="#fig_0">11</ref> we see w scaling results in lowest activations/runtime, and in Figure <ref type="figure" target="#fig_2">12</ref> we see that using a large α results in lowest activations/runtime for all models.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 .</head><label>1</label><figDesc>Figure1. An analysis of four model scaling strategies: width scaling (w), in which only the width of a base model is scaled; compound scaling (dwr), in which the width, depth, and resolution are all scaled in roughly equal proportions; depth and width scaling (dw); and the proposed fast compound scaling (dW r), which emphasizes scaling primarily, but not only, the model width. (Top): We apply the four scaling strategies to two base models (EfficientNet-B0 and RegNetZ-500MF). Compound and fast scaling result in highest accuracy models, and both outperform width scaling. (Bottom-left): The scaling strategies have asymptotically different behavior in how they affect model activations. Given a scale factor of s, activations increase with about O( √ s) for w and dW r scaling compared to almost O(s) for dwr and dw scaling. (Bottom-right): Runtime of a model (EfficientNet-B0) scaled using the four scaling strategies. Fast scaling results in models nearly as fast as w scaling (but with higher accuracy), and much faster than dwr and dw scaling, closely reflecting model activations.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. Model runtime as a function of various complexity metrics. (Top-left):We scale EfficientNet-B0 (EN-B0) using four scaling strategies (dwr, dw, dW r, w) with a wide range of scaling factors (s &lt; 100). For each scaling strategy we plot epoch time versus flops for each model (along with a best fit line). For a single scaling strategy (e.g., w), runtime is highly correlated with flops (e.g., Pearson's r = 0.99). However, when comparing scaled versions of the same model using different scaling strategies, flops are only weakly predictive of runtime (r = 0.81). (Top-right): Using the same set of models, we plot runtime versus parameters, and again observe parameters are even more weakly correlated with runtime (r = 0.56). (Bottom-left): Repeating the same analysis for runtime versus activations, we see that activations are strongly predictive of runtime regardless of the scaling strategy (r = 0.99). (Bottom-right): We repeat the analysis of runtime versus activations for three models (see §6.1 for model details). For scaled versions of each model, activations are highly predictive of runtime (r ≥ 0.99), and only very large models tend to be flop bound. This makes activations an excellent proxy for runtime. We note, however, that activations are less predictive of runtime when comparing scaled versions of different models (r = 0.95).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. RegNet blocks. Each stage consists of a stride s = 2 block that halves r and increases w followed by multiple stride s = 1 blocks with constant r and w. (a-b) The Y block is based on residual bottlenecks with group conv<ref type="bibr" target="#b34">[32]</ref>. Each block consists of a 1×1 conv, a 3×3 group conv, and a final 1×1 conv. The 1×1 convs can change w via the bottleneck ratio b, however, we set b = 1 following<ref type="bibr" target="#b24">[22]</ref>. BatchNorm<ref type="bibr" target="#b16">[14]</ref> and ReLU follow each conv. (c-d) We introduce the Z block based on inverted bottlenecks<ref type="bibr" target="#b27">[25]</ref>. The Z block is similar to the Y block with 4 differences: no nonlinearity follows the final 1×1 conv, (2) SiLU<ref type="bibr" target="#b12">[10]</ref> is used in place of ReLU, (3) the stride 2 variant of the block has no residual, and (4) b &lt; 1 (we use b = 1/4 in all experiments). Finally, a Squeezeand-Excitation (SE) op<ref type="bibr" target="#b14">[12]</ref> (reduction ratio of 1/4) follows the 3×3 conv for both the Y and Z blocks (not shown).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. Compound scaling: EfficientNet. (Left) Uniform compound scaling (dwr) offers the best accuracy relative to simple scaling along depth (d), width (w), or resolution (r). All models are scaled from EfficientNet-B0 (400MF) up to at most 4GF.(Right) Models obtained with w scaling are much faster than those from dwr scaling. Both of these results are expected. However, as we will show, it is possible to obtain models that are both fast and accurate. For reference, we also show the original EfficientNet models (orig) obtained via non-uniform compound scaling<ref type="bibr" target="#b33">[31]</ref>, the results closely match uniform compound scaling (dwr).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 5 .</head><label>5</label><figDesc>Figure 5. Compound scaling: RegNet. We apply simple and compound scaling to RegNetY-500MF (left) and RegNetZ-500MF (right). As in Figure4, dwr scaling achieves the best error, but at significant increase in runtime (see appendix) relative to w scaling.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 6</head><label>6</label><figDesc>Figure 6. Fast scaling: EfficientNet. We test scaling EfficientNet-B0 using our family of scaling strategies parameterized by α (see Table4). (Left) Scaling with any α &lt; 1 achieves good accuracy and results in a sizable gap in error to scaling with α = 1 (w). The exact value of α &lt; 1 does not greatly influence the error. (Right) While all scaling strategies with α &lt; 1 give good accuracy, their runtime differ substantially. A setting of α = 4/5 (dW r) gives the best of both worlds: models that are both fast and accurate.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 7 .</head><label>7</label><figDesc>Figure 7. Fast scaling: RegNet. We apply scaling with different α to RegNetY-500MF (left) and RegNetZ-500MF (right). As in Figure6, dW r scaling yields good accuracy and speed (see appendix for rutnimes). We note that α may potentially be be further tuned to tradeoff speed and accuracy, but we use α = 4/5 in this work.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 11 .Figure 12 .</head><label>1112</label><figDesc>Figure 11. Compound scaling: RegNet. Activations (top) and runtime (bottom) versus flops for the RegNetY (left) and RegNetZ (right) scaled models from Figure 5; shown here for completeness.Results are as expected, with activations being highly predictive of runtime and with w scaling resulting in the fastest scaled models.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table</head><label></label><figDesc></figDesc><table><row><cell>dims dw wr dr</cell><cell>√ √</cell><cell>scaling sd 4 √ sw d 4 √ sw 4 √ sd w 4 √</cell><cell>flops (f ) params (p) r sdw 2 r 2 sdw 2 s 3/4 dwr 2 acts (a) sr sdw 2 r 2 √ sdw 2 s 3/4 dwr 2 sr sdw 2 r 2 √ sdw 2 sdwr 2</cell></row><row><cell>dwr</cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 4 .</head><label>4</label><figDesc>Fast scaling. We introduce a family of scaling strategies parameterized by α. The top row shows scaling factor exponents e d , ew, and er as a function of α, and the relative increase in model complexity as a function of α and scaling factor s. The remaining rows show instantiations of the scaling strategy for various α. α = 1 corresponds to width (w) scaling, and α = 1/3 corresponds to uniform compound scaling (dwr)</figDesc><table><row><cell>dims</cell><cell>α</cell><cell>e d</cell><cell>ew</cell><cell>er</cell><cell>f</cell><cell>p</cell><cell>a</cell></row><row><cell>dr</cell><cell>α 0</cell><cell>1−α 2 0.5</cell><cell>α 0</cell><cell>1−α 2 0.5</cell><cell cols="2">s s s s 0.50 1+α 2</cell><cell>2−α 2 s 1.00 s</cell></row><row><cell>dwr</cell><cell>1/3</cell><cell>1/3</cell><cell>1/3</cell><cell>1/3</cell><cell cols="2">s s 0.67</cell><cell>s 0.83</cell></row><row><cell cols="2">dW r 0.8</cell><cell>0.1</cell><cell>0.8</cell><cell>0.1</cell><cell cols="2">s s 0.90</cell><cell>s 0.60</cell></row><row><cell>w</cell><cell>1</cell><cell>0</cell><cell>1</cell><cell>0</cell><cell cols="2">s s 1.00</cell><cell>s 0.50</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table</head><label></label><figDesc></figDesc><table><row><cell cols="4">flops params acts time</cell><cell cols="2">publication</cell><cell>schedule</cell></row><row><cell>(B)</cell><cell>(M)</cell><cell cols="4">(M) (min) ICML arXiv</cell><cell>1×</cell><cell>2×</cell><cell>4×</cell></row><row><cell>EN-B0 0.4</cell><cell>5.3</cell><cell>6.7</cell><cell>2.8</cell><cell>23.7</cell><cell cols="2">22.7 23.6±0.09 22.7±0.08 22.3±0.04</cell></row><row><cell>EN-B1 0.7</cell><cell>7.8</cell><cell cols="2">10.9 4.6</cell><cell>21.2</cell><cell cols="2">20.8 21.7±0.18 20.8±0.10 20.5±0.09</cell></row><row><cell>EN-B2 1.0</cell><cell>9.1</cell><cell cols="2">13.8 5.9</cell><cell>20.2</cell><cell cols="2">19.7 20.7±0.06 20.0±0.12 19.6±0.09</cell></row><row><cell>EN-B3 1.8</cell><cell>12.2</cell><cell cols="2">23.8 9.5</cell><cell>18.9</cell><cell cols="2">18.3 19.4±0.07 18.8±0.10 18.3±0.11</cell></row><row><cell>EN-B4 4.4</cell><cell>19.3</cell><cell cols="2">49.5 19.2</cell><cell>17.4</cell><cell cols="2">17.0 18.0±0.05 17.4±0.07 17.3±0.06</cell></row><row><cell>EN-B5 10.3</cell><cell>30.4</cell><cell cols="2">98.9 40.8</cell><cell>16.7</cell><cell cols="2">16.3 17.1±0.13 16.7±0.05</cell><cell>-</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 6 .</head><label>6</label><figDesc>RegNet Baselines. The two 500MF RegNet models use a default resolution of 224. RegNetY-4GF-224 uses the default 224 resolution; RegNetY-4GF uses a resolution found by random search. Likewise there are two versions of RegNetZ-4GF with default and discovered resolutions.</figDesc><table><row><cell></cell><cell cols="4">flops params acts time</cell><cell></cell><cell>schedule</cell></row><row><cell></cell><cell>(B)</cell><cell>(M)</cell><cell cols="2">(M) (min)</cell><cell>1×</cell><cell>2×</cell><cell>4×</cell></row><row><cell>RegNetY-500MF</cell><cell>0.5</cell><cell>5.6</cell><cell>4.2</cell><cell>2.3</cell><cell cols="2">24.8±0.07 23.9±0.14 23.2±0.05</cell></row><row><cell>RegNetZ-500MF</cell><cell>0.5</cell><cell>7.1</cell><cell>5.9</cell><cell>3.1</cell><cell cols="2">22.2±0.04 21.3±0.02 21.0±0.08</cell></row><row><cell cols="2">RegNetY-4GF-224 4.0</cell><cell>20.6</cell><cell cols="2">12.3 6.4</cell><cell cols="2">19.4±0.07 18.4±0.05 18.1±0.07</cell></row><row><cell>RegNetY-4GF</cell><cell>4.1</cell><cell>22.4</cell><cell cols="2">14.5 7.7</cell><cell cols="2">18.8±0.04 18.0±0.07 17.7±0.09</cell></row><row><cell cols="2">RegNetZ-4GF-224 4.0</cell><cell>26.9</cell><cell cols="4">20.8 11.3 17.7±0.04 17.2±0.06 17.0±0.04</cell></row><row><cell>RegNetZ-4GF</cell><cell>4.0</cell><cell>28.1</cell><cell cols="4">24.3 11.7 17.5±0.09 17.0±0.12 16.9±0.04</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head></head><label></label><figDesc>Figure 8. Large models. We scale four models via fast scaling (dW r) up to 16GF (1× to 32× scaling). We include the original EfficientNet model for reference. All results use our 2× schedule. See §6.5 for details and discussion.</figDesc><table><row><cell>error</cell><cell>18 20 22 24</cell><cell></cell><cell></cell><cell cols="4">EfficientNet [original] EfficientNet-B0 [dWr] RegNetY-500MF [dWr] RegNetZ-500MF [dWr] RegNetY-4GF [dWr]</cell><cell>epoch time (m)</cell><cell>10 20 30 40</cell><cell></cell><cell cols="2">EfficientNet [original] EfficientNet-B0 [dWr] RegNetY-500MF [dWr] RegNetZ-500MF [dWr] RegNetY-4GF [dWr]</cell><cell></cell></row><row><cell></cell><cell>16</cell><cell>0.5</cell><cell>1</cell><cell>2 flops (B)</cell><cell>4</cell><cell>8</cell><cell>16</cell><cell></cell><cell>0</cell><cell>0.5</cell><cell>1</cell><cell>2 flops (B)</cell><cell>4</cell><cell>8</cell><cell>16</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head></head><label></label><figDesc>Plotting error versus runtime shows that scaled versions of RegNetY and RegNetZ offer the best speed versus accuracy tradeoff. However, the exact speed of these models is implementation dependent and may change with additional optimizations. (Right): For a given model type, activations of these large state-of-the-art models are strongly predictive of runtime, as expected.Figure10. Group vs. Depthwise Conv. EfficientNet uses depthwise conv while RegNetZ uses group conv, but otherwise the models use fairly similar components (inverted bottlenecks, SiLU, SE).</figDesc><table><row><cell>error</cell><cell>16 18 20 22 24</cell><cell>2</cell><cell>4</cell><cell>8 epoch time (m) 16 EfficientNet [original] 32 EfficientNet-B0 [dWr] RegNetY-500MF [dWr] RegNetZ-500MF [dWr] RegNetY-4GF [dWr]</cell><cell>epoch time (m)</cell><cell>40 0 10 20 30</cell><cell></cell><cell>20</cell><cell>40 activations (M) 60 EfficientNet [original] 80 100 EfficientNet-B0 [dWr] RegNetY-500MF [dWr] RegNetZ-500MF [dWr] RegNetY-4GF [dWr]</cell></row><row><cell cols="10">Figure 9. Large Models Additional Analysis (see also Figure 8).</cell></row><row><cell cols="3">16 (Left): 0.5 18 20 22 24 error</cell><cell>1</cell><cell>2 flops (B) EfficientNet-B0 [dWr] 4 8 RegNetZ-500MF [dWr] RegNetZ-G1-500MF [dWr] 16</cell><cell>epoch time (m)</cell><cell>0 10 20 30 40</cell><cell>0.5</cell><cell cols="2">1 EfficientNet-B0 [dWr] 2 flops (B) RegNetZ-500MF [dWr] RegNetZ-G1-500MF [dWr] 4</cell><cell>8</cell><cell>16</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">https://github.com/facebookresearch/pycls</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_1">√sd<ref type="bibr" target="#b8">6</ref> √ sw 6 √ sr sdw 2 r 2 s 2/3 dw 2 s 5/6 dwr 2</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">√s when scaling each dimension and by 3 √ s 3 = s in total.Interestingly, the compound scaling rule discovered empirically in<ref type="bibr" target="#b33">[31]</ref> scaled by 1.2, 1.1, and 1.15 along d, w, and r, which corresponds roughly to uniform compound scaling with s = 2 ( 3 √ s ≈ 1.26, 6 √ s ≈ 1.12). We thus use uniform compound scaling as a simple proxy for the purpose of our analysis. Observe that for uniform compound scaling, activations increase nearly linearly with s.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>We would like to thank Xiaoliang Dai for help with the simple yet strong training setup used in this work and Kaiming He and Ilija Radosavovic for valuable discussions and feedback.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<idno>4GF→16GF 15.5 72.3 30.7 16.4 17.3±0.09 16.8±0.11 16.6±0.03</idno>
+		<title level="m">flops params acts time schedule</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Regnety-4gf</forename></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Regnety-500mf→4gf</forename></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Unsupervised learning of visual features by contrasting cluster assignments</title>
+		<author>
+			<persName><forename type="first">Mathilde</forename><surname>Caron</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ishan</forename><surname>Misra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julien</forename><surname>Mairal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Priya</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piotr</forename><surname>Bojanowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Armand</forename><surname>Joulin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">NeurIPS</title>
+		<imprint>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<author>
+			<persName><forename type="first">Ting</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Kornblith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Norouzi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><surname>Hinton</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2002.05709</idno>
+		<title level="m">A simple framework for contrastive learning of visual representations</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Xception: Deep learning with depthwise separable convolutions</title>
+	</analytic>
+	<monogr>
+		<title level="m">Franc ¸ois Chollet</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note>CVPR</note>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Ekin D Cubuk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dandelion</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Mane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Autoaugment</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.09501</idno>
+		<title level="m">Learning augmentation policies from data</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<author>
+			<persName><forename type="first">Xiaoliang</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alvin</forename><surname>Wan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peizhao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bichen</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zijian</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhen</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kan</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuandong</forename><surname>Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Vajda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><forename type="middle">E</forename><surname>Gonzalez</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2006.02049</idno>
+		<title level="m">FBNetV3: Joint architecture-recipe search using neural acquisition function</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">ImageNet: A large-scale hierarchical image database</title>
+		<author>
+			<persName><forename type="first">Jia</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li-Jia</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li</forename><surname>Fei-Fei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<author>
+			<persName><forename type="first">Priya</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piotr</forename><surname>Dollár</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pieter</forename><surname>Noordhuis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukasz</forename><surname>Wesolowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aapo</forename><surname>Kyrola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Tulloch</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1706.02677</idno>
+		<title level="m">Yangqing Jia, and Kaiming He. Accurate, large minibatch sgd: Training ImageNet in 1 hour</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Momentum contrast for unsupervised visual representation learning</title>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haoqi</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuxin</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saining</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><surname>Girshick</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Deep residual learning for image recognition</title>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaoqing</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2008">2016. 2, 5, 8</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Hendrycks</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Gimpel</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1606.08415</idno>
+		<title level="m">Gaussian error linear units (GELUs)</title>
+				<imprint>
+			<date type="published" when="2006">2016. 2, 5, 6</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<author>
+			<persName><forename type="first">Menglong</forename><surname>Andrew G Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Weijun</forename><surname>Kalenichenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tobias</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Weyand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hartwig</forename><surname>Andreetto</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Adam</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1704.04861</idno>
+		<title level="m">Mobilenets: Efficient convolutional neural networks for mobile vision applications</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Squeeze-and-excitation networks</title>
+		<author>
+			<persName><forename type="first">Jie</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gang</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">6</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Gpipe: Efficient training of giant neural networks using pipeline parallelism</title>
+		<author>
+			<persName><forename type="first">Yanping</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youlong</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankur</forename><surname>Bapna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Orhan</forename><surname>Firat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dehao</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mia</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyoukjoong</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiquan</forename><surname>Ngiam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yonghui</forename><surname>Quoc V Le</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Wu</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Batch normalization: Accelerating deep network training by reducing internal covariate shift</title>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Ioffe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Szegedy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">ImageNet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">NeurIPS</title>
+		<imprint>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Progressive neural architecture search</title>
+		<author>
+			<persName><forename type="first">Chenxi</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maxim</forename><surname>Neumann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Hua</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li-Jia</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li</forename><surname>Fei-Fei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alan</forename><surname>Yuille</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Murphy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ECCV</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page">9</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Darts: Differentiable architecture search</title>
+		<author>
+			<persName><forename type="first">Hanxiao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Yang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Exploring the limits of weakly supervised pretraining</title>
+		<author>
+			<persName><forename type="first">Dhruv</forename><surname>Mahajan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vignesh</forename><surname>Ramanathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manohar</forename><surname>Paluri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yixuan</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashwin</forename><surname>Bharambe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Laurens</forename><surname>Van Der Maaten</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ECCV</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">Mixed precision training</title>
+		<author>
+			<persName><forename type="first">Paulius</forename><surname>Micikevicius</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sharan</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonah</forename><surname>Alben</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gregory</forename><surname>Diamos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erich</forename><surname>Elsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Garcia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Ginsburg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Houston</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Oleksii</forename><surname>Kuchaiev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ganesh</forename><surname>Venkatesh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Wu</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Efficient neural architecture search via parameter sharing</title>
+		<author>
+			<persName><forename type="first">Hieu</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Melody</forename><forename type="middle">Y</forename><surname>Guan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeff</forename><surname>Quoc V Le</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Dean</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">On network design spaces for visual recognition</title>
+		<author>
+			<persName><forename type="first">Ilija</forename><surname>Radosavovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Justin</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saining</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wan-Yen</forename><surname>Lo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piotr</forename><surname>Dollár</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCV</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Designing network design spaces</title>
+		<author>
+			<persName><forename type="first">Ilija</forename><surname>Radosavovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Raj</forename><forename type="middle">Prateek</forename><surname>Kosaraju</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piotr</forename><surname>Dollár</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2006">2020. 1, 2, 4, 5, 6</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">Prajit</forename><surname>Ramachandran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1710.05941</idno>
+		<title level="m">Searching for activation functions</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">5</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Regularized evolution for image classifier architecture search</title>
+		<author>
+			<persName><forename type="first">Esteban</forename><surname>Real</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alok</forename><surname>Aggarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanping</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">AAAI</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Mobilenetv2: Inverted residuals and linear bottlenecks</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Menglong</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrey</forename><surname>Zhmoginov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Liang-Chieh</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">6</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Very deep convolutional networks for large-scale image recognition</title>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Zisserman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Revisiting unreasonable effectiveness of data in deep learning era</title>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhinav</forename><surname>Shrivastava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saurabh</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhinav</forename><surname>Gupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCV</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Going deeper with convolutions</title>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Szegedy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yangqing</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pierre</forename><surname>Sermanet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Reed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dragomir</forename><surname>Anguelov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dumitru</forename><surname>Erhan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vincent</forename><surname>Vanhoucke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Rabinovich</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Rethinking the inception architecture for computer vision</title>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Szegedy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vincent</forename><surname>Vanhoucke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Ioffe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zbigniew</forename><surname>Wojna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">6</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Mnas-Net: Platform-aware neural architecture search for mobile</title>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruoming</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">5</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Efficientnet: Rethinking model scaling for convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2008">2019. 1, 2, 3, 4, 5, 6, 7, 8</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Aggregated residual transformations for deep neural networks</title>
+		<author>
+			<persName><forename type="first">Saining</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piotr</forename><surname>Dollár</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhuowen</forename><surname>Tu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2008">2017. 2, 6, 8</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">Performance analysis of GPUaccelerated applications using the roofline model</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Williams</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Wide residual networks</title>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Zagoruyko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikos</forename><surname>Komodakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">BMVC</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="page">5</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">mixup: Beyond empirical risk minimization</title>
+		<author>
+			<persName><forename type="first">Hongyi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moustapha</forename><surname>Cissé</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yann</forename><forename type="middle">N</forename><surname>Dauphin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Lopez-Paz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Neural architecture search with reinforcement learning</title>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">1</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Learning transferable architectures for scalable image recognition</title>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

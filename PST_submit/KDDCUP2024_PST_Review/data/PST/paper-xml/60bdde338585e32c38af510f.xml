@@ -1,0 +1,1662 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">GNNAutoScale: Scalable and Expressive Graph Neural Networks via Historical Embeddings</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2021-06-10">10 Jun 2021</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Matthias</forename><surname>Fey</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Jan</forename><forename type="middle">Eric</forename><surname>Lenssen</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Frank</forename><surname>Weichert</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Jure</forename><surname>Leskovec</surname></persName>
+						</author>
+						<title level="a" type="main">GNNAutoScale: Scalable and Expressive Graph Neural Networks via Historical Embeddings</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2021-06-10">10 Jun 2021</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2106.05609v1[cs.LG]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T12:37+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>We present GNNAutoScale (GAS), a framework for scaling arbitrary message-passing GNNs to large graphs. GAS prunes entire sub-trees of the computation graph by utilizing historical embeddings from prior training iterations, leading to constant GPU memory consumption in respect to input node size without dropping any data. While existing solutions weaken the expressive power of message passing due to sub-sampling of edges or non-trainable propagations, our approach is provably able to maintain the expressive power of the original GNN. We achieve this by providing approximation error bounds of historical embeddings and show how to tighten them in practice. Empirically, we show that the practical realization of our framework, PyGAS, an easy-to-use extension for PYTORCH GEOMETRIC, is both fast and memory-efficient, learns expressive node representations, closely resembles the performance of their non-scaling counterparts, and reaches stateof-the-art performance on large-scale graphs.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Graph Neural Networks (GNNs) capture local graph structure and feature information in a trainable fashion to derive powerful node representations suitable for a given task at hand <ref type="bibr" target="#b13">(Hamilton, 2020;</ref><ref type="bibr" target="#b25">Ma &amp; Tang, 2020)</ref>. As such, numerous GNNs have been proposed in the past that integrate ideas such as maximal expressiveness <ref type="bibr" target="#b44">(Xu et al., 2019)</ref>, anisotropy and attention <ref type="bibr" target="#b40">(Veličković et al., 2018)</ref>, non-linearities <ref type="bibr" target="#b41">(Wang et al., 2019)</ref>, or multiple aggregations <ref type="bibr" target="#b7">(Corso et al., 2020)</ref> into their message passing formulation. However, one of the challenges that have so far precluded their wide adoption in industrial and social applications is the difficulty to scale them to large graphs <ref type="bibr" target="#b11">(Frasca et al., 2020)</ref>.</p><p>While the full-gradient in a GNN is straightforward to compute, assuming one has access to all hidden node embeddings in all layers, this is not feasible in large-scale graphs due to GPU memory limitations <ref type="bibr" target="#b25">(Ma &amp; Tang, 2020)</ref>. Therefore, it is desirable to approximate its full-batch gradient stochastically by considering only a mini-batch B ⊆ V of nodes for loss computation. However, this stochastic gradient is still expensive to obtain due to the exponentially increasing dependency of nodes over layers; a phenomenon framed as neighbor explosion <ref type="bibr" target="#b14">(Hamilton et al., 2017)</ref>. Due to neighbor explosion and since the whole computation graph needs to be stored on the GPU, deeper architectures can not be applied to large graphs. Therefore, a scalable solution needs to make the memory consumption constant or sub-linear in respect to the number of input nodes.</p><p>Recent works aim to alleviate this problem by proposing various sampling techniques based on the concept of dropping edges <ref type="bibr" target="#b25">(Ma &amp; Tang, 2020;</ref><ref type="bibr" target="#b32">Rong et al., 2020)</ref>: Nodewise sampling <ref type="bibr" target="#b14">(Hamilton et al., 2017;</ref><ref type="bibr" target="#b3">Chen et al., 2018b;</ref><ref type="bibr" target="#b26">Markowitz et al., 2021)</ref> recursively samples a fixed number of 1-hop neighbors; Layer-wise sampling techniques independently sample nodes for each layer, leading to a constant sample size in each layer <ref type="bibr" target="#b2">(Chen et al., 2018a;</ref><ref type="bibr" target="#b53">Zou et al., 2019;</ref><ref type="bibr" target="#b19">Huang et al., 2018)</ref>; In subgraph sampling <ref type="bibr" target="#b5">(Chiang et al., 2019;</ref><ref type="bibr" target="#b49">Zeng et al., 2020b;</ref><ref type="bibr">a)</ref>, a full GNN is run on an entire subgraph G[B] induced by a sampled batch of nodes B ⊆ V. These techniques get rid of the neighbor explosion problem by sampling the graph but may fail to preserve the edges that present a meaningful topological structure. Further, existing approaches are either still restricted to shallow networks, non-exchangeable GNN operators or operators with reduced expressiveness. In particular, they consider only specific GNN operators and it is an open question whether these techniques can be successfully applied to the wide range of GNN architectures available <ref type="bibr" target="#b40">(Veličković et al., 2018;</ref><ref type="bibr" target="#b44">Xu et al., 2019;</ref><ref type="bibr" target="#b7">Corso et al., 2020;</ref><ref type="bibr" target="#b4">Chen et al., 2020b)</ref>. Another line of work is based on the idea of decoupling propagations from predictions, either as a pre- <ref type="bibr" target="#b42">(Wu et al., 2019;</ref><ref type="bibr" target="#b22">Klicpera et al., 2019a;</ref><ref type="bibr" target="#b11">Frasca et al., 2020;</ref><ref type="bibr" target="#b46">Yu et al., 2020)</ref> or post-processing step <ref type="bibr" target="#b18">(Huang et al., 2021)</ref>. While this scheme enjoys fast training and inference time, it cannot be applied to any GNN, in particular because the propagation is non-trainable, and therefore reduces model expressiveness. A different scalability technique is based on the idea of training each GNN layer in isolation <ref type="bibr" target="#b45">(You et al., 2020)</ref>. While this scheme resolves the neighbor explosion problem and accounts for all edges, it cannot infer complex interactions across consecutive layers.</p><p>Here, we propose the GNNAutoScale (GAS) framework that disentangles the scalability aspect of GNNs from their underlying message passing implementation. GAS revisits and generalizes the idea of historical embeddings <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref>, which are defined as node embeddings acquired in previous iterations of training, cf. Figure <ref type="figure" target="#fig_0">1</ref>. For a given minibatch of nodes, GAS prunes the GNN computation graph so that only nodes inside the current mini-batch and their direct 1-hop neighbors are retained, independent of GNN depth. Historical embeddings act as an offline storage and are used to accurately fill in the inter-dependency information of out-of-mini-batch nodes, cf. Figure <ref type="figure" target="#fig_0">1c</ref>. Through constant memory consumption in respect to input node size, GAS is able to scale the training of GNNs to large graphs, while still accounting for all available neighborhood information.</p><p>We show that approximation errors induced by historical information are solely caused by the staleness of the history and the Lipschitz continuity of the learned function, and propose solutions for tightening the proven bounds in practice. Furthermore, we connect scalability with expressiveness and theoretically show under which conditions historical embeddings allow to learn expressive node representations on large graphs. As a result, GAS is the first scalable solution that is able to keep the existing expressivity properties of the used GNN, which exist for a wide range of models <ref type="bibr" target="#b44">(Xu et al., 2019;</ref><ref type="bibr" target="#b29">Morris et al., 2019;</ref><ref type="bibr" target="#b7">Corso et al., 2020)</ref>.</p><p>We implement our framework practically as PyGAS<ref type="foot" target="#foot_2">1</ref> , an extension for the PYTORCH GEOMETRIC library <ref type="bibr">(Fey &amp; Lenssen, 2019)</ref>, which makes it easy to convert common and custom GNN models into their scalable variants and to apply them to large-scale graphs. Experiments show that GNNs utilizing GAS achieve the same performances as their (non-scalable) full-batch equivalents (while requiring orders of magnitude less GPU memory), and are able to learn expressive node representations. Furthermore, GAS allows the application of expressive and hard-to-scale-up models on large graphs, leading to state-of-the-art results on several large-scale graph benchmark datasets.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Scalable GNNs via Historical Embeddings</head><formula xml:id="formula_0">Background. Let G = (V, E) or A ∈ {0, 1}</formula><p>|V|×|V| denote a graph with node feature vectors x v for all v ∈ V.</p><p>In this work, we are mostly interested in the task of node classification, where each node v ∈ V is associated with a label y v , and the goal is to learn a representation h v from w w∈N (v)\B</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Historical embeddings</head><p>(2)</p><p>Here, we separate the neighborhood information of the multiset into two parts:</p><p>(1) the local information of neighbors N (v) which are part of the current mini-batch B, and (2) the information of neighbors which are not included in the current mini-batch. For out-of-mini-batch nodes, we approximate their embeddings via historical embeddings acquired in previous iterations of training <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref>, denoted by h( ) w . After each step of training, the newly computed embeddings h ( +1) v are pushed to the history and serve as historical embeddings h( +1)</p><p>w in future iterations. The separation of in-mini-batch nodes and out-of-mini-batch nodes, and their approximation via historical embeddings represent the foundation of our GAS framework.</p><p>A high-level illustration of its computation flow is visualized in Figure <ref type="figure" target="#fig_0">1</ref>. Figure <ref type="figure" target="#fig_0">1b</ref> shows the original data flow without</p><formula xml:id="formula_1">v1 v2 v3 v4 v5 v6 v7 v8 Mini-batch B 1-hop neighborhood v∈B N (v) \ B G (a) Mini-batch selection GPU f (3) θ f (2) θ f (1) θ v1 v2 v3 v4 v5 v6 v7 v8 v1 v2 v3 v4 v5 v6 v1 v2 v3 v4 v1 v2 (b) Original computation graph H(1) H(2) GPU CPU f (3) θ f (2) θ f (1) θ v1 v2 v3 v4 v1 v2 v3 v4 v1 v2 v3 v4 v1 v2</formula><p>(c) GAS computation graph The usage of historical embeddings avoids this problem as it allows to prune entire sub-trees of the computation graph, which leads to constant GPU memory consumption in respect to input node size (c). Here, nodes in the current mini-batch push their updated embeddings to the history H( ) , while their direct neighbors pull their most recent historical embeddings from H( ) for further processing.</p><p>historical embeddings. The required GPU memory increases as the model gets deeper. After a few layers, embeddings for the entire input graph need to be stored, even if only a mini-batch of nodes is considered for loss computation. In contrast, historical embeddings eliminate this problem by approximating entire sub-trees of the computation graph, cf. Figure <ref type="figure" target="#fig_0">1c</ref>. The required historical embeddings are pulled from an offline storage, instead of being re-computed in each iteration, which keeps the required information for each batch local. For a single batch B ⊆ V, the GPU memory footprint for one training step is given by O(| v∈B N (v) ∪ {v}| • L) and thus only scales linearly with the number of layers L. The majority of data (the histories) can be stored in RAM or hard drive storage rather than GPU memory.</p><p>In the following, we are going to use h( ) v to denote embeddings estimated via GAS (line 3 of Equation ( <ref type="formula">2</ref>)) to differentiate them from the exact embeddings obtained without historical approximation (line 1 of Equation ( <ref type="formula">2</ref>)). In contrast to existing scaling solutions based on sub-sampling edges, the usage of historical embeddings as utilized in GAS provides the following additional advantages:</p><p>(1) GAS trains over all the data: In GAS, a GNN will make use of all available graph information, i.e. no edges are dropped, which results in lower variance and more accurate estimations (since</p><formula xml:id="formula_2">h( ) v − h ( ) v h ( ) v</formula><p>). Importantly, for a single epoch and layer, each edge is still only processed once, putting its time complexity O(|E|) on par with its full-batch counterpart. Notably, more accurate estimations will further strengthen gradient estimation during backpropagation. Specifically, the model parameters will be updated based on the node embeddings of all neighbors since ∂ h( +1) v /∂θ also depends on {{ h( ) w : w ∈ N (v) \ B} }.</p><p>(2) GAS enables constant inference time complexity:</p><p>The time complexity of model inference is reduced to a constant factor, since we can directly use the historical embeddings of the last layer to derive predictions for test nodes.</p><p>(3) GAS is simple to implement: Our scheme does not need to maintain recursive layer-wise computation graphs, which makes its overall implementation straightforward and comparable to full-batch training. Only minor modifications are required to pull information from and push information to the histories, cf. our training algorithm in the appendix.</p><p>(4) GAS provides theoretical guarantees: In particular, if the model weights are kept fixed, h( ) v eventually equals h ( ) v after a fixed amount of iterations <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Approximation Error and Expressiveness</head><p>The advantages of utilizing historical embeddings h( ) v to compute an approximation h( ) v of the exact embedding h</p><formula xml:id="formula_3">( ) v come at the cost of an approximation error h( ) v − h ( ) v</formula><p>, which can be decomposed into two sources of variance:</p><p>(1) The closeness of estimated inputs to their exact values, i.e.</p><formula xml:id="formula_4">h( −1) v − h ( −1) v ≥ 0, and (2) the staleness of histori- cal embeddings, i.e. h( −1) v − h( −1) v ≥ 0.</formula><p>In the following, we show concrete bounds for this error, which can be then tightened using specific procedures. Here, our analysis focuses on arbitrary f ( ) θ GNN layers as described in Equation (1), but we restrict both MESSAGE </p><formula xml:id="formula_5">− h( −1) v ≤ ,</formula><p>then the output error is bounded by</p><formula xml:id="formula_6">h( ) v − h ( ) v ≤ δ k 2 + (δ + ) k 1 k 2 |N (v)|.</formula><p>Due to the behavior of Lipschitz constants in a series of function compositions, we obtain an upper bound that is dependent on k 1 , k 2 and |N (v)|, as well as dependent on the errors δ and of the inputs. Interestingly, sum aggregation, the most expressive aggregation function <ref type="bibr" target="#b44">(Xu et al., 2019)</ref>  ) , and is instead solely conditioned on the staleness of histories ( ) . However, it depends exponentially on the Lipschitz constants k 1 and k 2 as well as |N (v)| with respect to the number of layers. In particular, each additional layer introduces a less restrictive bound since the errors made in the first layers get immediately propagated to later ones, leading to potentially high inaccuracies for histories in deeper GNNs. We will later propose solutions for tightening the proven bound in practice, allowing the application of GAS to deep and non-linear GNNs. Furthermore, Theorem 2 lets us immediately derive an upper error bound of gradients as well, i.e.</p><formula xml:id="formula_7">h(L) v,j − h (L) v,j ≤ L−1 =1 ( ) k L− 1 k L− 2 |N (v)| L− .</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Notably, this upper bound does not longer depend on</head><formula xml:id="formula_8">h( ) v − h ( ) v ≤ δ (</formula><formula xml:id="formula_9">h( ) v − h( ) v<label>≤</label></formula><formula xml:id="formula_10">∇ θ L( h(L) v ) − ∇ θ L(h (L) v ) ≤ λ h(L) v − h (L) v in case L is λ-Lipschitz continuous.</formula><p>As such, GAS encourages low variance and bias in the learning signal as well. However, parameters are not guaranteed to converge to the same optimum since we explicitely consider arbitrary GNNs solving non-convex problems <ref type="bibr" target="#b6">(Cong et al., 2020)</ref>.</p><p>It is well known that the most powerful GNNs adhere to the same representational power as the Weisfeiler-Lehman (WL) test <ref type="bibr" target="#b41">(Weisfeiler &amp; Lehman, 1968</ref>) in distinguishing nonisomorphic structures, i.e. h</p><formula xml:id="formula_11">(L) v = h (L) w in case c (L) v = c</formula><p>(L) w <ref type="bibr" target="#b44">(Xu et al., 2019;</ref><ref type="bibr" target="#b29">Morris et al., 2019)</ref>, where c</p><formula xml:id="formula_12">(L) v</formula><p>denotes a node's coloring after L rounds of color refinement. However, in order to leverage such expressiveness, a GNN needs to be able to reason about structural differences across neighborhoods directly during training. We now show that GNNs that scale by sampling edges are not capable of doing so:</p><formula xml:id="formula_13">Proposition 3. Let f (L) θ : V → R d be a L-layered GNN</formula><p>as expressive as the WL test in distinguishing the L-hop neighborhood around each node v ∈ V. Then, there exists a graph A ∈ {0, 1}</p><p>|V|×|V| for which f</p><formula xml:id="formula_14">(L) θ operating on a sampled variant Ã, ãv,w = |N (v)| | Ñ (v)| , if w ∈ Ñ (v) 0, otherwise , pro- duces a non-equivalent coloring, i.e. h(L) v = h(L) w while c (L) v = c (L) w for nodes v, w ∈ V.</formula><p>While sampling strategies lose expressive power due to sub-sampling of edges, scalable GNNs based on historical embeddings are leveraging all edges during neighborhood aggregation. Therefore, a special interest lies in the question if historical-based GNNs are as expressive as their full-batch counterpart. Here, a maximally powerful and scalable GNN needs to fulfill the following two requirements: (1) It needs to be as expressive as the WL test in distinguishing nonisomorphic structures, and (2) it needs to account for the approximation error</p><formula xml:id="formula_15">h( −1) v −h ( −1) v</formula><p>induced by the usage of historical embeddings. Since it is known that there exists a wide range of maximally powerful GNNs <ref type="bibr" target="#b44">(Xu et al., 2019;</ref><ref type="bibr" target="#b29">Morris et al., 2019;</ref><ref type="bibr" target="#b7">Corso et al., 2020)</ref>, we can restrict our analysis to the latter question. Following upon <ref type="bibr" target="#b44">Xu et al. (2019)</ref>, we focus on the case where input node features are from a countable set P d ⊂ R d of bounded size:</p><formula xml:id="formula_16">Lemma 4. Let { {h ( −1) v : v ∈ V} } be a countable multiset such that h ( −1) v − h ( −1) w &gt; 2(δ + ) for all v, w ∈ V, h ( −1) v = h ( −1) w . If the inputs are close to the exact input, i.e. h( −1) v − h ( −1) v</formula><p>≤ δ, and the historical embeddings do not run too stale, i.e.</p><formula xml:id="formula_17">h( −1) v − h( −1) v ≤ , then there exist MESSAGE ( ) θ and UPDATE ( ) θ functions, such that f ( ) θ ( h( −1) v ) − f ( ) θ (h ( −1) v ) ≤ δ + and f ( ) θ (h ( −1) v ) − f ( ) θ (h ( −1) w ) &gt; 2(δ + + λ) for all v, w ∈ V, h ( −1) v = h ( −1) w</formula><p>and all λ &gt; 0.</p><p>Informally, Lemma 4 tells us that if (1) exact input embeddings are sufficiently far apart from each other and (2) historical embeddings are sufficiently close to the exact embeddings, there exist historical-based GNN operators which can distinguish equal from non-equal inputs. Key to the proof is that (δ + )-balls around exact inputs do not intersect each other and are therefore well separated. Notably, we do not require f ( )</p><formula xml:id="formula_18">θ to model strict injectivity since it is sufficient for f ( )</formula><p>θ to be 2(δ + )-injective <ref type="bibr" target="#b34">(Seo et al., 2019)</ref>.</p><p>Following <ref type="bibr" target="#b44">Xu et al. (2019)</ref>, one can leverage MLPs to model and learn such MESSAGE and UPDATE functions due to the universal approximation theorem <ref type="bibr" target="#b16">(Hornik et al., 1989;</ref><ref type="bibr" target="#b15">Hornik, 1991)</ref>. However, the theory behind Lemma 4 holds for any maximally powerful GNN operator. Finally, we can use this insight to relate the expressiveness of scalable GNNs to the WL test color refinement procedure:</p><formula xml:id="formula_19">Theorem 5. Let f (L) θ be a L-layered GNN in which all MESSAGE ( ) θ and UPDATE ( )</formula><p>θ functions fulfill the conditions of Lemma 4. Then, there exists a map φ : R d → Σ so that φ(</p><formula xml:id="formula_20">h(L) v ) = c (L) v for all v ∈ V.</formula><p>Theorem 5 extends the insights of Lemma  <ref type="bibr" target="#b32">(Rong et al., 2020)</ref> are still applicable for data augmentation and message reduction. However, through the given theorem, we disentangle scalability and expressiveness from regularization via edge dropping.</p><p>While sampling approaches lose expressiveness compared to their original counterparts (cf. Proposition 3), Theorem 5 tells us that, in theory, there exist message passing functions that are as expressive as the WL test in distinguishing non-isomorphic structures while accounting for the effects of approximation in stored embeddings. In practice, we have two degrees of freedom to tighten the upper bounds given by Lemma 1 and Theorem 2, leading to a lower approximation error and higher expressiveness in return: (1) Minimizing the staleness of historical embeddings, and (2) maximizing the closeness of estimated inputs to their exact values by controlling the Lipschitz constants of UPDATE and MESSAGE functions. In what follows, we derive a list of procedures to achieve these goals:</p><p>Minimizing Inter-Connectivity Between Batches. As formulated in Equation ( <ref type="formula">2</ref>) in Section 2, the output embeddings of f</p><formula xml:id="formula_21">( +1) θ are exact if | v∈B N (v) ∪ {v}| = |B|, i.</formula><p>e. all neighbors of nodes in B are as well part of B. However, in practice, this can only be guaranteed for full-batch GNNs. Motivated by this observation, we aim to minimize the inter-connectivity between sampled mini-batches, i.e. min | v∈B N (v) \ B|, which minimizes history access, and increases closeness and reduces staleness in return.</p><p>Similar to CLUSTER-GCN <ref type="bibr" target="#b5">(Chiang et al., 2019)</ref>, we make use of graph clustering techniques, e.g., METIS <ref type="bibr" target="#b20">(Karypis &amp; Kumar, 1998;</ref><ref type="bibr" target="#b8">Dhillon et al., 2007)</ref>, to achieve this goal. It aims to construct partitions over the nodes in a graph such that intra-links within clusters occur much more frequently than inter-links between different clusters. Intuitively, this results in a high chance that neighbors of a node are located in the same cluster. Notably, modern graph clustering methods are both fast and scalable with time complexities given by O(|E|), and only need to be applied once, which leads to an unremarkable computational overhead in the pre-processing stage. In general, we argue that the METIS clustering technique is highly scalable, as it is in the heart of many large-scale distributed graph storage layers such as <ref type="bibr" target="#b51">(Zhu et al., 2019;</ref><ref type="bibr" target="#b50">Zheng et al., 2020)</ref> that are known scale to billion-sized graphs. Furthermore, the additional overhead in the pre-processing stage is quickly compensated by an acceleration of training, since the number of neighbors outside of B is heavily reduced, and pushing information to the histories now leads to contiguous memory transfers.</p><p>Enforcing Local Lipschitz Continuity. To guide our neural network in learning a function with controllable error, we can enforce its intermediate output layers f ( ) θ to be invariant to small input perturbations. In particular, following upon <ref type="bibr" target="#b38">Usama &amp; Chang (2018)</ref>, we found it useful to apply the auxiliary loss</p><formula xml:id="formula_22">L ( ) reg = f ( ) θ ( h( −1) v ) − f ( ) θ ( h( −1) v + )<label>(3)</label></formula><p>in highly non-linear message passing phases, e.g., in GIN <ref type="bibr" target="#b44">(Xu et al., 2019)</ref>. Such regularization enforces equal outputs for small pertubations ∼ B δ (0) inside closed balls of radius δ. Notably, we do not restrict UPDATE as a whole. For other message passing GNNs, e.g., in GCN <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref>, L 2 regularization is usually sufficient to ensure closeness of historical embeddings. Further, we found gradient clipping to be an effective method to restrict the parameters from changing too fast, regularizing history changes in return.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Related Work</head><p>Our GAS framework utilizes historical embeddings as an affordable approximation. The idea of historical embeddings was originally introduced in VR-GCN <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref>. VR-GCN aims to reduce the variance in estimation during neighbor sampling <ref type="bibr" target="#b14">(Hamilton et al., 2017)</ref>, and avoids the need to sample a large amount of neighbors in return. <ref type="bibr" target="#b6">Cong et al. (2020)</ref> further simplified this scheme into a one-shot sampling scenario, where nodes no longer need to recursively explore neighborhoods in each layer. However, these approaches consider only a specific GNN operator which prevent their application to the wide range of GNN architectures available. Furthermore, they only consider shallow architectures and do not account for the increasing approximation error induced by deeper and expressive GNNs, which is well observable in practice, cf. Section 6.1.</p><formula xml:id="formula_23">Time H2D Data Kernel f (1) θ f (2) θ f (3) θ (a) Full-batch execution Main Pull Pull H2D Data H(1) H(2) Kernel f (1) θ f (2) θ f (3) θ D2H H(1) H(2) (b) Serial mini-batch execution Worker Pull Pull H2D Data H(1) H(2) Kernel f (1) θ f (2) θ f (3) θ D2H H(1) H(2) (c) Concurrent mini-batch execution 2x performance improvement Figure 2.</formula><p>Illustrative runtime performances of a serial and concurrent mini-batch execution in comparison to a full-batch GNN execution. In the full-batch approach (a), all necessary data is first transferred to the device via the HOST2DEVICE (H2D) engine, before GNN layers are executed in serial inside the kernel engine. As depicted in (b), a serial mini-batch execution suffers from an I/O bottleneck, in particular because each kernel engine has to wait for memory transfers to complete. The concurrent minibatch execution (c) avoids this problem by leveraging an additional worker thread and overlapping data transfers, leading to two times performance improvements in comparison to a serial execution, which is on par with the standard full-batch approach.</p><p>In order to minimize the inter-connectivity between minibatches, we utilize graph clustering techniques for minibatch selection, as first introduced in the subgraph sampling approach CLUSTER-GCN <ref type="bibr" target="#b5">(Chiang et al., 2019)</ref>. CLUSTER-GCN leverages clustering in order to infer meaningful subgraphs, while we aim to minimize history accesses. Furthermore, CLUSTER-GCN limits message passing to intraconnected nodes, and therefore ignores potentially useful information outside the current mini-batch. This inherently limits the model to learn from nodes nearby. In contrast, our GAS framework makes use of all available neighborhood data for aggregation, and therefore avoids this downside.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">PyGAS: Auto-Scaling GNNs in PyG</head><p>We condense our GAS framework and theoretical findings into a tool named PyGAS that implements all the presented techniques in practice. <ref type="foot" target="#foot_4">2</ref> PyGAS is built upon PYTORCH <ref type="bibr" target="#b30">(Paszke et al., 2019)</ref> and utilizes the PYTORCH GEOMET-Fast Historical Embeddings. Our approach accesses histories to account for any data outside the current mini-batch, which requires frequent data transfers to and from the GPU. Therefore, PyGAS optimizes pulling from and pushing to histories via non-blocking device transfers. Specifically, we immediately start pulling historical embeddings for each layer asynchronously at the beginning of each optimization step, which ensures that GPUs do not run idle while waiting for memory transfers to complete. A separate worker thread gathers historical information into one of multiple pinned CPU memory buffers (denoted by PULL), from where it can be transfered to the GPU via the usage of CUDA streams without blocking any CPU or CUDA execution. Synchronization is done by synchronizing the respective CUDA stream before inputting the transferred data into the GNN layer. The same strategy is applied for pushing information to the history. Considering that the device transfer of H( −1) is faster than the execution of f ( ) θ , this scheme does not lead to any runtime overhead when leveraging historical embeddings and can be twice as fast as its serial non-overlapping counterpart, cf. Figure <ref type="figure" target="#fig_6">2</ref>. We have implemented our non-blocking transfer scheme with custom C++/CUDA code to avoid Python's global interpreter lock.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Experiments</head><p>In this section, we evaluate our GAS framework in practice using PyGAS, utilizing 6 different GNN operators and 15 datasets. Please refer to the appendix for a detailed description of the used GNN operators and datasets, and to our code for hyperparameter configurations. All models were trained on a single GeForce RTX 2080 Ti <ref type="bibr">(11 GB)</ref>. In our experiments, we hold all histories in RAM, using a machine with 64GB of CPU memory.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1.">GAS resembles full-batch performance</head><p>First, we analyze how GAS affects the robustness and expressiveness of our method. We compare GAS against two different baselines: a regular full-batch variant and a history baseline, which naively integrates history-based mini-batch training without any of the additional GAS techniques. To evaluate, we make use of a shallow 2-layer GCN <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref> and two recent state-of-the-art models: a deep GCNII network with 64 layers <ref type="bibr" target="#b4">(Chen et al., 2020b)</ref>, and a maximally expressive GIN network with 4 layers <ref type="bibr" target="#b44">(Xu et al., 2019)</ref>. We evaluate those models on tasks for which Table <ref type="table">1</ref>. Full-batch vs GAS performance on small transductive graph benchmark datasets across 20 different initializations. Predictive performance of models trained via GAS closely matches those of full-batch gradient descent on all models for all datasets. † Results omitted due to unstable performance across different weight initializations, cf.  <ref type="bibr" target="#b45">(Yang et al., 2016;</ref><ref type="bibr" target="#b9">Dwivedi et al., 2020)</ref>, cf. Figure <ref type="figure" target="#fig_2">3</ref>. Since CLUSTER is a node classification task containing multiple graphs, we first convert it into a super graph (holding all the nodes of all graphs), and partition this super graph using twice as many partitions as there are initial graphs. It can be seen that especially for deep (64-GCNII, cf. Figure <ref type="figure" target="#fig_2">3b</ref>) and expressive (4-GIN, cf. Figure <ref type="figure" target="#fig_2">3c</ref>) architectures, the naive historical-based baseline fails to reach the desired full-batch performance. This can be contributed to the high approximation error induced by deep and expressive models. In contrast, GAS shows far superior performance, reaching the quality of full-batch training in both cases.</p><p>In general, we expect the model performances of our GAS mini-batch training to closely resemble the performances of their full-batch counterparts, except for the variance introduced by stochastic optimization (which is, in fact, known to improve generalization <ref type="bibr" target="#b1">(Bottoue &amp; Bousquet, 2007)</ref>). To validate, we compare our approach against full-batch performances on small transductive benchmark datasets for which full-batch training is easily feasible. We evaluate on four GNN models that significantly advanced the field of graph representation learning: GCN <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref>, GAT <ref type="bibr" target="#b40">(Veličković et al., 2018)</ref>, APPNP <ref type="bibr" target="#b22">(Klicpera et al., 2019a)</ref> and GCNII <ref type="bibr" target="#b4">(Chen et al., 2020b)</ref>. For all experiments, we tried to follow the hyperparameter setup of the respective papers as closely as possible and perform an in-depth grid search on datasets for which best performing configurations are not known. We then apply GAS mini-batch training on the same set of hyperparameters. As shown in Table <ref type="table">1</ref>, all models that utilize GAS training perform as well as their full-batch equivalents (with slight gains overall), confirming the practical effectiveness of our approach. Notably, even for deep GNNs such as APPNP and GCNII, our approach is able to closely resemble the desired performance.</p><p>We further conduct an ablation study to highlight the individual performance improvements of our GAS techniques within a GCNII model, i.e. minimizing inter-connectivity and applying regularization techniques. Table <ref type="table" target="#tab_4">2</ref> shows the relative performance improvements of individual GAS techniques in percentage points, compared to the corresponding model performance obtained by full-batch training. Notably, it can be seen that both techniques contribute to resembling full-batch performance, reaching their full strength when used in combination. We include an additional ablation study for training an expressive GIN model in the appendix. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2.">GAS is fast and memory-efficient</head><p>For training large-scale GNNs, GPU memory consumption will directly dictate the scalability of the given approach.</p><p>Here, we show how GAS maintains a low GPU memory footprint while, in contrast to other scalability approaches, accounts for all available information inside a GNN's receptive field in a single optimization step. We compare the memory usage of GCN+GAS training with the memory usage of full-batch GCN, and mini-batch GRAPHSAGE <ref type="bibr" target="#b14">(Hamilton et al., 2017)</ref> and CLUSTER-GCN <ref type="bibr" target="#b5">(Chiang et al., 2019)</ref> training, cf. Table <ref type="table" target="#tab_5">3</ref>. Notably, GAS is easily able to fit the required data on the GPU, while memory consumption only increases linearly with the number of layers. Although CLUSTER-GCN maintains an overall lower memory footprint than GAS, it will only utilize a fraction of available information inside its receptive field, i.e. ≈23% on average.</p><p>We now analyze how GAS enables large-scale training due to fast mini-batch execution. Specifically, we are interested in how our concurrent memory transfer scheme (cf. Section 5) reduces the overhead induced by accessing historical embeddings from the offline storage. For this, we evaluate runtimes of a 4-layer GIN model on synthetic graph data, which allows fine-grained control over the ratio be-  tween inter-and intra-connected nodes, cf. Figure <ref type="figure" target="#fig_3">4</ref>. Here, a given mini-batch consists of exactly 4,000 nodes which are randomly intra-connected to 60 other nodes. We vary the number of inter-connections (connections to nodes outside of the batch) by adding out-of-batch nodes that are randomly inter-connected to 60 nodes inside the batch. Notably, the naive serial memory transfer increases runtimes up to 350%, which indicates that frequent history accesses can cause major I/O bottlenecks. In contrast, our concurrent access pattern incurs almost no I/O overhead at all, and the overhead in execution time is solely explained by the computational overhead of aggregating far more messages during message propagation. Note that in most real-world scenarios, the additional aggregation of history data may only increase runtimes up to 25%, since most real-world datasets contain inter-/intra-connectivity ratios between 0.1 and 2.5, cf. appendix. Further, the additional overhead of computing METIS partitions in the pre-processing stage is negligible and is quickly mitigated by faster training times: Computing the partitioning of a graph with 2M nodes takes only about 20-50 seconds (depending on the number of clusters).</p><p>Next, we compare runtimes and memory consumption of GAS to the recent GTTF proposal <ref type="bibr" target="#b26">(Markowitz et al., 2021)</ref>, which utilizes a fast neighbor sampling strategy based on tensor functionals. For this, we make use of a 4-layered GCN model with equal mini-batch and receptive field sizes.</p><p>As shown in Table <ref type="table" target="#tab_7">4</ref>, GAS is both faster and consumes less memory than GTTF. Although GTTF makes use of a fast vectorized sampling procedure, its underlying recursive neighborhood construction still scales exponentially with GNN depth, which explains the observable differences in runtime and memory consumption.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3.">GAS scales to large graphs</head><p>In order to demonstrate the scalability and generality of our approach, we scale various GNN operators to common largescale graph benchmark datasets. Here, we focus our analysis on GNNs that are notorious hard to scale-up but have the potential to leverage the increased amount of available data to make more accurate predictions. In particular, we benchmark deep GNNs, i.e. GCNII <ref type="bibr" target="#b4">(Chen et al., 2020b)</ref>, and expressive GNNs, i.e. PNA <ref type="bibr" target="#b7">(Corso et al., 2020)</ref>. Note that it is not possible to run those models in full-batch mode on most of these datasets as they will run out of memory on common GPUs. We compare with 10 scalable GNN baselines: GRAPHSAGE <ref type="bibr" target="#b14">(Hamilton et al., 2017)</ref>, FASTGCN <ref type="bibr" target="#b2">(Chen et al., 2018a)</ref>, LADIES <ref type="bibr" target="#b53">(Zou et al., 2019)</ref>, VR-GCN <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref>, MVS-GNN <ref type="bibr" target="#b6">(Cong et al., 2020)</ref>, CLUSTER-GCN <ref type="bibr" target="#b5">(Chiang et al., 2019)</ref>, GRAPHSAINT <ref type="bibr" target="#b49">(Zeng et al., 2020b)</ref>, SGC <ref type="bibr" target="#b42">(Wu et al., 2019)</ref>, SIGN <ref type="bibr" target="#b11">(Frasca et al., 2020)</ref> and GBP <ref type="bibr" target="#b3">(Chen et al., 2020a)</ref>. Since results are hard to compare across different approaches due to differences in frameworks, model implementations, weight initializations and optimizers, we additionally report a shallow GCN+GAS baseline. GAS is able to train all models on all datasets on a single GPU, while holding corresponding histories in CPU memory. On the largest dataset, i.e. ogbn-products, this will consume ≈ L• 2GB of storage for L layers, which easily fits in RAM on most modern workstations.</p><p>As can be seen in Table <ref type="table" target="#tab_8">5</ref>, the usage of deep and expressive models within our framework advances the state-of-the-art on REDDIT and FLICKR, while it performs equally well for others, e.g., PPI. Notably, our approach outperforms the two historical-based variants VR-GCN and MVS-GNN by a wide margin. Interestingly, our deep and expressive variants reach superior performance than our GCN baseline on all datasets, which highlights the benefits of evaluating larger models on larger scale.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Conclusion and Future Work</head><p>We proposed a general framework for scaling arbitrary message passing GNNs to large graphs without the necessity to sub-sample edges. As we have shown, our approach is able to train both deep and expressive GNNs in a scalable fashion. Notably, our approach is orthogonal to many methodological advancements, such as unifying GNNs and label propagation <ref type="bibr" target="#b36">(Shi et al., 2020)</ref>, graph diffusion <ref type="bibr" target="#b23">(Klicpera et al., 2019b)</ref>, or random wiring <ref type="bibr" target="#b39">(Valsesia et al., 2020)</ref>, which we like to investigate further in future works. While our experiments focus on node-level tasks, our work is technically able to scale the training of GNNs for edge-level and graph-level tasks as well. However, this still needs to be verified empirically. Another interesting future direction is the fusion of GAS into a distributed training algorithm <ref type="bibr" target="#b24">(Ma et al., 2019;</ref><ref type="bibr" target="#b52">Zhu et al., 2016;</ref><ref type="bibr" target="#b37">Tripathy et al., 2020;</ref><ref type="bibr" target="#b40">Wan et al., 2020;</ref><ref type="bibr" target="#b0">Angerd et al., 2020;</ref><ref type="bibr" target="#b50">Zheng et al., 2020)</ref>, and to extend our framework in accessing histories from disk storage rather than CPU memory. Overall, we hope that our findings lead to the development of sophisticated and expressive GNNs evaluated on large-scale graphs. </p><formula xml:id="formula_24">h( ) v − h ( ) v ≤ δ k 2 + (δ + ) k 1 k 2 |N (v)|.</formula><p>Proof. By triangular inequality, it holds that h( −1)</p><formula xml:id="formula_25">v − h ( −1) v ≤ δ + . Since both MESSAGE ( ) θ and UPDATE ( )</formula><p>θ denote Lipschitz continuous functions with Lipschitz constants k 1 and k 2 , respectively, it further holds that for any x, y:  </p><formula xml:id="formula_26">MESSAGE ( ) θ (x) − MESSAGE ( ) θ (y) ≤ k 1 x − y UPDATE ( ) θ (x) − UPDATE ( ) θ (y) ≤ k 2 x − y</formula><formula xml:id="formula_27">θ ( h( −1) v , w∈N (v) MESSAGE ( ) θ ( h( −1) w )) − UPDATE ( ) θ (h ( −1) v , w∈N (v) MESSAGE ( ) θ (h ( −1) w )) ≤ k 2 (δ + |N (v)| (k 1 (δ + ))) = δ k 2 + (δ + ) k 1 k 2 |N (v)|.</formula><formula xml:id="formula_28">h(L) v,j − h (L) v,j ≤ L−1 =1 ( ) k L− 1 k L− 2 |N (v)| L− .</formula><p>Proof. For layer = 1, the inputs do not need to be estimated, i.e.</p><formula xml:id="formula_29">δ (0) = h(0) v − h (0) v</formula><p>= 0, and, as a result, the output is exact, i.e. 1) , it directly follows via Lemma 1 that the approximation error of layer = 2 is bounded by h 2) . Recursively replacing</p><formula xml:id="formula_30">δ (1) = h(1) v − h (1) v = 0. With h(1) v − h(1) v ≤<label>(</label></formula><formula xml:id="formula_31">(2) v − h (2) v ≤ (1) k 1 k 2 |N (v)| = δ<label>(</label></formula><formula xml:id="formula_32">δ ( ) = δ ( −1) k 2 + (δ ( −1) + ( −1) ) k 1 k 2 |N (v)| in h(L) v − h (L) v ≤ δ (L−1) k 2 + (δ (L−1) + (L−1) ) k 1 k 2 |N (v)| (cf. Lemma 1) yields h(L) v − h (L) v ≤ L−1 =1 ( ) k L− 1 k L− 2 |N (v)| L− .</formula><p>Approximate Personalized Propagation of Neural Predictions (APPNP) networks first perform a graph-agnostic prediction of node labels, i.e. h (0) v = MLP(x v ), and smooth initial label predictions via propagation afterwards <ref type="bibr" target="#b22">(Klicpera et al., 2019a</ref>)</p><formula xml:id="formula_33">h ( ) = α h (0) + (1 − α) w∈N ∪{v} 1 c w,v h ( −1) w ,</formula><p>where α ∈ [0, 1] denotes the teleport probability and c w,v is defined as in GCN. Notably, the final propagation layers are non-trainable, and predictions are solely conditioned on node features (while gradients of model parameters are not).</p><p>Simple and Deep Graph Convolutional Networks (GCNII) extend the idea of APPNP to a trainable propgation scheme which leverages initial residual connections <ref type="bibr" target="#b4">(Chen et al., 2020b</ref>) Graph Isomorphism Networks (GIN) make use of sum aggregation and MLPs to obtain a maximally powerful GNN operator <ref type="bibr" target="#b44">(Xu et al., 2019</ref>)</p><formula xml:id="formula_34">h ( ) v = αW h (0) v + (1 − α) w∈N (v)∪{v} 1 c w,v W h ( −1)</formula><formula xml:id="formula_35">h ( ) v = MLP θ   (1 + ) h ( −1) v + w∈N (v) h ( −1) w   ,</formula><p>where ∈ R is a trainable parameter in order to distinguish neighbors from central nodes.</p><p>Principal Neighborhood Aggregation (PNA) networks leverage mulitple aggregators combined with degree-scalers to capture graph structural properties <ref type="bibr" target="#b7">(Corso et al., 2020</ref>) </p><formula xml:id="formula_36">h ( ) v = W 2   h ( −1) v , w∈N (v) W 1 h ( −1) v , h (<label>−</label></formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="11.">PyGAS Programming Interface</head><p>To highlight the ease-of-use of our framework, we showcase the necessary changes to convert a common GCN architecture <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref> implemented in PYTORCH GEOMETRIC <ref type="bibr">(Fey &amp; Lenssen, 2019)</ref> (cf. Listing 1) to its corresponding scalable version (cf. Listing 2). In particular, our model now inherits from ScalableGNN, which takes care of creating all history embeddings (accessible via self.histories) and provides an efficient concurrent history access pattern via push and pull(). Notably, the forward() execution method of our model now takes in the additional n id parameter, which holds the global node index for each node in the current mini-batch. This assignment vector is necessary to push and pull the intermediate mini-batch embeddings to and from the global history embeddings.  <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref> model within PYTORCH GEOMETRIC <ref type="bibr">(Fey &amp; Lenssen, 2019)</ref> and our proposed PyGAS framework. denotes lines that require changes, while refers to newly added lines. Only minimal changes are required to auto-scale GCN (or any other model) to large graphs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="12.">Addtional Ablation Studies</head><p>We report additional ablation studies to further strengthen the motivation of our GAS framework: Table <ref type="table">7</ref>. Ablation study for a 4-layer GIN <ref type="bibr" target="#b44">(Xu et al., 2019)</ref> model on the CLUSTER dataset <ref type="bibr" target="#b9">(Dwivedi et al., 2020)</ref>. Combining both GAS techniques help in resembling full-batch performance for expressive models with highly non-linear message passing phases. Minimizing Inter-Connectivity Between Batches. We make use of graph clustering methods <ref type="bibr" target="#b20">(Karypis &amp; Kumar, 1998;</ref><ref type="bibr" target="#b8">Dhillon et al., 2007)</ref> in order to minimize the inter-connectivity between batches, which minimizes history accesses and therefore increases closeness and reduces staleness in return. To evaluate this impact in practice, Tabel 6 lists the inter-/intraconnectivity ratio of all real-world datasets used in our experiments, both for randomly sampled mini-batches as well as for utilizing METIS partitions as mini-batches. Notably, applying METIS beforehand reduces the overall inter-/intra-connectivity ratio by a factor of 4 on average, which results in only a fraction of history accesses. Furthermore, most real-world datasets come with inter-/intra-connectivity ratios between 0.1 and 2.5, leading to only marginal runtime overheads when leveraging historical information, as confirmed by our runtime analysis.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Accuracy</head><p>Analysis of Gains for Obtaining Expressive Node Representations. Next, we highlight the impacts of minimizing the inter-connectivity between mini-batches and enforcing Lipschitz continuity of the learned function in order to derive expressive node representations. Here, we benchmark a 4-layer GIN model <ref type="bibr" target="#b44">(Xu et al., 2019)</ref> on the CLUSTER dataset <ref type="bibr" target="#b9">(Dwivedi et al., 2020)</ref>, cf. Table <ref type="table">7</ref>. Notably, both solutions achieve significant gains in training, validation and test performance, and together, they are able to closely resemble the performance of full-batch training. However, we found that Lipschitz continuity regularization only helps in non-linear message passing phases, while it does not provide any additional gains for linear operators such as GCN <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="13.">Datasets</head><p>We give detailed statistics for all datasets used in our experiments, cf. Table <ref type="table" target="#tab_10">8</ref>, which include the following tasks:</p><p>1. classifying academic papers in citation networks (CORA, CITESEER, PUBMED) <ref type="bibr" target="#b33">(Sen et al., 2008;</ref><ref type="bibr" target="#b45">Yang et al., 2016)</ref> </p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 .</head><label>1</label><figDesc>Figure1. Mini-batch processing of GNNs with historical embeddings. denotes the nodes in the current mini-batch and represents their direct 1-hop neighbors. For a given mini-batch (a), GPU memory and computation costs exponentially increase with GNN depth (b). The usage of historical embeddings avoids this problem as it allows to prune entire sub-trees of the computation graph, which leads to constant GPU memory consumption in respect to input node size (c). Here, nodes in the current mini-batch push their updated embeddings to the history H( ) , while their direct neighbors pull their most recent historical embeddings from H( ) for further processing.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>θ(</head><label></label><figDesc>to separately model global k-Lipschitz continuous functions, but rather aim for local Lipschitz continuity at each h</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Model performance comparison between full-batch, an unoptimized history-based baseline and our GAS approach. In contrast to the historical-based baseline, GAS reaches the quality of full-batch training, especially for (b) deep and (c) expressive models.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. Runtime overhead in relation to the inter-/intraconnectivity ratio of mini-batches, both for serial and concurrent history access patterns. The overall runtime overhead is further separated into computational overhead (overhead of aggregating additional messages) and I/O overhead (overhead of pulling from and pushing to histories). Our concurrent memory transfer reduces I/O overhead caused by histories by a wide margin.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>continuous functions with Lipschitz constants k 1 and k 2 , respectively. If, for all v ∈ V, the inputs are close to the exact input, i.e.h( the output error is bounded by</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Furthermore</head><label></label><figDesc>, the Lipschitz constants for the aggregations x∈X x, 1 |X | x∈X x and max x∈X x are given as |X |, 1 and 1, respectively. Then, UPDATE ( )</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Theorem 2 .</head><label>2</label><figDesc>Let f (L) θ be a L-layered GNN, containing only Lipschitz continuous MESSAGE Lipschitz constants k 1 and k 2 , respectively. If, for all v ∈ V and all ∈ {1, . . . , L − 1}, the historical embeddings do not run too stale, i.e. h( ) v − h( ) v ≤ ( ) , then the final output error is bounded by</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head></head><label></label><figDesc>use of identity maps, i.e. W ← (1 − β)I + βW for β ∈ [0, 1].</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head></head><label></label><figDesc><ref type="bibr" target="#b35">Shchur et al. (2018)</ref> </figDesc><table><row><cell>Dataset</cell><cell>Full</cell><cell>GCN</cell><cell>GAS</cell><cell>Full</cell><cell>GAT</cell><cell>GAS</cell><cell>Full</cell><cell>APPNP GAS</cell><cell>Full</cell><cell>GCNII</cell><cell>GAS</cell></row><row><cell>CORA</cell><cell cols="11">81.88±0.75 82.29±0.76 82.80±0.47 83.32±0.62 83.28±0.60 83.19±0.58 85.04±0.53 85.52±0.39</cell></row><row><cell>CITESEER</cell><cell cols="11">70.98±0.66 71.18±0.97 71.72±0.91 71.86±1.00 72.13±0.73 72.63±0.82 73.06±0.81 73.89±0.48</cell></row><row><cell>PUBMED</cell><cell cols="11">78.73±1.10 79.23±0.62 78.03±0.40 78.42±0.56 80.21±0.20 79.82±0.52 79.72±0.78 80.19±0.49</cell></row><row><cell>COAUTHOR-CS</cell><cell cols="11">91.08±0.59 91.22±0.45 90.31±0.49 90.38±0.42 92.51±0.47 92.44±0.58 92.45±0.35 92.52±0.31</cell></row><row><cell cols="12">COAUTHOR-PHYSICS 93.10±0.84 92.98±0.72 92.32±0.86 92.80±0.61 93.40±0.92 93.68±0.61 93.43±0.52 93.61±0.41</cell></row><row><cell cols="4">AMAZON-COMPUTER 81.17±1.81 80.84±2.26 AMAZON-PHOTO 90.25±1.66 90.53±1.40</cell><cell>- † - †</cell><cell></cell><cell>- † - †</cell><cell cols="5">81.79±2.00 81.66±1.81 83.04±1.81 83.05±1.16 91.27±1.26 91.23±1.34 91.42±0.81 91.60±0.78</cell></row><row><cell>WIKI-CS</cell><cell cols="11">79.08±0.50 79.00±0.41 79.44±0.41 79.56±0.47 79.88±0.40 79.75±0.53 79.94±0.67 80.02±0.43</cell></row><row><cell>∆ Mean Accuracy</cell><cell></cell><cell>+0.13</cell><cell></cell><cell></cell><cell>+0.29</cell><cell></cell><cell></cell><cell>-0.01</cell><cell></cell><cell>+0.29</cell><cell></cell></row><row><cell cols="6">they are well suitable: classifying academic papers in a cita-</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="6">tion network (CORA), and identifying community clusters</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">in Stochastic Block Models (CLUSTER)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2 .</head><label>2</label><figDesc>Relative performance improvements of individual GAS techniques within a GCNII model. The performance improvement is measured in percentage points in relation to the corresponding model performance obtained by full-batch training.</figDesc><table><row><cell></cell><cell cols="3">CORA CITESEER PUBMED</cell><cell cols="4">COAUTHOR-CS PHYSICS COMPUTER PHOTO AMAZON-</cell><cell>WIKI-CS</cell></row><row><cell>Baseline</cell><cell>-3.26</cell><cell>-5.66</cell><cell>-3.20</cell><cell>-0.79</cell><cell>-0.50</cell><cell>-5.76</cell><cell>-4.16</cell><cell>-3.19</cell></row><row><cell cols="2">Regularization -2.12</cell><cell>-1.03</cell><cell>-1.24</cell><cell>-0.46</cell><cell>-0.24</cell><cell>-3.02</cell><cell>-1.19</cell><cell>-0.74</cell></row><row><cell>METIS</cell><cell>-1.57</cell><cell>-3.12</cell><cell>-1.50</cell><cell>-0.47</cell><cell>+0.13</cell><cell>-2.75</cell><cell>-1.02</cell><cell>-0.24</cell></row><row><cell>GAS</cell><cell>+0.48</cell><cell>+0.83</cell><cell>+0.47</cell><cell>+0.07</cell><cell>+0.18</cell><cell>+0.01</cell><cell>+0.18</cell><cell>+0.08</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 3 .</head><label>3</label><figDesc>GPU memory consumption (in GB) and the amount of data used (%) across different GNN execution techniques. GAS consumes low memory while making use of all available neighborhood information during a single optimization step.</figDesc><table><row><cell></cell><cell># nodes</cell><cell>717K</cell><cell>169K</cell><cell>2.4M</cell></row><row><cell></cell><cell># edges</cell><cell>7.9M</cell><cell>1.2M</cell><cell>61.9M</cell></row><row><cell></cell><cell>Method</cell><cell>YELP</cell><cell>ogbn-arxiv</cell><cell>ogbn-products</cell></row><row><cell>2-layer</cell><cell cols="4">Full-batch GRAPHSAGE 0.76GB/ 9% 0.40GB/ 27% 0.92GB/ 2% 6.64GB/100% 1.44GB/100% 21.96GB/100% CLUSTER-GCN 0.17GB/ 13% 0.15GB/ 40% 0.16GB/ 16%</cell></row><row><cell></cell><cell>GAS</cell><cell cols="3">0.51GB/100% 0.22GB/100% 0.36GB/100%</cell></row><row><cell>3-layer</cell><cell cols="4">Full-batch GRAPHSAGE 2.19GB/ 14% 0.93GB/ 33% 4.34GB/ 5% 9.44GB/100% 2.11GB/100% 31.53GB/100% CLUSTER-GCN 0.23GB/ 13% 0.22GB/ 40% 0.23GB/ 16%</cell></row><row><cell></cell><cell>GAS</cell><cell cols="3">0.79GB/100% 0.34GB/100% 0.59GB/100%</cell></row><row><cell>4-layer</cell><cell cols="4">Full-batch GRAPHSAGE 4.31GB/ 19% 1.55GB/ 37% 11.23GB/ 8% 12.24GB/100% 2.77GB/100% 41.10GB/100% CLUSTER-GCN 0.30GB/ 13% 0.29GB/ 40% 0.29GB/ 16%</cell></row><row><cell></cell><cell>GAS</cell><cell cols="3">1.07GB/100% 0.46GB/100% 0.82GB/100%</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 4 .</head><label>4</label><figDesc>Efficiency of GCN with GTTF and GAS.</figDesc><table><row><cell>Dataset</cell><cell cols="2">Runtime (s) GTTF GAS</cell><cell cols="2">Memory (MB) GTTF GAS</cell></row><row><cell>CORA</cell><cell>0.077</cell><cell>0.006</cell><cell>18.01</cell><cell>2.13</cell></row><row><cell>PUBMED</cell><cell>0.071</cell><cell>0.006</cell><cell>28.79</cell><cell>2.19</cell></row><row><cell>PPI</cell><cell>0.976</cell><cell>0.007</cell><cell>134.86</cell><cell>12.37</cell></row><row><cell>FLICKR</cell><cell>1.178</cell><cell>0.007</cell><cell>325.97</cell><cell>16.32</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head>Table 5 .</head><label>5</label><figDesc>Performance on large graph datasets. GAS is both scalable and general while achieving state-of-the-art performance.</figDesc><table><row><cell cols="2"># nodes</cell><cell>230K</cell><cell>57K</cell><cell>89K</cell><cell cols="2">717K 169K</cell><cell>2.4M</cell></row><row><cell cols="2"># edges</cell><cell cols="5">11.6M 794K 450K 7.9M 1.2M</cell><cell>61.9M</cell></row><row><cell cols="2">Method</cell><cell cols="4">REDDIT PPI FLICKR YELP</cell><cell cols="2">ogbn-ogbn-arxiv products</cell></row><row><cell cols="2">GRAPHSAGE</cell><cell cols="5">95.40 61.20 50.10 63.40 71.49</cell><cell>78.70</cell></row><row><cell cols="2">FASTGCN</cell><cell>93.70</cell><cell>-</cell><cell>50.40</cell><cell>-</cell><cell>-</cell><cell>-</cell></row><row><cell cols="2">LADIES</cell><cell>92.80</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell><cell>-</cell></row><row><cell cols="2">VR-GCN</cell><cell cols="2">94.50 85.60</cell><cell>-</cell><cell cols="2">61.50 -</cell><cell>-</cell></row><row><cell cols="2">MVS-GNN</cell><cell cols="2">94.90 89.20</cell><cell>-</cell><cell cols="2">62.00 -</cell><cell>-</cell></row><row><cell cols="7">CLUSTER-GCN 96.60 99.36 48.10 60.90 -</cell><cell>78.97</cell></row><row><cell cols="7">GRAPHSAINT 97.00 99.50 51.10 65.30 -</cell><cell>79.08</cell></row><row><cell cols="2">SGC</cell><cell cols="5">96.40 96.30 48.20 64.00 -</cell><cell>-</cell></row><row><cell cols="2">SIGN</cell><cell cols="5">96.80 97.00 51.40 63.10 -</cell><cell>77.60</cell></row><row><cell cols="2">GBP</cell><cell>-</cell><cell>99.30</cell><cell>-</cell><cell cols="2">65.40 -</cell><cell>-</cell></row><row><cell>Full-batch</cell><cell>GCN GCNII PNA</cell><cell cols="5">95.43 97.58 53.73 OOM 71.64 OOM OOM 55.28 OOM 72.83 OOM OOM 56.23 OOM 72.17</cell><cell>OOM OOM OOM</cell></row><row><cell>GAS</cell><cell>GCN GCNII</cell><cell cols="5">95.45 98.92 54.00 62.94 71.68 96.77 99.50 56.20 65.14 73.00</cell><cell>76.66 77.24</cell></row><row><cell></cell><cell>PNA</cell><cell cols="5">97.17 99.44 56.67 64.40 72.50</cell><cell>79.91</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_9"><head>Table 6 .</head><label>6</label><figDesc>Inter-/intra-connectivity ratio for real-world datasets with different mini-batch sampling strategies. Utilizing METIS heavily minimizes inter-connectivity between mini-batches, which reduces history accesses and tightens approximation errors in return. Full-batch GCN<ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017)</ref> model within PYTORCH GEOMETRIC(Fey &amp; Lenssen, 2019).</figDesc><table><row><cell>Sampling Scheme</cell><cell cols="3">CORA CITESEER PUBMED</cell><cell cols="4">COAUTHOR-CS PHYSICS COMPUTER PHOTO AMAZON-</cell><cell>WIKI-CS</cell></row><row><cell>Random</cell><cell>1.33</cell><cell>1.24</cell><cell cols="2">3.17 6.81</cell><cell>9.94</cell><cell>9.05</cell><cell>5.61</cell><cell>5.85</cell></row><row><cell>METIS</cell><cell>0.14</cell><cell>0.02</cell><cell cols="2">0.52 2.77</cell><cell>2.26</cell><cell>2.27</cell><cell>1.03</cell><cell>1.12</cell></row><row><cell cols="2">CLUSTER</cell><cell>PATTERN</cell><cell cols="2">REDDIT PPI</cell><cell>FLICKR</cell><cell>YELP</cell><cell cols="2">ogbn-arxiv products ogbn-</cell></row><row><cell>Random</cell><cell>36.64</cell><cell>51.02</cell><cell cols="2">6.58 6.79</cell><cell>1.82</cell><cell>6.74</cell><cell>3.02</cell><cell>26.18</cell></row><row><cell>METIS</cell><cell>1.57</cell><cell>1.61</cell><cell cols="2">2.80 1.27</cell><cell>1.07</cell><cell>2.52</cell><cell>0.48</cell><cell>1.94</cell></row><row><cell cols="4">from torch_geometric.nn import GCNConv</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>class GNN(Module):</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="9">def __init__(self, in_channels, hidden_channels, out_channels, num_layers):</cell></row><row><cell cols="3">super(GNN, self).__init__()</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">self.convs = ModuleList()</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="7">self.convs.append(GCNConv(in_channels, hidden_channels))</cell><cell></cell></row><row><cell cols="4">for _ in range(num_layers -2):</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="8">self.convs.append(GCNConv(hidden_channels, hidden_channels))</cell></row><row><cell cols="7">self.convs.append(GCNConv(hidden_channels, out_channels))</cell><cell></cell></row><row><cell cols="3">def forward(self, x, adj_t):</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="3">for conv in self.convs[:-1]:</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="4">x = conv(x, adj_t).relu()</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="4">return self.convs[-1](x, adj_t)</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="4">Listing 1. from torch_geometric.nn import GCNConv</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="5">from torch_geometric_autoscale import ScalableGNN</cell><cell></cell><cell></cell><cell></cell></row><row><cell>w</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="2">class GNN(ScalableGNN):</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="9">def __init__(self, num_nodes, in_channels, hidden_channels, out_channels, num_layers):</cell></row><row><cell cols="8">super(GNN, self).__init__(num_nodes, hidden_channels, num_layers)</cell></row><row><cell cols="3">self.convs = ModuleList()</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="7">self.convs.append(GCNConv(in_channels, hidden_channels))</cell><cell></cell></row><row><cell cols="4">for _ in range(num_layers -2):</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="8">self.convs.append(GCNConv(hidden_channels, hidden_channels))</cell></row><row><cell cols="7">self.convs.append(GCNConv(hidden_channels, out_channels))</cell><cell></cell></row><row><cell>w</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="4">def forward(self, x, adj_t, n_id):</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="8">for conv, history in zip(self.convs[:-1], self.histories):</cell></row><row><cell cols="4">x = conv(x, adj_t).relu()</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="6">x = self.push_and_pull(history, x, n_id)</cell><cell></cell><cell></cell></row><row><cell cols="4">return self.convs[-1](x, adj_t)</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Listing 2. Mini-batch GCN</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_10"><head>Table 8 .</head><label>8</label><figDesc>Dataset statistics.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">Training Validation Test</cell></row><row><cell></cell><cell></cell><cell cols="2">Full-batch Baseline</cell><cell>60.49</cell><cell>58.17</cell><cell>58.49</cell></row><row><cell></cell><cell cols="2">Minimizing</cell><cell>Enforcing</cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="4">Inter-Connectivity Lipschitz Continuity</cell><cell></cell><cell></cell></row><row><cell></cell><cell>GAS</cell><cell></cell><cell></cell><cell>55.66 58.97</cell><cell>54.86 57.79</cell><cell>55.15 57.82</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>60.67</cell><cell>58.21</cell><cell>58.51</cell></row><row><cell></cell><cell>Dataset</cell><cell>Task</cell><cell>Nodes</cell><cell cols="4">Edges Features Classes Label Rate</cell></row><row><cell></cell><cell>CORA</cell><cell>multi-class</cell><cell>2,708</cell><cell>5,278</cell><cell>1,433</cell><cell>7</cell><cell>5.17%</cell></row><row><cell></cell><cell>CITESEER</cell><cell>multi-class</cell><cell>3,327</cell><cell>4,552</cell><cell>3,703</cell><cell>6</cell><cell>3.61%</cell></row><row><cell>Small-scale</cell><cell cols="2">PUBMED COAUTHOR-CS COAUTHOR-PHYSICS multi-class multi-class multi-class AMAZON-COMPUTER multi-class</cell><cell>19,717 18,333 34,493 13,752</cell><cell>44,324 81,894 247,962 245,861</cell><cell>500 6,805 8,415 767</cell><cell>3 15 5 10</cell><cell>0.30% 1.64% 0.29% 1.45%</cell></row><row><cell></cell><cell>AMAZON-PHOTO</cell><cell>multi-class</cell><cell>7,650</cell><cell>119,081</cell><cell>745</cell><cell>8</cell><cell>2.09%</cell></row><row><cell></cell><cell>WIKI-CS</cell><cell>multi-class</cell><cell>11,701</cell><cell>215,863</cell><cell>300</cell><cell>10</cell><cell>4.96%</cell></row><row><cell></cell><cell>CLUSTER</cell><cell cols="3">multi-class 1,406,436 25,810,340</cell><cell>6</cell><cell>6</cell><cell>83.35%</cell></row><row><cell>Large-scale</cell><cell>REDDIT PPI FLICKR YELP</cell><cell>multi-class multi-label multi-class multi-label</cell><cell cols="2">232,965 11,606,919 56,944 793,632 89,250 449,878 716,847 6,977,409</cell><cell>602 50 500 300</cell><cell>41 121 7 100</cell><cell>65.86% 78.86% 50.00% 75.00%</cell></row><row><cell></cell><cell>ogbn-arxiv</cell><cell>multi-class</cell><cell>169,343</cell><cell>1,157,799</cell><cell>128</cell><cell>40</cell><cell>53.70%</cell></row><row><cell></cell><cell>ogbn-products</cell><cell cols="3">multi-class 2,449,029 61,859,076</cell><cell>100</cell><cell>47</cell><cell>8.03%</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">Department of Computer Science, TU Dortmund University</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">Department of Computer Science, Stanford University. Correspondence to: Matthias Fey &lt;matthias.fey@udo.edu&gt;.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_2">https://github.com/rusty1s/pyg_autoscale which y v can be easily predicted. To derive such a representation, GNNs follow a neural message passing scheme(Gilmer et al.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2017" xml:id="foot_3">, 2017). Formally, the ( + 1)-th layer of a GNN is defined as (omitting edge features for simplicity)</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_4">https://github.com/rusty1s/pyg_autoscale RIC (PyG) library(Fey &amp; Lenssen, 2019). It provides an easy-to-use interface to convert common and custom GNN models from PYTORCH GEOMETRIC into their scalable variants. Furthermore, it provides a fully deterministic test bed for evaluating models on large-scale graphs. An example of the interface is shown in the appendix.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>This work has been supported by the German Research Association (DFG) within the Collaborative Research Center SFB 876 Providing Information by Resource-Constrained Analysis, projects A6 and B2.</p></div>
+			</div>
+
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Proposition 3. Let f (L) θ : V → R d be a L-layered GNN as expressive as the WL test in distinguishing the L-hop neighborhood around each node v ∈ V. Then, there exists a graph A ∈ {0, 1}</p><p>|V|×|V| for which f w for nodes v, w ∈ V.</p><p>Proof. Consider the colored graph A and its sampled variant Ã as shown on the right. Here, it holds that h</p><p>(1) </p><p>and all λ &gt; 0.</p><p>Proof. Define φ : R d → R d as the Voronoi tessellation induced by exact inputs {h</p><p>w for all v = w ∈ V (4) Furthermore, we know that there exists Message is injective for all countable multisets <ref type="bibr" target="#b47">(Zaheer et al., 2017;</ref><ref type="bibr" target="#b44">Xu et al., 2019;</ref><ref type="bibr" target="#b29">Morris et al., 2019;</ref><ref type="bibr" target="#b27">Maron et al., 2019)</ref>. Therefore, it holds that f</p><p>. Due to the homogeneity of • , it directly follows that there must exists α &gt; 0 so that αf</p><p>θ functions fulfill the conditions of Lemma 4. Then, there exists a map φ : R d → Σ so that φ(</p><p>Proof. Define φ : R d → Σ as the Voronoi tessellation induced by exact outputs {h</p><p>θ is injective for exact inputs, we know that such a function needs to exist <ref type="bibr" target="#b44">(Xu et al., 2019;</ref><ref type="bibr" target="#b29">Morris et al., 2019)</ref>. Therefore, it is sufficient to show that there exists a δ (L) &gt; 0 so that h(L) 1) . The next layer introduces an increased error, i.e. h( <ref type="formula">2</ref>) 2) , and to compensate, we set λ (2) = (2) so that h</p><p>w . By recursively applying Lemma 4 with λ ( ) = ( ) , it immediately follows that h</p><p>w .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9.">Algorithm</head><p>Our GAS mini-batch training algorithm is given in Algorithm 1:</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="10.">GNN Operators</head><p>We briefly recap the details of all graph convolutional layers used in our experiments. We omit final non-linearities and edge features due to simplicity.</p><p>Graph Convolutional Networks (GCN) use a symmetrically normalized mean aggregation followed by linear transformation <ref type="bibr" target="#b21">(Kipf &amp; Welling, 2017</ref>) .</p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Distributed training of graph convolutional networks using subgraph approximation. ICLR submission</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Angerd</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Balasubramanian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Annavaram</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">The tradeoffs of large scale learning</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Bottoue</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Bousquet</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title level="m" type="main">Fast learning with graph convolutional networks via importance sampling</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Fastgcn</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2018">2018a</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Stochastic training of graph convolutional networks with variance reduction</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">;</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yuan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">R</forename><surname>Wen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS</title>
+				<imprint>
+			<date type="published" when="2018">2018b. 2020a</date>
+		</imprint>
+	</monogr>
+	<note>ICML</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Simple and deep graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2020">2020b</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Cluster-GCN: An efficient algorithm for training deep and large graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">L</forename><surname>Chiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Si</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">J</forename><surname>Hsieh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">KDD</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Minimal variance sampling with provable guarantees for fast training of graph neural networks</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Cong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Forsati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kandemir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mahdavi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">KDD</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Principal neighbourhood aggregation for graph nets</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Corso</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Cavalleri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Beaini</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liò</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Veličković</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Weighted graph cuts without eigenvectors: A multilevel approach</title>
+		<author>
+			<persName><forename type="first">I</forename><forename type="middle">S</forename><surname>Dhillon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Guan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kulis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Pattern Analysis and Machine Intelligence</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<biblScope unit="page" from="1944" to="1957" />
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Benchmarking graph neural networks</title>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">P</forename><surname>Dwivedi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">K</forename><surname>Joshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Laurent</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Bresson</surname></persName>
+		</author>
+		<idno>CoRR, abs/2003.00982</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Fast graph representation learning with PyTorch Geometric</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Fey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">E</forename><surname>Lenssen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR-W</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">SIGN: Scalable inception graph neural networks</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Frasca</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Rossi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Eynard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Chamberlain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">M</forename><surname>Bronstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Monti</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML-W</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Neural message passing for quantum chemistry</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gilmer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">S</forename><surname>Schoenholz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">F</forename><surname>Riley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Vinyals</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Dahl</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Graph representation learning</title>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Synthesis Lectures on Artificial Intelligence and Machine Learning</title>
+		<imprint>
+			<biblScope unit="volume">14</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="1" to="159" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Inductive representation learning on large graphs</title>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ying</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Leskovec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Approximation capabilities of multilayer feedforward networks</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Hornik</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Neural Networks</title>
+		<imprint>
+			<biblScope unit="volume">4</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="251" to="257" />
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Multilayer feedforward networks are universal approximators</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Hornik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stinchcombe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>White</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Neural Networks</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="359" to="366" />
+			<date type="published" when="1989">1989</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Open Graph Benchmark: Datasets for machine learning on graphs</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Fey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zitnik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Catasta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Leskovec</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Combining label propagation and simple models out-performs graph neural networks</title>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">N</forename><surname>Lim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">R</forename><surname>Benson</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note>In ICLR</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<title level="m" type="main">Adaptive sampling towards fast graph representation learning</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Rong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huang</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">A fast and high quality multilevel scheme for partitioning irregular graphs</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Karypis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Kumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIAM Journal on Scientific Computing</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="359" to="392" />
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Semi-supervised classification with graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">N</forename><surname>Kipf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Welling</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<title level="m" type="main">Predict then propagate: Graph neural networks meet personalized PageRank</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Klicpera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bojchevski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Günnemann</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2019">2019a</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Diffusion improves graph learning</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Klicpera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Weißenberger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Günnemann</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS</title>
+				<imprint>
+			<date type="published" when="2019">2019b</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">NeuGraph: Parallel deep neural network computation on large graphs</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Miao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Xue</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Dai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Annual Technical Conference</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Deep Learning on Graphs</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<publisher>Cambridge University Press</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Graph traversal with tensor functionals: A metaalgorithm for scalable learning</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Markowitz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Balasubramanian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mirtaheri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Abu-El-Haija</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Perozzi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Ver Steeg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Galstyan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m" type="main">Provably powerful graph networks</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Maron</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Ben-Hamu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Serviansky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lipman</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">A wikipedia-based benchmark for graph neural networks</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Mernyei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Cangea</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Wiki-Cs</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML-W</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Weisfeiler and Leman go neural: Higher-order graph neural networks</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Morris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ritzert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Fey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">E</forename><surname>Lenssen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Rattan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Grohe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">AAAI</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">PyTorch: An imperative style, high-performance deep learning library</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Paszke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gross</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Massa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lerer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Chanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Killeen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Gimelshein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Antiga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Desmaison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kopf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Devito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Raison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Tejani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chilamkurthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Fang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chintala</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Deep hierarchical feature learning on point sets in a metric space</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">R</forename><surname>Qi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Su</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">J</forename><surname>Guibas</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Pointnet++</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">DropEdge: Towards deep graph convolutional networks on node classification</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Rong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Collective classification in network data</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Namata</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Bilgic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Getoor</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">AI Magazine</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Discriminative structural graph classification</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Seo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Loukas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Perraudin</surname></persName>
+		</author>
+		<idno>CoRR, abs/1905.13422</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Pitfalls of graph neural network evaluation</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Shchur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mumme</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bojchevski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Günnemann</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS-W</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">Masked label prediction: Unified message passing model for semi-supervised classification</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Shi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Sun</surname></persName>
+		</author>
+		<idno>CoRR, abs/2009.03509</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">Reducing communcation in graph neural network training</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Tripathy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Yelick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Buluc</surname></persName>
+		</author>
+		<idno>CoRR, abs/2005.03300</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Towards robust neural networks with lipschitz continuity</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Usama</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">E</forename><surname>Chang</surname></persName>
+		</author>
+		<idno>CoRR, abs/1811.09008</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Don&apos;t stack layers in graph neural networks, wire them randomly. ICLR submission</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Valsesia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Fracastoro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Magli</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Efficient full-graph training of graph convolutional nets with partition-parallelism and boundary sampling. ICLR submission</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Veličković</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Cucurull</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Casanova</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Romero</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liò</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">S</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Bds-Gcn</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2018">2018. 2020</date>
+		</imprint>
+	</monogr>
+	<note>Graph attention networks</note>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">A reduction of a graph to a canonical form and an algebra arising during this reduction</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">E</forename><surname>Sarma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">M</forename><surname>Bronstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Solomon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Weisfeiler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">A</forename><surname>Lehman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Nauchno-Technicheskaya Informatsia</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="issue">9</biblScope>
+			<date type="published" when="1968">2019. 1968</date>
+		</imprint>
+	</monogr>
+	<note>ACM Transactions on Graphics</note>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Simplifying graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">H</forename><surname>De Souza Jr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Fifty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">Q</forename><surname>Weinberger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Representation learning on graphs with jumping knowledge networks</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sonobe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kawarabayashi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jegelka</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<title level="m" type="main">How powerful are graph neural networks? In ICLR</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Leskovec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jegelka</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">L 2 -GCN: Layerwise and learned efficient training of graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>You</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Shen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2016">2016. 2020</date>
+		</imprint>
+	</monogr>
+	<note>CVPR</note>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<monogr>
+		<title level="m" type="main">Scalable graph neural networks for heterogeneous graphs</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lerer</surname></persName>
+		</author>
+		<idno>CoRR, abs/2011.09679</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Deep sets</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaheer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kottur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ravanbhakhsh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Póczos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">J</forename><surname>Smola</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<monogr>
+		<title level="m" type="main">Deep graph neural networks with shallow subgraph samplers</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Srivastava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kannan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Prasanna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Malevich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Chen</surname></persName>
+		</author>
+		<idno>CoRR, abs/2012.01.380</idno>
+		<imprint>
+			<date type="published" when="2020">2020a</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<monogr>
+		<title level="m" type="main">GraphSAINT: Graph sampling based inductive learning method</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Srivastava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kannan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Prasanna</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2020">2020b</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<monogr>
+		<title level="m" type="main">DistDGL: Distributed graph neural network for training for billion-scale graphs</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Su</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Karypis</surname></persName>
+		</author>
+		<idno>CoRR, abs/2010.05337</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">AliGraph: A comprehensive graph neural network platform</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">KDD</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Gemini: A computation-centric distributed graph processing system</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Ma</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Symposium on Operating Systems Designand Implementation</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<title level="m" type="main">Layer-dependent importance sampling for training deep and large graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Gu</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<monogr>
+		<title level="m">Wikipedia graphs</title>
+				<imprint>
+			<publisher>Mernyei &amp; Cangea</publisher>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<monogr>
+		<author>
+			<persName><surname>Shchur</surname></persName>
+		</author>
+		<title level="m">predicting active research fields of authors in co-authorshop graphs (COAUTHOR-CS, COAUTHOR-PHYSICS</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<monogr>
+		<title level="m" type="main">predicting product categories in co-purchase graphs (AMAZON-COMPUTER, AMAZON-PHOTO</title>
+		<author>
+			<persName><surname>Shchur</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<monogr>
+		<title level="m" type="main">identifying community clusters in Stochastic Block Models (CLUSTER, PATTERN</title>
+		<author>
+			<persName><surname>Dwivedi</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<author>
+			<persName><surname>Hamilton</surname></persName>
+		</author>
+		<title level="m">predicting communities of online posts based on user comments (REDDIT</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<monogr>
+		<title level="m" type="main">classifying protein functions based on the interactions of human tissue proteins (PPI</title>
+		<author>
+			<persName><surname>Hamilton</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<monogr>
+		<title level="m" type="main">categorizing types of images based on their descriptions and properties (FLICKR</title>
+		<author>
+			<persName><surname>Zeng</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020b</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<monogr>
+		<title level="m" type="main">classifying business types based on customers and friendship relations (YELP) (Zeng et al., 2020b) 10. predicting subject areas of ARXIV Computer Science papers (ogbn-arxiv</title>
+		<author>
+			<persName><surname>Hu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<monogr>
+		<title level="m" type="main">predicting product categories in an AMAZON product co-purchasing network (ogbn-products</title>
+		<author>
+			<persName><surname>Hu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

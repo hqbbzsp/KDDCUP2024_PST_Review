@@ -1,0 +1,770 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Learned Incremental Representations for Parsing</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Nikita</forename><surname>Kitaev</surname></persName>
+							<email>kitaev@berkeley.edu</email>
+							<affiliation key="aff0">
+								<orgName type="department">Computer Science Division</orgName>
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<settlement>Berkeley</settlement>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Thomas</forename><surname>Lu</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="department">Computer Science Division</orgName>
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<settlement>Berkeley</settlement>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+							<email>klein@berkeley.edu</email>
+							<affiliation key="aff0">
+								<orgName type="department">Computer Science Division</orgName>
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<settlement>Berkeley</settlement>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Learned Incremental Representations for Parsing</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T12:59+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>We present an incremental syntactic representation that consists of assigning a single discrete label to each word in a sentence, where the label is predicted using strictly incremental processing of a prefix of the sentence, and the sequence of labels for a sentence fully determines a parse tree. Our goal is to induce a syntactic representation that commits to syntactic choices only as they are incrementally revealed by the input, in contrast with standard representations that must make output choices such as attachments speculatively and later throw out conflicting analyses. Our learned representations achieve 93.72 F1 on the Penn Treebank with as few as 5 bits per word, and at 8 bits per word they achieve 94.97 F1, which is comparable with other state of the art parsing models when using the same pre-trained embeddings. We also provide an analysis of the representations learned by our system, investigating properties such as the interpretable syntactic features captured by the system and mechanisms for deferred resolution of syntactic ambiguities.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Language comprehension in humans is, to a nontrivial extent, an incremental process. Human speech is heard word by word, and, while the precise nature of the incrementality is not a settled question, a listener does not wait for a full sentence to end before any processing or understanding can begin. In contrast, some of the highest-performing machine models for syntactic parsing operate precisely in this manner: they require a full sentence as input, and perform deeply bidirectional processing to produce their outputs. Human capabilities suggest that we should also be able to build accurate parsers that instead operate incrementally.</p><p>Incrementality in NLP has often been equated with left-to-right processing. For example, incremental transition-based parsers receive their input one word at a time, and -after each word -output any number of actions such as shift or reduce, where the full sequence of actions represents a syntactic analysis of the input. However, in this paper we are interested in a stronger notion of incrementality, which we refer to as non-speculative incrementality. We say that a representation is speculative when a symbol in the representation encodes a commitment to a certain syntactic decision, but the evidence for that decision is not present in the corresponding prefix of the input. Transition-based systems are frequently speculative; we give an example sentence in Figure <ref type="figure">1</ref>, where a decision must be made regarding whether the preposition "on" attaches to noun "proposal" or the verb "approved." Transition-based approaches such as shift-reduce or attach-juxtapose <ref type="bibr" target="#b23">(Yang and Deng, 2020)</ref> place the action that determines the preposition attachment earlier in the left-to-right processing pattern than the disambiguating word ("Monday" or "taxes") that reveals the correct analysis. Similarly in CCG parsing, the representation of a CCG analysis in the form of a sequence of supertags is likewise speculative -including for this same example, where the correct supertag for each word cannot be predicted based on only that word and its preceding context.</p><p>The speculative nature of incremental transition systems or CCG supertags makes it impractical to recover an accurate parse by simply committing to the highest-scoring option at each each point where a decision must be made. An incremental parser in the speculative paradigms must instead consider multiple analyses in parallel, and later throw out analyses that are inconsistent with the sentence; this can be done through a procedure like beam search. In other words, the true representation of syntactic information at each point in the sentence is not a single sequence of actions (or supertags), but rather a belief state (beam state) that contains multiple candidate analyses. In the limit of infinite beam size, the parser ceases to be incremental: its belief state can contain all reasonable analyses, deferring all choices to the very end of a sentence.</p><p>Our goal in this work is to design a representation for parsing that is maximally speculation free.</p><p>In other words, it should record commitments to syntactic choices only as they are incrementally revealed by the input. We additionally want our representation to relate to constituency trees in a similar way to how transition-based actions relate to them: that is, through a deterministic transformation function. A sequence of shift-reduce or attach-juxtapose actions is not identical to a parse tree, but it can be mapped to a tree using a deterministic automaton that interprets the discrete actions as operations on a tree fragment or stack of tree fragments. A sequence of supertags is likewise not the same as a tree, and mapping it to a tree requires further processing in the form of finding and applying an appropriate series of combinators. These mappings are non-trivial, especially in the case of CCG, so we should not expect our mapping to be trivial either -our only requirement is that it be deterministic and operate entirely from our representation, having already discarded the raw text in the sentence. Finally, we would like our representation to take the familiar form of a sequence of discrete symbols.</p><p>We propose to arrive at such a representation through end-to-end learning, rather than manual construction. The model can then make its own decisions about when syntactic decisions take place, how to handle cases of ambiguity, and how to represent belief states within the learned system itself. This system will learn to encode linguistic and structural features to allow effective incremental parsing. Our end-to-end approach is a model that proceeds in two stages. The first stage maps from individual words to syntactic decisions, which are represented as discrete tokens drawn from a small, bounded vocabulary. The second component of our system is a read-out network that takes a sequence of discrete tags as input and produces a conventional parse tree as output. Both stages are trained jointly in an end-to-end manner. Crucially, we do not a priori assign meaning to the discrete tokens (e.g. actions like shift, or supertags like in CCG); we only specify the total number of symbols available to the model to control the complexity of the representation. Unlike a speculative system, our representation can be used by finding the single highest-scoring tag at each position in a sentence, and then converting the resulting sequence of tags into a tree.</p><p>Important properties that we evaluate for our proposed approach are its quality (as measured by F1 score on the Penn Treebank), as well as compactness (how many bits per word are required to encode syntactic information). At 5 bits per word, a parser using our representations achieves 93.72 F1, and at 8 bits per word it achieves 94.97 F1 -comparable to the method of <ref type="bibr" target="#b6">Kitaev et al. (2019)</ref> trained with the same pre-trained embeddings.</p><p>We further provide an analysis of the symbols learned by our model, including explorations of the linguistic features captured by the symbol set, the information content of our incremental representation for prefixes of a full utterance, and the system's ability to defer resolution of attachment ambiguities.</p><p>Our models and code are publicly available.<ref type="foot" target="#foot_0">1</ref> </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Related Work</head><p>This work is inspired by the concept of incremental parsing implemented in works such as <ref type="bibr" target="#b11">Larchevêque (1995)</ref> and <ref type="bibr" target="#b10">Lane and Henderson (2001)</ref>. With regards to neural parsers, recent strides in incremental parsing include the attach-juxtapose parsers from <ref type="bibr" target="#b23">Yang and Deng (2020)</ref>. However, these neural models often have incremental tree construction mechanisms, but are not incremental from the raw input level due to reliance on pretrained bidirectional models such as the works of <ref type="bibr" target="#b2">Devlin et al. (2019)</ref> and <ref type="bibr" target="#b24">Yang et al. (2019)</ref>.</p><p>The placement of an information bottleneck on token representations has also been studied in the bidirectional case by <ref type="bibr" target="#b13">Li and Eisner (2019)</ref>, who reported many similar findings about the syntactic features learned by discrete tags. However, our model differs in that it explores the incremental, non-speculative case, as well as in the implementation of the parsing model and its constraints on representation size.</p><p>Our incremental parsing system can be compared to manually formulated representations such as shift-reduce or CCG supertagging. However, for purely incremental parsing, limitations of shiftreduce and CCG supertagging may necessitate the use of beam search to produce more accurate, viable parse trees, as in the works of <ref type="bibr" target="#b25">Zhu et al. (2013)</ref> and <ref type="bibr" target="#b1">Bhargava and Penn (2020)</ref>.</p><p>Other works have also analyzed the discrete features useful for syntactic parsing. Some researchers augmented parsing models by adding discrete, hand-coded indicator features based on the raw sentence as in <ref type="bibr" target="#b4">Hall et al. (2014)</ref>. Similar hand-coded, discrete features have been shown to improve other tasks such as NMT <ref type="bibr" target="#b19">(Sennrich and Haddow, 2016)</ref>. Previous experiments by <ref type="bibr" target="#b3">Gaddy et al. (2018)</ref> have analyzed whether neural parsers based on bidirectional LSTMs capture other handmade indicator functions from earlier hypotheses by <ref type="bibr" target="#b17">Petrov and Klein (2007)</ref>. By contrast, our model seeks to directly learn new features, and in fact, many of the hand-made indicators from previous works arise naturally in the learned symbols of our model.</p><p>There also exists work examining the learned grammatical rules of a stack-based recurrent neural network via analysis of an attention mechanism <ref type="bibr" target="#b9">(Kuncoro et al., 2017)</ref>. By contrast, our analysis has a lesser focus on the attention distribution between tokens, and a greater focus on the features and syntactic decisions captured by each individual symbol.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Approach</head><p>Our model is based on a parsing architecture that contains an encoder layer that uses a pretrained network and a chart-based decoder, as detailed in <ref type="bibr" target="#b7">Kitaev and Klein (2018)</ref>. To ensure incrementality, the encoder for this incremental model uses GPT-2 as a base, which disallows a backwards flow of information from future tokens <ref type="bibr" target="#b18">(Radford et al., 2019)</ref>.</p><p>At the interface between the pre-trained encoder and subsequent parts of the model (which we refer to as the read-out network), we introduce a discretization step that collapses the continuous, highdimensional vectors from the encoder network to a small inventory of discrete symbols. The read-out network has access only to these discrete symbols and not to the original text of the input; in other words, the sequence of discrete symbols must encode all information necessary to represent the syntactic structure of the sentence. We introduce an information bottleneck that limits the size of the discrete token vocabulary to as few as 32 distinct symbols per raw input token. The decision to label each token with a single symbol is partially rooted in prior research providing evidence that syntactic decisions among human speakers adhere to the uniform information density hypothesis, thus each token may convey similar amounts of syntactic information <ref type="bibr" target="#b12">(Levy and Jaeger, 2006)</ref>.</p><p>Concretely, a learned projection matrix is first applied to the token-level representation vectors of GPT-2. Each projected vector is then converted into a single discrete symbol via vector quantization <ref type="bibr" target="#b22">(van den Oord et al., 2017)</ref>. The number of symbols is kept small; as such, only a few bits are needed to encode all symbols. In comparison, the base architecture uses a 512-dimensional vector of 32bit floating point numbers for each token. We can obtain high parsing accuracy sending 5 bits per token, which is only 0.03% of the bits of the base architecture's token representations. At around 8 bits per token, parsing performance approximately matches that of the base architecture.</p><p>After discretization, each symbol from the sequence is associated with a learned embedding, as specified in the vector quantization codebook. These vectors are fed as an input to the bidirectional read-out network, which consists of Transformer layers and an MLP-based span classification layer that otherwise match the base architecture. The output of the network is a chart of scores representing each possible constituent span of the sentence. A tree is then efficiently generated through the CKY algorithm following the span scoring methods of <ref type="bibr" target="#b20">Stern et al. (2017)</ref>.</p><p>It should be noted that while the encoder is unidirectional, our read-out network is bidirectional. The bidirectionality allows the network enough slack to learn a flexible mapping between the induced representation and standard constituency trees. For example, the discrete symbol associated with a word may help determine a syntactic attachment that concerns previous words that have already been assigned their own symbols. In practice, the behavior of the read-out network exhibits consistent patterns that we interpret in Section 5. Moreover, the main product of our method -and the principle object of analysis in this paper -is not the network itself but rather the sequence of discrete symbols, each of which encodes no knowledge of future context.</p><p>We train our models using a learning rate of 3e-5 for weights carried over from pre-training, a learning rate of 1e-4 for randomly initialized weights, and a batch size of 32. In order to facilitate training, the first two epochs of training proceed without the use of vector quantization. During this time, a streaming k-means algorithm <ref type="bibr" target="#b0">(Ackermann et al., 2012)</ref> calculates the initial centroids to use for vector quantization. Over the course of the third epoch, the model linearly interpolates between continuous and quantized representations, and uses only the quantized version from the fourth epoch until the end of training. We found that cold-starting with randomly-initialized centroids performs worse, in the sense that some centroids would never be used or updated at any point during training. We attribute this degradation to the fact that randomly sampled code vectors are a poor distributional fit for outputs arising from a pre-trained GPT-2 model.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Results</head><p>We apply our approach to the labeled constituent trees of the English Penn Treebank <ref type="bibr" target="#b14">(Marcus et al., 1993)</ref>. The final incremental model generated using this setup achieves a score of 94.97 F1 on the Penn Treebank WSJ test set. This model uses only 8 bits per token (256 symbols) to define the discrete symbol set using a unidirectional pretrained model (GPT2-medium). A comparable model <ref type="bibr" target="#b6">(Kitaev et al., 2019)</ref> that combines the same pre-trained encoder with deep bidirectional processing achieves 95.10 F1. This shows that our representation can induce parse trees with competitive accuracy.</p><p>In Table <ref type="table" target="#tab_0">1</ref>, we present an F1 score comparison that highlights the behavior of different syntactic representations with different choices of encoder. When directly predicting either per-span label probabilities (following the span classification approach of <ref type="bibr" target="#b20">Stern et al., 2017)</ref>, or actions in the attach-juxtapose transition system <ref type="bibr">(Yang and</ref>  2020), failing to include bidirectional layers on top of a unidirectional GPT-2 incurs a strong accuracy penalty. This is despite the fact that both systems can discard speculative attachment decisions. In the case of the chart parser with representations that consist of label probabilities for each span, adding an additional word can cause a switch to a new analysis by way of the CKY decoding procedure.</p><p>In the case of the attach-juxtapose parser, the same can be achieved via the use of beam search. Nevertheless, incrementally predicting either of these representations fails to leverage the full power of the pre-trained encoder.</p><p>The choice of GPT-2 rather than a stronger bidirectional model has a large effect on the performance on the Penn Treebank. To give a more accurate comparison with other models, Table <ref type="table" target="#tab_0">1</ref> also shows F1 scores for models based on BERT, with the recognition that no model with such a deeply bidirectional encoder can truly be referred to as incremental. Our approach of inducing learned representations with vector quantization also performs well in this setting, validating the method.</p><p>Even higher scores are achievable by using stronger pre-trained models, different forms of bidirectional processing, and additional supervision in the form of dependency trees; <ref type="bibr" target="#b16">Mrini et al. (2020)</ref> combine all of these elements to achieve 96.38 F1. However, many of these techniques are either orthogonal to our work, or they cannot be borrowed into an incremental setting due to their focus on deeply bidirectional neural processing. We further evaluate our approach in terms of the compactness of the produced representations. To do this, we trained a number of models while varying the size of the symbol set. For added comparison, we also trained models using a bidirectional pretrained encoder (BERT). As a baseline, we also produced a model that assigns symbols through simple k-means clustering of single-word embeddings <ref type="bibr" target="#b15">(Mikolov et al., 2013)</ref> rather than fine-tuned contextual models. The average F1 score for each model across a range of tag set sizes is shown in Table <ref type="table">2</ref>. Note that while the numbers of possible tags are all powers of two, this is not a strict requirement of the model, and any positive integer may be used as the tag set size.</p><p>While our best-performing unidirectional model uses 8 bits per token, using as few as 5 bits per token (32 symbols) retains a performance of 93.72 F1 on the test set. As a point of comparison, gold CCG supertags in the CCGbank <ref type="bibr" target="#b5">(Hockenmaier and Steedman, 2007)</ref> training data have an entropy of 5.14 bits per word. However, CCG decoding typically requires multiple analyses to be considered in parallel. A better comparison, then, might be the entropy of top-k supertag predictions from a supertagging model. We find that the trained model of <ref type="bibr" target="#b21">Tian et al. (2020)</ref> has an entropy of 5.98 bits/word for its ranked top-2 predictions, 7.57 for top-3, and 9.03 for top-4. Our method's best-performing setting of 8 bits per word is therefore at an entropy level similar to top-3 or top-4 predictions for a recent CCG supertagger. The 122</p><p>Figure <ref type="figure">2</ref>: Applying our read-out network to prefixes of the syntactic tag sequence demonstrates that syntactic decisions are committed to incrementally, and are not all deferred to the end of the sentence. Nevertheless, the same tag sequence may decode to different trees, depending on a future tag. Numbers below each word denote the discrete tags assigned by our model.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Discussion</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Incremental Behavior</head><p>Having achieved high F1 scores, we must next demonstrate that our representation is, in fact, incremental. An incremental representation has meaningful syntactic information in each of its prefixes, and we can probe this by running our read-out network after each word in the sentence, as shown in Figure <ref type="figure">2</ref>. The resulting trees involve mostly local changes from word to word, which shows that important information is not being deferred to the very end of a sentence.</p><p>It should be noted that our read-out network was never trained on anything but complete sentences. Applying it to fragments will produce individual trees that may not be representative of the ambiguity present in the underlying representation. For example, after the word "on" the read-out network outputs a prepositional phrase that initially appears to attach to the verb. Depending on the label chosen for the next word, however, the final attachment can be to either the verb or the noun phrase.</p><p>Nevertheless, this approach allows us to probe the degree to which the representation encodes syntactic decisions immediately, versus deferring them to some later point. For each span in the final tree, we can walk backwards through the partial readouts to find the furthest point when the span still appears in a readout; we call this the point in time that a span is finalized. In Figure <ref type="figure">2</ref>, the noun phrase "The Council" is finalized after the word "Council," and the verb phrase is finalized after the word "approved." For the purposes of identifying whether a span is the same across two different trees, we assume that a span is uniquely identified by its label, its starting position, and the position of the last word in the leftmost child of the span (or the position of the single word in the span, if it only covers one word). The last of these we also refer to as the split point of the span.</p><p>Figure <ref type="figure" target="#fig_2">3</ref> shows that approximately half of all spans are finalized either immediately at or immediately after their split point. The distribution has a tail that falls off roughly exponentially, as shown by the loosely straight-line decay on the log-linear plot. The presence of this tail stands in contrast with the attach-juxtapose representation, where all attachments are determined immediately after a split point, and the only way to defer a decision past that point is to retain multiple analyses on something like a beam. An extremely frequent phe- nomenon within the tail is when a phrase expands to be nested inside another phrase of the same type: sometimes this happens due to the nature of the constituency representation we're converting to, and sometimes it reflects actual syntactic ambiguity. One example in the latter is shown in Figure <ref type="figure" target="#fig_3">4</ref>, where either the NP or the S node must expand due to coordination. Note how our representation can handle this situation without considering multiple candidate labelings, while speculative transitionbased systems would not.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Entropy of Symbol Distribution</head><p>In our parsing scheme, each new token is assigned a single syntactic symbol based on all tokens up to the current. The subsequent sequence of symbols then fully determines a constituency tree.</p><p>For different random initializations of our approach with the same set size, similar features are typically captured by the system. Models using smaller sets of symbols tend to have the most variability in terms of feature distribution. The entropy of several random initializations of these sets is shown in Figure <ref type="figure" target="#fig_4">5</ref>.</p><p>Entropy appears to roughly stabilize after a small number of training iterations. At this point, the characteristics of each symbol also roughly stabilize. The entropy of the distribution of symbols seems to increase linearly with the number of bits per representation, but does not reach a level that corresponds to uniform usage frequency for all symbols in the discrete inventory.  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Learned Token-Level Features</head><p>Due to the small size of our information bottleneck, we hypothesize that our symbols encode the most powerful features needed to produce an accurate constituent tree representable by the given bitrate. Thus, by analyzing the features captured by differently sized symbol sets, we can deduce a rough hierarchy of distinct features that are relevant to the incremental parsing task. Starting with a system using only 2 discrete symbols, we steadily increase the bit rate of the dictionary and manually inspect the representation to find interpretable token-level features. Many of these are similarly found in other works investigating the linguistic features captured by the token representations of neural parsers <ref type="bibr" target="#b3">(Gaddy et al., 2018;</ref><ref type="bibr" target="#b13">Li and Eisner, 2019)</ref>. What follows is the rough order in which several of these features appear: </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Clause Separation</head><p>To demonstrate the features learned and captured by these tags, consider a model using only 32 symbols. Main, subordinate, and relative clauses are typically associated with different discrete symbols for the same parts of speech. The sentences in Figure <ref type="figure">6</ref> display the predicted tag sequences and parses involving many of the same words, but within different clause types. In main clauses, subjects and verbs are assigned symbols 16 and 6. Subordinate clauses, however, tend to use alternate symbols 15 and 13 for subject nouns and verbs respectively, while relative clauses use 20 and 26. This feature of our symbol set suggests that our tags capture structural context beyond the current word, and the features learned by these tags can have human-interpretable meanings upon analysis.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.5">Ambiguity Resolution</head><p>The structure of the final parse tree is interpolated from the series of discrete symbols resulting from the encoder network. To analyze how syntactic decisions are encoded in our representation, we first attempted to train a modified PCFG based on <ref type="bibr" target="#b8">Klein and Manning (2003)</ref>, with the goal of replicating the behavior of our read-out network. However, this system could only reach a performance around 76.18 F1 towards the reconstruction task, suggesting that the PCFG's assumptions of locality and sub-tree independence are not valid for our learned representations.</p><p>To better understand the mechanism by which our representations are capable of representing a wide range of syntactic structures, we focus specifically on cases with potential syntactic ambiguities. Consider the minimal pair shown in Figure <ref type="figure">7</ref>, where the predicted syntactic structure differs by only a single prepositional attachment. This pair uses the same encoder model as the previous example, which has a maximum of 32 discrete symbols. Due to the different symbols assigned to the prepositions, the read-out network attaches the prepositional phrase at a different height.</p><p>Not all prepositional attachments can be reliably determined based on only the words up to and including the preposition. To avoid speculative behavior, the tag sequences must contain mechanisms for recording instances of ambiguity and then resolving them based on tokens further down in the string. Figure <ref type="figure" target="#fig_6">8</ref> shows an example of how our representation handles such situations. Running the read-out network for the prefix "Lucas brought the groceries for" produces a partial parse that attaches the preposition to "the groceries." However, the final token offers additional information that may influence the attachment location, suggesting that the symbol sequence up to the preposition does not eliminate either possible structure, but rather encodes the locations of other likely attachments. The encoder's decision over whether to mark the final token as symbol 11 or 16 allows the final tree to have an attachment to the verb phrase, rather than adhering to the partial interpretation of targeting the noun phrase.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusion</head><p>In this paper, we present an approach to inducing syntactic representations that associate each token in the input with a discrete symbol from an arbitrarily-sized vocabulary, where the representations can be predicted incrementally in a strictly append-only manner. Our models achieve high F1 on the WSJ test set despite a steep information bottleneck limiting the information that can be associated with each token. The token-level tags produced by our model encode relevant syntactic information suitable for the given bit rate, while the locations of these tags serve to concretely define the location at which syntactic decisions can be committed to in a speculation-free manner. These systems can serve to improve our understanding of incremental parsing and sequential decision making, and the underlying computational methods may be useful in the analysis of other incremental contexts.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head></head><label></label><figDesc>Figure1: A case of ambiguity where speculatively committing to an attachment decision can lead an incremental parsing system into a dead end.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure3: Our representation commits to (finalizes) the majority of spans within just a few words of their split point. The tail of the histogram reflects cases where it may not commit to a decision (e.g. resolving an ambiguity) until many words past the split point of the relevant span. Note the log scale for the y-axis.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Our representation is a strictly append-only sequence of tags. Nevertheless, later tags can resolve ambiguities (in this case, coordination scope) introduced at an earlier point in the sentence.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Entropy of derived symbol sets over the training period (in bits). Multiple training runs are shown for each tag set size.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :Figure 7 :</head><label>67</label><figDesc>Figure 6: Predicted parses of the clause "Luna smashed the pumpkin," where the subject and verb are assigned different symbols depending on the clause type. Tags shown below each word were predicted by a model that may use up to 32 distinct symbols.S</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 8 :</head><label>8</label><figDesc>Figure8: Two possible sentences continuing from the prefix "Lucas brought the groceries for" where the final attachment height for the prepositional phrase is determined by the discrete symbol for the word following the preposition. Tags shown below each word were predicted by a model that may use up to 32 distinct symbols.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>F1 on the WSJ test set for parsers using different syntactic representations and pre-trained encoders. Our representation results in an F1 score that is close to the maximum achievable with the same pre-trained GPT-2-medium model. † Results based on integrating GPT-2 with publicly available code for prior methods, with and without bidirectional layers on top of GPT-2.</figDesc><table><row><cell>Deng,</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">https://github.com/thomaslu2000/ Incremental-Parsing-Representations</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>This research was supported by DARPA under the LwLL program / Grant No. FA8750-19-1-0504.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Streamkm++ a clustering algorithm for data streams</title>
+		<author>
+			<persName><forename type="first">Marcus</forename><surname>Marcel R Ackermann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christoph</forename><surname>Märtens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kamil</forename><surname>Raupach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christiane</forename><surname>Swierkot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Lammersen</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Sohler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Experimental Algorithmics (JEA)</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="page" from="2" to="3" />
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Supertagging with CCG primitives</title>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Bhargava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gerald</forename><surname>Penn</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.repl4nlp-1.23</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 5th Workshop on Representation Learning for NLP</title>
+				<meeting>the 5th Workshop on Representation Learning for NLP</meeting>
+		<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="194" to="204" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">BERT: Pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenton</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kristina</forename><surname>Toutanova</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/N19-1423</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</title>
+		<title level="s">Long and Short Papers</title>
+		<meeting>the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies<address><addrLine>Minneapolis, Minnesota</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="4171" to="4186" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">What&apos;s going on in neural constituency parsers? an analysis</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Gaddy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mitchell</forename><surname>Stern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/N18-1091</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies<address><addrLine>New Orleans, Louisiana</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="999" to="1010" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Less grammar, more features</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Hall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Greg</forename><surname>Durrett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<idno type="DOI">10.3115/v1/P14-1022</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 52nd Annual Meeting of the Association for Computational Linguistics<address><addrLine>Baltimore, Maryland</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="228" to="237" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">CCGbank: A corpus of CCG derivations and dependency structures extracted from the Penn Treebank</title>
+		<author>
+			<persName><forename type="first">Julia</forename><surname>Hockenmaier</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Steedman</surname></persName>
+		</author>
+		<idno type="DOI">10.1162/coli.2007.33.3.355</idno>
+	</analytic>
+	<monogr>
+		<title level="j">Computational Linguistics</title>
+		<imprint>
+			<biblScope unit="volume">33</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="355" to="396" />
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Multilingual constituency parsing with self-attention and pre-training</title>
+		<author>
+			<persName><forename type="first">Nikita</forename><surname>Kitaev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/P19-1340</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 57th Annual Meeting of the Association for Computational Linguistics<address><addrLine>Florence, Italy</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="3499" to="3505" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Constituency parsing with a self-attentive encoder</title>
+		<author>
+			<persName><forename type="first">Nikita</forename><surname>Kitaev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/P18-1249</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 56th Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 56th Annual Meeting of the Association for Computational Linguistics<address><addrLine>Melbourne, Australia</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="2676" to="2686" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Accurate unlexicalized parsing</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">D</forename><surname>Manning</surname></persName>
+		</author>
+		<idno type="DOI">10.3115/1075096.1075150</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 41st Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 41st Annual Meeting of the Association for Computational Linguistics<address><addrLine>Sapporo, Japan</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page" from="423" to="430" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">What do recurrent neural network grammars learn about syntax?</title>
+		<author>
+			<persName><forename type="first">Adhiguna</forename><surname>Kuncoro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miguel</forename><surname>Ballesteros</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lingpeng</forename><surname>Kong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Dyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Graham</forename><surname>Neubig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noah</forename><forename type="middle">A</forename><surname>Smith</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 15th Conference of the European Chapter</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 15th Conference of the European Chapter<address><addrLine>Valencia, Spain</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1249" to="1258" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Incremental syntactic parsing of natural language corpora with simple synchrony networks</title>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">R</forename><surname>Lane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">B</forename><surname>Henderson</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/69.917562</idno>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Knowledge and Data Engineering</title>
+		<imprint>
+			<biblScope unit="volume">13</biblScope>
+			<biblScope unit="issue">02</biblScope>
+			<biblScope unit="page" from="219" to="231" />
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Optimal incremental parsing</title>
+		<author>
+			<persName><forename type="first">J.-M</forename><surname>Larchevêque</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/200994.200996</idno>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Trans. Program. Lang. Syst</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="1" to="15" />
+			<date type="published" when="1995">1995</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Speakers optimize information density through syntactic reduction</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Florian</forename><surname>Jaeger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Specializing word embeddings (for parsing) by information bottleneck</title>
+		<author>
+			<persName><forename type="first">Lisa</forename><surname>Xiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Eisner</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/D19-1276</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)</title>
+				<meeting>the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)<address><addrLine>Hong Kong, China</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="2744" to="2754" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Building a large annotated corpus of English: The Penn Treebank</title>
+		<author>
+			<persName><forename type="first">Mitchell</forename><forename type="middle">P</forename><surname>Marcus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Beatrice</forename><surname>Santorini</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mary</forename><forename type="middle">Ann</forename><surname>Marcinkiewicz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computational Linguistics</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="313" to="330" />
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Efficient estimation of word representations in vector space</title>
+		<author>
+			<persName><forename type="first">Tomas</forename><surname>Mikolov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gregory</forename><forename type="middle">S</forename><surname>Corrado</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Dean</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR Workshops Track</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Rethinking self-attention: Towards interpretability in neural parsing</title>
+		<author>
+			<persName><forename type="first">Khalil</forename><surname>Mrini</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Franck</forename><surname>Dernoncourt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hung</forename><surname>Quan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trung</forename><surname>Tran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Walter</forename><surname>Bui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ndapa</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Nakashole</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.findings-emnlp.65</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Findings of the Association for Computational Linguistics: EMNLP 2020</title>
+				<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="731" to="742" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Improved inference for unlexicalized parsing</title>
+		<author>
+			<persName><forename type="first">Slav</forename><surname>Petrov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Human Language Technologies 2007: The Conference of the North American Chapter</title>
+				<meeting><address><addrLine>Rochester, New York</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="404" to="411" />
+		</imprint>
+	</monogr>
+	<note>Proceedings of the Main Conference</note>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Language models are unsupervised multitask learners</title>
+		<author>
+			<persName><forename type="first">Alec</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeff</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rewon</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Luan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dario</forename><surname>Amodei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Linguistic input features improve neural machine translation</title>
+		<author>
+			<persName><forename type="first">Rico</forename><surname>Sennrich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barry</forename><surname>Haddow</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/W16-2209</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the First Conference on Machine Translation</title>
+				<meeting>the First Conference on Machine Translation<address><addrLine>Berlin, Germany</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="83" to="91" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">A minimal span-based neural constituency parser</title>
+		<author>
+			<persName><forename type="first">Mitchell</forename><surname>Stern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Andreas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Klein</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/P17-1076</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 55th Annual Meeting of the Association for Computational Linguistics<address><addrLine>Vancouver, Canada</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="818" to="827" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Supertagging Combinatory Categorial Grammar with attentive graph convolutional networks</title>
+		<author>
+			<persName><forename type="first">Yuanhe</forename><surname>Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yan</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fei</forename><surname>Xia</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/2020.emnlp-main.487</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)</title>
+				<meeting>the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)</meeting>
+		<imprint>
+			<publisher>Online. Association for Computational Linguistics</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="6037" to="6044" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Neural discrete representation learning</title>
+		<author>
+			<persName><forename type="first">Aäron</forename><surname>Van Den Oord</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Oriol</forename><surname>Vinyals</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Koray</forename><surname>Kavukcuoglu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">Strongly incremental constituency parsing with graph neural networks</title>
+		<author>
+			<persName><forename type="first">Kaiyu</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jia</forename><surname>Deng</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note>In NeurIPS</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">XLNet: Generalized autoregressive pretraining for language understanding</title>
+		<author>
+			<persName><forename type="first">Zhilin</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zihang</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaime</forename><forename type="middle">G</forename><surname>Carbonell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruslan</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Fast and accurate shiftreduce constituent parsing</title>
+		<author>
+			<persName><forename type="first">Muhua</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yue</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wenliang</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Min</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jingbo</forename><surname>Zhu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 51st Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 51st Annual Meeting of the Association for Computational Linguistics<address><addrLine>Sofia, Bulgaria</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="434" to="443" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,1595 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">MCUNetV2: Memory-Efficient Patch-based Inference for Tiny Deep Learning</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Wei-Ming</forename><surname>Chen</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Han</forename><surname>Cai</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Chuang</forename><surname>Gan</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Mit-Ibm</forename><surname>Watson</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">A</forename><forename type="middle">I</forename><surname>Lab</surname></persName>
+						</author>
+						<title level="a" type="main">MCUNetV2: Memory-Efficient Patch-based Inference for Tiny Deep Learning</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:25+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Tiny deep learning on microcontroller units (MCUs) is challenging due to the limited memory size. We find that the memory bottleneck is due to the imbalanced memory distribution in convolutional neural network (CNN) designs: the first several blocks have an order of magnitude larger memory usage than the rest of the network. To alleviate this issue, we propose a generic patch-by-patch inference scheduling, which operates only on a small spatial region of the feature map and significantly cuts down the peak memory. However, naive implementation brings overlapping patches and computation overhead. We further propose receptive field redistribution to shift the receptive field and FLOPs to the later stage and reduce the computation overhead. Manually redistributing the receptive field is difficult. We automate the process with neural architecture search to jointly optimize the neural architecture and inference scheduling, leading to MCUNetV2. Patch-based inference effectively reduces the peak memory usage of existing networks by 4-8×. Co-designed with neural networks, MCUNetV2 sets a record ImageNet accuracy on MCU (71.8%), and achieves &gt;90% accuracy on the visual wake words dataset under only 32kB SRAM. MCUNetV2 also unblocks object detection on tiny devices, achieving 16.9% higher mAP on Pascal VOC compared to the stateof-the-art result. Our study largely addressed the memory bottleneck in tinyML and paved the way for various vision applications beyond image classification.</p><p>* some CNN designs have highly complicated branching structure (e.g., NASNet [56]), but they are generally less efficient for inference <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b5">6]</ref>; thus not widely used for edge computing.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>IoT devices based on tiny hardware like microcontroller units (MCUs) are ubiquitous nowadays. Deploying deep learning models on such tiny hardware will enable us to democratize artificial intelligence. However, tiny deep learning is fundamentally different from mobile deep learning due to the tight memory budget <ref type="bibr" target="#b26">[27]</ref>: a common MCU usually has an SRAM smaller than 512kB, which is too small for deploying most off-the-shelf deep learning networks. Even for more powerful hardware like Raspberry Pi 4, fitting inference into the L2 cache (1MB) can significantly improve energy efficiency. These pose new challenges to efficient AI inference with a small peak memory usage.</p><p>Existing work employs pruning <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b31">32,</ref><ref type="bibr" target="#b30">31]</ref>, quantization <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b53">54,</ref><ref type="bibr" target="#b52">53,</ref><ref type="bibr" target="#b36">37,</ref><ref type="bibr" target="#b45">46,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b38">39]</ref>, and neural architecture search <ref type="bibr" target="#b5">[6,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b46">47,</ref><ref type="bibr" target="#b4">5]</ref> for efficient deep learning. However, these methods focus on reducing the number of parameters and FLOPs, but not the memory bottleneck. The tight memory budget limits the feature map/activation size, restricting us to use a small model capacity or a small input image size. Actually, the input resolutions used in existing tinyML work are usually small (&lt; 224 2 ) <ref type="bibr" target="#b26">[27]</ref>, which might be acceptable for image classification (e.g., ImageNet <ref type="bibr" target="#b10">[11]</ref>, VWW <ref type="bibr" target="#b9">[10]</ref>), but not for dense prediction tasks like objection detection: as in Figure <ref type="figure" target="#fig_1">2</ref>, the performance of object detection degrades much faster with input resolution than image classification. Such a restriction hinders the application of tiny deep learning on many real-life tasks (e.g., person detection).</p><p>35th Conference on Neural Information Processing Systems (NeurIPS 2021), Sydney, Australia. per-patch peak mem.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>4x4patch (int8)</head><p>per-patch inference per-layer inference per-layer inference peak mem: 1372kB peak mem: 172kB</p><p>Figure <ref type="figure">1</ref>. MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> has a very imbalanced memory usage distribution. The peak memory is determined by the first 5 blocks with high peak memory, while the later blocks all share a small memory usage. By using per-patch inference (4 × 4 patches), we are able to significantly reduce the memory usage of the first 5 blocks, and reduce the overall peak memory by 8×, fitting MCUs with a 256kB memory budget. Notice that the model architecture and accuracy are not changed for the two settings. The memory usage is measured in int8. We perform an in-depth analysis on memory usage of each layer in efficient network designs and find that they have a very imbalanced activation memory distribution. Take MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> as an example, as shown in Figure <ref type="figure">1</ref>, only the first 5 blocks have a high peak memory (&gt;450kB), becoming the memory bottleneck of the entire network. The remaining 13 blocks have a low memory usage, which can easily fit a 256kB MCU. The peak memory of the initial memory-intensive stage is 8× higher than the rest of the network. Such a memory pattern leaves a huge room for optimization: if we can find a way to "bypass" the memory-intensive stage, we can reduce the overall peak memory by 8×.</p><p>In this paper, we propose MCUNetV2 to address the challenge. We first propose a patch-by-patch execution order for the initial memory-intensive stage of CNNs (Figure <ref type="figure" target="#fig_2">3</ref>). Unlike conventional layer-by-layer execution, it operates on a small spatial region of the feature map at a time, instead of the whole activation. Since we only need to store the feature of a small patch, we can significantly cut down the peak memory of the initial stage (blue to yellow in Figure <ref type="figure" target="#fig_2">3</ref>), allowing us to fit a larger input resolution. However, the reduced peak memory comes at the price of computation overhead: in order to compute the non-overlapping output patches, the input image patches need to be overlapped (Figure <ref type="figure" target="#fig_2">3</ref>(b)), leading to repeated computation. The overhead is positively related to the receptive field of the initial stage: the larger the receptive field, the larger the input patches, which leads to more overlapping. We further propose receptive field redistribution to shift the receptive field and workload to the later stage of the network. This reduces the patch size as well as the computation overhead caused by overlapping, without hurting the performance of the network. Finally, patch-based inference brings a larger design space for the neural network, giving us more freedom trading-off input resolution, model size, etc. We also need to minimize the computation overhead under patch-based execution. To explore such a large and entangled space, we propose to jointly design the optimal deep model and its inference schedule with neural architecture search given a specific dataset and hardware.</p><p>Patch-based inference effectively reduces the peak memory usage of existing networks by 4-8× (Figure <ref type="figure">5</ref>). The results are further improved when co-designing neural architecture with inference scheduling. On ImageNet <ref type="bibr" target="#b10">[11]</ref>, we achieve a record accuracy of 71.8% on MCU (Table <ref type="table" target="#tab_4">2</ref>); on visual wake words dataset <ref type="bibr" target="#b9">[10]</ref>, we are able to achieve &gt;90% accuracy under only 32kB SRAM, which is 4.0× smaller compared to MCUNetV1 <ref type="bibr" target="#b26">[27]</ref>, greatly lowering the boundary of tiny deep learning (Figure <ref type="figure" target="#fig_6">7</ref>). MCUNetV2 further unlocks the possibility to perform dense prediction tasks on MCUs (e.g., object detection), which was not practical due to the limited input resolution. We are able to achieve 64.6% mAP under 256kB SRAM constraints and 68.3% under 512kB, which is 16.9% higher compared to the existing state-of-the-art solution, making object detection applicable on a tiny ARM Cortex-M4 MCU. Our contributions can be summarized as follows:</p><p>• We systematically analyze the memory usage pattern of efficient CNN designs and find that they suffer from a imbalanced memory distribution, leaving a huge room for optimization. • We propose a patch-based inference scheduling to significantly reduce the peak memory required for running CNN models, together with receptive field redistribution to minimize the computation overhead. . Per-patch inference can significantly reduce the peak memory required to execute a sequence of convolutional layers. We study two convolutional layers (stride 1 and 2). Under per-layer computation (a), the first convolution has a large input/output activation size, dominating the peak memory requirement. With per-patch computation (b), we allocate the buffer to host the final output activation, and compute the results patch-by-patch. We only need to store the activation from one patch but not the entire feature map, reducing the peak memory (the first input is the image, which can be partially decoded from a compressed format like JPEG).</p><p>• With the joint design of network architecture and inference scheduling, we achieve a record performance for tiny image classification and objection detection on MCUs. Our work largely addressed the memory bottleneck for tinyML, paving the way for various vision applications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Understanding the Memory Bottleneck of Tiny Deep Learning</head><p>We systematically analyze the memory bottleneck of CNN models. Imbalanced memory distribution. As an example, we provide the per-block peak memory usage of MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> in Figure <ref type="figure">1</ref>. The profiling is done in int8 (details in Section 4). We can observe a clear pattern of imbalanced memory usage distribution. The first 5 blocks have large peak memory, exceeding the memory constraints of MCUs, while the remaining 13 blocks easily fit 256kB memory constraints. The third block has 8× larger memory usage than the rest of the network, becoming the memory bottleneck. We also inspect other efficient network designs and find the phenomenon quite common across different CNN backbones, even for models specialized for memory-limited microcontrollers <ref type="bibr" target="#b26">[27]</ref>. The detailed statistics are provided in the supplementary.</p><p>We find that this situation applies to most single-branch or residual CNN designs due to the hierarchical structure * : after each stage, the image resolution is down-sampled by half, leading to 4× fewer pixels, while the channel number increases only by 2× <ref type="bibr" target="#b41">[42,</ref><ref type="bibr" target="#b16">17,</ref><ref type="bibr" target="#b21">22]</ref> or by an even smaller ratio <ref type="bibr" target="#b40">[41,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b44">45]</ref>, resulting in a decreasing activation size. Therefore, the memory bottleneck tends to appear at the early stage of the network, after which the peak memory usage is much smaller.</p><p>Challenges and opportunities. The imbalanced memory distribution significantly limits the model capacity and input resolution executable on MCUs. In order to accommodate the initial memoryintensive stage, the whole network needs to be scaled down even though the majority of the network already has a small memory usage. It also makes resolution-sensitive tasks (e.g., object detection) difficult, as a high-resolution input will lead to large initial peak memory. Consider the first convolutional layer in MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> with input channels 3, output channels 32, and stride 2, running it on an image of resolution 224 × 224 requires a memory of 3 × 224 2 + 32 × 112 2 = 539kB even when quantized in int8, which cannot be fitted into microcontrollers. On the other hand, if we can find a way to "bypass" the initial memory-intensive stage, we can greatly reduce the peak memory of the whole network, leaving us a large room for optimization. We propose to break the memory bottleneck of the initial layers with patch-based inference (Figure <ref type="figure" target="#fig_2">3</ref>). Existing deep learning inference frameworks (e.g., TensorFlow Lite Micro <ref type="bibr" target="#b0">[1]</ref>, TinyEngine <ref type="bibr" target="#b26">[27]</ref>, microTVM <ref type="bibr" target="#b7">[8]</ref>, etc.) use a layer-by-layer execution. For each convolutional layer, the inference library first allocates the input and output activation buffer in SRAM, and releases the input buffer after the whole layer computation is finished. Such an implementation makes inference optimization easy (e.g., im2col, tiling, etc.), but the SRAM has to hold the entire input and output activation for   each layer, which is prohibitively large for the initial stage of the CNN. Our patch-based inference runs the initial memory-intensive stage in a patch-by-patch manner. For each time, we only run the model on a small spatial region (&gt;10× smaller than the whole area), which effectively cuts down the peak memory usage. After this stage is finished, the rest of the network with a small peak memory is executed in a normal layer-by-layer manner (upper notations in Figure <ref type="figure">1</ref>).</p><formula xml:id="formula_0">conv3x3 MB1 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 Pooling FC conv3x3 MB1 1x1 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3 MB6 3x3</formula><p>We show an example of two convolutional layers (with stride 1 and 2) in Figure <ref type="figure" target="#fig_2">3</ref>. For conventional per-layer computation, the first convolutional layer has large input and output activation size, leading to a high peak memory. With spatial partial computation, we allocate the buffer for the final output and compute its values patch-by-patch. In this manner, we only need to store the activation from one patch instead of the whole feature map. Note that the first activation is the input image, which can be partially decoded from a compressed format like JPEG and does not require full storage.</p><p>Computation overhead. The significant memory saving comes at the cost of computation overhead.</p><p>To maintain the same output results as per-layer inference, the non-overlapping output patches correspond to overlapping patches in the input image (the shadow area in Figure <ref type="figure" target="#fig_2">3(b)</ref>). This is because convolutional filters with kernel size &gt;1 contribute to increasing receptive fields. The bordering pixel on the output patches is dependent on the inputs from neighboring patches. Such repeated computation can increase the overall network computation by 10-17% even under optimal hyper-parameter choice (Figure <ref type="figure">5</ref>), which is undesirable for low-power edge devices.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Reducing Computation Overhead by Redistributing the Receptive Field</head><p>The computation overhead is related to the receptive field of the patch-based initial stage. Consider the output of the patch-based stage, the larger receptive field it has on the input image, the larger resolution for each patch, leading to a larger overlapping area and repeated computation (see Section 4.4 for quantitative analysis). For MobileNetV2, if we only consider down-sampling, each input patch has a side length of 224/4 = 56. But when considering the increased receptive field, each input patch has to use a shape of 75 × 75, leading to a large overlapping area.</p><p>We propose to redistribute the receptive field (RF) of the CNN to reduce computation overhead. The basic idea is: (1) reduce the receptive field of the patch-based initial stage; (2) increase the receptive field of the later stage. Reducing RF for the initial stage helps to reduce the size of each input patch and repeated computation. However, some tasks may have degraded performance if the overall RF is smaller (e.g., detecting large objects). Therefore, we further increase the RF of the later stage to compensate for the performance loss.</p><p>We take MobileNetV2 as a study case and modify its architecture. The comparison is shown in Figure <ref type="figure" target="#fig_4">4</ref>. We used smaller kernels and fewer blocks in the per-patch inference stage, and increased the number of blocks in the later per-layer inference stage. The process needs manual tuning and varies case-by-case. We will later discuss how we automate the process with NAS. We compare the performance of the two architectures in Table <ref type="table" target="#tab_1">1</ref>. Per-patch inference reduces the peak SRAM by 8× for all cases, but the original MobileNetV2 design has 42% computation overhead for the patch-based stage and 10% for the overall network. After redistributing the receptive field ("MbV2-RD"), we can reduce the input patch size from 75 to 63, while maintaining the same level of performance in image classification and object detection. After redistribution, the computation overhead is only 3%, which is negligible considering the benefit in memory reduction.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Joint Neural Architecture and Inference Scheduling Search</head><p>Redistributing the receptive field allows us to enjoy the benefit of memory reduction at minimal computation/latency overhead, but the strategy varies case-by-case for different backbones. The reduced peak memory also allows larger freedom when designing the backbone architecture (e.g., using a larger input resolution). To explore such a large design space, we propose to jointly optimize the neural architecture and the inference scheduling in an automated manner. Given a certain dataset and hardware constraints (SRAM limit, Flash limit, latency limit, etc.), our goal is to achieve the highest accuracy while satisfying all the constraints. We have the following knobs to optimize:</p><p>Backbone optimization. We follow <ref type="bibr" target="#b26">[27]</ref> to use a MnasNet-alike search space <ref type="bibr" target="#b43">[44,</ref><ref type="bibr" target="#b5">6]</ref>   <ref type="bibr" target="#b20">[21]</ref> have better accuracy-computation trade-off, but are hard to quantize due to Swish activation function <ref type="bibr" target="#b35">[36]</ref>, making deployment on MCU difficult. As shown in <ref type="bibr" target="#b26">[27]</ref>, the search space configuration (i.e., the global width multiplier w and input resolution r) is crucial to the final NAS performance. We argue that the best search space configuration is not only hardware-aware but also task-aware: for example, some tasks may prefer a higher resolution over a larger model size, and vice versa. Therefore, we also put r and w into the search space. We further extend w to support per-block width scaling w [ ] .</p><p>Including w [ ] (0.5/0.75/1.0) and r (96-256) expands the search space scalability, allowing us to fit different MCU models and tight resource budgets (ablation study provided in the supplementary).</p><p>Inference scheduling optimization. Given a model and hardware constraints, we will find the best inference scheduling. Our inference engine is developed based on TinyEngine <ref type="bibr" target="#b26">[27]</ref> to further patch-based inference. Apart from the optimization knobs in TinyEngine, we also need to determine the patches number p and the number of blocks n to perform patch-based inference, so that the inference satisfies the SRAM constraints. According to Section 4.4, a smaller p and n lead to a smaller computation overhead and faster inference. But it varies case-by-case, so we jointly optimize it with the architecture.</p><p>Joint search. We need to co-design the backbone optimization and inference scheduling. For example, given the same constraints, we can choose to use a smaller model that fits per-layer execution (p = 1, no computation overhead), or a larger model and per-patch inference (p &gt; 1, with a small computation overhead). Therefore, we put both sides in the same loop and use evolutionary search to find the best set of</p><formula xml:id="formula_1">(k [ ] , e [ ] , d [ ] ,</formula><p>w [ ] , r, p, n) satisfying constraints. Specifically, we randomly sample neural networks from the super network search space; for each sampled network, we enumerate all the p and n choices (optimized together with other knobs in TinyEngine) and find the satisfying combinations. We then report the best (p, n) pair with minimal computation/latency, and use the statistics to supervise architecture search. We provide the details and pseudo code in supplementary.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Experiments</head><p>Memory profiling. The memory usage is dependent on the inference framework implementation <ref type="bibr" target="#b26">[27]</ref>. To ease the comparison, we study two profiling settings:</p><p>(1) We first study analytic profiling, which is only related to the model architecture but not the inference framework. Following <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b39">40]</ref>, the memory required for a layer is the sum of input and output activation (since weights can be partially fetched from Flash); for networks with multi-branches (e.g., residual connection), we consider the sum of memory required for all branches at the same time (if the same input is shared by multiple branches, it will only be counted once).  when running on MCUs. The latency overhead could be large for some networks, but we can reduce it to 4% with proper architecture design (MbV2-RD). We scale down width w and resolution to fit MCU memory.</p><p>(2) We also study on-device profiling to report the measured SRAM and Flash usage when executing the deep model on MCU. The number is usually larger than the analytic results since we need to account for temporary buffers storing partial weights, Im2Col buffer, etc. Datasets. We analyze the advantage of our method on image classification datasets: ImageNet <ref type="bibr" target="#b10">[11]</ref> as the standard benchmark, and Visual Wake Words <ref type="bibr" target="#b9">[10]</ref> to reflect TinyML applications. We further validate our method on object detection datasets: Pascal VOC <ref type="bibr" target="#b12">[13]</ref> and WIDER FACE <ref type="bibr" target="#b47">[48]</ref> to show our advantage: be able to fit larger resolution on the MCU.</p><p>Training&amp;deployment. We follow <ref type="bibr" target="#b26">[27]</ref> for super network training and evolutionary search, detailed in the supplementary. Models are quantized to int8 for deployment. We extend TinyEngine <ref type="bibr" target="#b26">[27]</ref> to support patch-based inference, and benchmark the models on 3 MCU models with different hardware resources: STM32F412 (Cortex-M4, 256kB SRAM/1MB Flash), STM32F746 (Cortex-M7, 320kB SRAM/1MB Flash), STM32H743 (Cortex-M7, 512kB SRAM/2MB Flash).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Reducing Peak Memory of Existing Networks</head><p>We first analyze how patch-based inference can significantly reduce the peak memory for model inference, both in analytic profiling and on-device profiling.</p><p>Analytic profiling. We study several widely used deep network backbones designed for edge inference in Figure <ref type="figure">5</ref>: MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> (MbV2), redistributed MobileNetV2 (MbV2-RD), Once-For-All CPU (OFA-CPU) <ref type="bibr" target="#b4">[5]</ref>, MnasNet <ref type="bibr" target="#b43">[44]</ref>, and FBNet-A <ref type="bibr" target="#b46">[47]</ref>. All the networks use an input resolution of 224 × 224; for patch-based inference, we used 4 × 4 patches. The memory is profiled in int8. Per-patch inference significantly reduces the peak memory by 3.7-8.0×, while only incurring 8-17% of computation overhead. For MobileNetV2, we can reduce the computation overhead from 10% to 3% by redistributing the receptive field without hurting accuracy (Table <ref type="table" target="#tab_1">1</ref>). The memory saving and computation reduction are related to the network architecture. Some models like MnasNet have a larger overhead since it uses large kernel sizes in the initial stage, which increases receptive fields. It shows the necessity to co-design the network architecture with the inference engine.</p><p>On-device measurement. We further profile existing networks running on STM32F746 MCU. We measure the SRAM usage of the network with per-layer and per-patch (2 × 2 or 3 × 3 patches) inference. Due to the memory limit of MCU (320kB SRAM, 1MB Flash), we have to scale down the width multiplier w and input resolution r. As in Figure <ref type="figure" target="#fig_5">6</ref>, per-patch based inference reduces the measured peak SRAM by 4-6×. Some models may have a large latency overhead, since the initial  stage has worse hardware utilization. But with a proper architecture design (MbV2-RD), we can reduce the latency overhead to 4%, which is negligible compared to the memory reduction benefit.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">MCUNetV2 for Tiny Image Classification</head><p>With joint optimization of neural architecture and inference scheduling, MCUNetV2 significantly pushes the state-of-the-art results for MCU-based tiny image classification.</p><p>Pushing the ImageNet record on MCUs. We compared MCUNetV2 with existing state-of-the-art solutions on ImageNet classification under two hardware settings: 256kB SRAM/1MB Flash and 512kB SRAM/2MB Flash. The former represents a widely used Cortex-M4 microcontroller; the latter corresponds to a higher-end Cortex-M7. The goal is to achieve the highest ImageNet accuracy on resource-constrained MCUs (Table <ref type="table" target="#tab_4">2</ref>). MCUNetV2 significantly improves the ImageNet accuracy of tiny deep learning on microcontrollers. Under 256kB SRAM/1MB Flash, MCUNetV2 outperforms the state-of-the-art method [27] by 4.6% at 18% lower peak SRAM. Under 512kB SRAM/2MB Flash, MCUNetV2 achieves a new record ImageNet accuracy of 71.8% on commercial microcontrollers, which is 3.3% compared to the best solution under the same quantization policy. Lower-bit (int4) or mixed-precision quantization can further improve the accuracy (marked in gray in the table). We believe that we can further improve the accuracy of MCUNetV2 with a better quantization policy, which we leave to future work.</p><p>Visual Wake Words under 32kB SRAM. Visual wake word (VWW) reflects the low-energy application of tinyML. MCUNetV2 allows us to run a VWW model with a modest memory requirement. As in Figure <ref type="figure" target="#fig_6">7</ref>, MCUNetV2 outperforms state-of-the-art method <ref type="bibr" target="#b26">[27]</ref> for both accuracy vs. peak memory and accuracy vs. latency trade-off. We perform neural architecture search under both per-layer and per-patch inference settings using the same search space and super network for ablation. Compared to per-layer inference, MCUNetV2 can achieve better accuracy using 4.0× smaller memory. Actually, it can achieve &gt;90% accuracy under 32kB SRAM requirement, allowing us to deploy the model on low-end MCUs like STM32F410 costing only $1.6. For the latency-constrained setting, we jointly optimized the model architecture and inference scheduling, where a smaller patch number is used when possible. Per-patch inference also expands the search space, giving us more freedom to find models with better accuracy vs. latency trade-off.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">MCUNetV2 for Tiny Object Detection</head><p>Object detection is sensitive to a smaller input resolution (Figure <ref type="figure" target="#fig_1">2</ref>). Current state-of-the-art <ref type="bibr" target="#b26">[27]</ref> cannot achieve a decent detection performance on MCUs due to the resolution bottleneck. MCUNetV2 breaks the memory bottleneck for detectors and improves the mAP by double digits.</p><p>MCU-based detection on Pascal VOC. We show the object detection results on Pascal VOC trained with YOLOv3 <ref type="bibr" target="#b37">[38]</ref> on Table <ref type="table" target="#tab_5">3</ref>. We provide MCUNetV2 results for M4 MCU with 256kB SRAM and H7 MCU with 512kB SRAM. On H7 MCU, MCUNetV2-H7 improves the mAP by 16.7% compared to the state-of-the-art method MCUNet <ref type="bibr" target="#b26">[27]</ref>. It can also scale down to fit a cheaper commodity Cortex-M4 MCU with only 256kB SRAM, while still improving the mAP by 13.2% at 1.9× smaller peak SRAM. Note that MCUNetV2-M4 shares a similar computation with MCUNet (172M vs. 168M) but a much better mAP. This is because the expanded search space from patch-based inference allows us to choose a better configuration of larger input resolution and smaller models.</p><p>Memory-efficient face detection. We benchmarked MCUNetV2 for memory-efficient face detection on WIDER FACE <ref type="bibr" target="#b47">[48]</ref> dataset in Table <ref type="table" target="#tab_6">4</ref>. We report the analytic memory usage of the detector backbone in fp32 following <ref type="bibr" target="#b39">[40]</ref>. We train our methods with S3FD face detector <ref type="bibr" target="#b49">[50]</ref> following <ref type="bibr" target="#b39">[40]</ref> for a fair comparison. We also report mAP on samples with ≤ 3 faces, which is a more realistic setting for tiny devices. MCUNetV2 outperforms existing solutions under different scales. MCUNetV2-L achieves comparable performance at 3.4× smaller peak memory compared to RNNPool-Face-C <ref type="bibr" target="#b26">[27]</ref> and 9.9× smaller peak memory compared to LFFD <ref type="bibr" target="#b19">[20]</ref>. The computation is also 1.6× and 8.4× • The expansion ratio of the middle stage (early in per-layer stage) is small to further reduce the peak memory; while the expansion ratio for the later stage is large to increase performance. • Large expansion ratios and large kernel sizes usually do not appear together to reduce the computational cost and latency: if the expansion ratio is large (like 6), the kernel size is small (3 × 3 or 5 × 5); if the kernel size is large (7 × 7), the expansion ratio is small (3 or 4). • The input resolution is larger on resolution-sensitive datasets like VWW compared to MCUNet <ref type="bibr" target="#b26">[27]</ref>, since per-layer inference cannot fit a large input resolution.</p><p>Notice that all the patterns are automatically discovered by the joint neural architecture and inference scheduling search algorithm, without human expertise.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Related Work</head><p>Tiny deep learning on microcontrollers. Deploying deep learning models on memory-constrained microcontrollers requires an efficient inference framework and model architecture. Existing deployment frameworks include TensorFlow Lite Micro <ref type="bibr" target="#b0">[1]</ref>, CMSIS-NN <ref type="bibr" target="#b22">[23]</ref>, TinyEngine <ref type="bibr" target="#b26">[27]</ref>, Mi-croTVM <ref type="bibr" target="#b7">[8]</ref>, CMix-NN <ref type="bibr" target="#b6">[7]</ref>, etc. However, all of the above frameworks support only per-layer inference, which limits the model capacity executable under a small memory and makes higher resolution input impossible.</p><p>Efficient neural network. For efficient deep learning, people apply pruning <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b31">32,</ref><ref type="bibr" target="#b30">31]</ref> and quantization <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b53">54,</ref><ref type="bibr" target="#b52">53,</ref><ref type="bibr" target="#b36">37,</ref><ref type="bibr" target="#b45">46,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b38">39,</ref><ref type="bibr" target="#b23">24]</ref> to compress an off-the-shelf deep network, or directly design an efficient network architecture <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b40">41,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b33">34,</ref><ref type="bibr" target="#b50">51]</ref>. Neural architecture search (NAS) <ref type="bibr" target="#b54">[55,</ref><ref type="bibr" target="#b55">56,</ref><ref type="bibr" target="#b28">29,</ref><ref type="bibr" target="#b5">6,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b46">47]</ref> can design efficient models in an automated way. It has been used to improve tinyML on MCUs <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b3">4,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b32">33]</ref>. However, most of the NAS methods use the conventional hierarchy CNN backbone design, which leads to an imbalanced memory distribution under per-layer inference (Section 2), restricting the input resolution. Therefore, they are not able to achieve good performance on tasks like object detection without our patch-based inference scheduling.</p><p>Computation scheduling/re-ordering. The memory requirement to run a deep neural network is related to the implementation. It is possible to reduce the required memory by optimizing the convolution loop-nest <ref type="bibr" target="#b42">[43]</ref>, reordering the operator executions <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b1">2]</ref>, or temporarily swapping data off SRAM <ref type="bibr" target="#b34">[35]</ref>. Computing partial spatial regions across multiple layers can reduce the peak memory <ref type="bibr" target="#b14">[15,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b39">40]</ref>. However, system-only optimization leads to either large repeated computation or a highly complicated dataflow. Our work explores joint system and model optimization to reduce the peak memory at a negligible computation overhead while still allowing conventional convolution optimization techniques like im2col, tiling, etc.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusion</head><p>In this paper, we propose patch-based inference to reduce the memory usage for tiny deep learning by up to 8×, which greatly expands the design space and unlocks powerful vision applications on IoT devices. We jointly optimize the neural architecture and inference scheduling to develop MCUNetV2. MCUNetV2 significantly improves the object detection performance on microcontrollers by 16.9% and achieves a record ImageNet accuracy (71.8%). For the VWW dataset, MCUNetV2 can achieve &gt;90% accuracy under only 32kB SRAM, 4× smaller than existing work. Our study largely addresses the memory bottleneck in tinyML and paves the way for vision applications beyond classification.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. Detection is more sensitive to smaller resolutions.</figDesc><graphic url="image-4.png" coords="2,411.08,252.84,90.41,57.87" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3</head><label>3</label><figDesc>Figure3. Per-patch inference can significantly reduce the peak memory required to execute a sequence of convolutional layers. We study two convolutional layers (stride 1 and 2). Under per-layer computation (a), the first convolution has a large input/output activation size, dominating the peak memory requirement. With per-patch computation (b), we allocate the buffer to host the final output activation, and compute the results patch-by-patch. We only need to store the activation from one patch but not the entire feature map, reducing the peak memory (the first input is the image, which can be partially decoded from a compressed format like JPEG).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>3</head><label></label><figDesc>MCUNetV2: Memory-Efficient Patch-based Inference 3.1 Breaking the Memory Bottleneck with Patch-based Inference</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. The redistributed MobileNetV2 (MbV2-RD) has reduced receptive field for the per-patch inference stage and increased receptive field for the per-layer stage. The two networks have the same level of performance, but MbV2-RD has a smaller overhead under patch-based inference. The mobile inverted block is denoted as MB{expansion ratio} {kernel size}. The dashed border means stride=2.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 .</head><label>6</label><figDesc>Figure 6. On-device measurement: patch-based inference reduce the measured peak SRAM usage by 4-6× when running on MCUs. The latency overhead could be large for some networks, but we can reduce it to 4% with proper architecture design (MbV2-RD). We scale down width w and resolution to fit MCU memory.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 7 .</head><label>7</label><figDesc>Figure 7. Left: MCUNetV2 has better visual wake word (VWW) accuracy vs. peak SRAM trade-off. Compared to MCUNet [27], MCUNetV2 achieves better accuracy at 4.0× smaller peak memory. It achieves &gt;90% accuracy under &lt;32kB memory, facilitating deployment on extremely small hardware. Right: patch-based method expands the search space that can fit the MCU, allowing better accuracy vs. latency trade-off.</figDesc><graphic url="image-11.png" coords="7,331.52,305.34,89.12,67.96" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 .</head><label>1</label><figDesc>Per-patch inference reduces the peak memory by 8× for MobileNetV2<ref type="bibr" target="#b40">[41]</ref> (1372kB to 172kB), but it increases the overall computation by 10% due to patch overlapping. We futher propose receptive field redistribution (MbV2-RD) which reduces the overall overhead to only 3% without hurting performance.</figDesc><table><row><cell>Model</cell><cell>Patch Size</cell><cell cols="4">Comp. overhead patch-stage overall patch-stage overall per-layer MACs(4×4 patches) Peak SRAM per-patch</cell><cell>ImgNet Top-1</cell><cell>VOC mAP</cell></row><row><cell cols="2">MbV2 [41] 75 2</cell><cell>+42%</cell><cell>+10%</cell><cell>130M</cell><cell>330M 1372kB 172kB (8×↓) 72.2% 75.4%</cell></row><row><cell cols="2">MbV2-RD 63 2</cell><cell>+18%</cell><cell>+3%</cell><cell>73M</cell><cell>301M 1372kB 172kB (8×↓) 72.1% 75.7%</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head></head><label></label><figDesc>for NAS, so that we can have a fair comparison. The space includes different kernel sizes for each inverted residual block k [ ] (3/5/7), different expansion ratios e [ ] (3/4/6), and a different number of blocks for each stage d [ ] (2/3/4). More recent search space designs like MobileNetV3</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head></head><label></label><figDesc>All networks take an input resolution of 224 2 and 4 × 4 patches.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">Per-layer</cell><cell>Per-patch</cell></row><row><cell>1400</cell><cell>Per-layer 1372</cell><cell>1372</cell><cell cols="3">Per-patch (4×4)</cell><cell></cell><cell>1372</cell><cell>480</cell><cell></cell><cell></cell><cell>+8%</cell><cell>+15%</cell></row><row><cell>1120</cell><cell></cell><cell></cell><cell cols="2">1176</cell><cell></cell><cell></cell><cell></cell><cell>360</cell><cell cols="3">+10% redistribute</cell><cell>413</cell><cell>445</cell><cell>+17%</cell><cell>376</cell><cell>431</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>367</cell></row><row><cell cols="12">0 280 560 840 64 Figure 5. Analytical profiling: patch-based inference significantly reduces the inference peak memory by 330 314 +3% 227 214 301 172 172 784 MbV2 OFA-CPU MnasNet 8.0x smaller MbV2-RD FBNet-A 8.0x smaller 3.9x smaller 3.7x smaller 6.1x smaller 0 301 293 301 240 56 76 85 51 120 MbV2 OFA-CPU MnasNet MbV2-RD FBNet-A (a) Peak Memory (kB) (b) Computation (M MACs) 3.7-8.0× at a small computation overhead of 8-17%. The memory reduction and computation overhead are related to the network design. For MobileNetV2, we can reduce the computation overhead from 10% to 3% by (a) Peak SRAM (kB) (c) Latency (ms) (b) Computation (M MACs) redistributing the receptive field. OOM FBNet-A MCUNet MbV2-Re MbV2 FBNet-A MbV2-Re MbV2 w0.5, r144 w0.5, r144 w0.45, r144 w0.5, r144 w0.5, r144 w0.45, r144 w1.0, r144 MCUNet w1.0, r144 FBNet-A MCUNet MbV2-Re MbV2 w0.5, r144 w0.5, r144 w0.45, r144 w1.0, r144</cell></row><row><cell></cell><cell>OOM</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>0 64 128 192 256 320</cell><cell cols="4">MbV2-RD w0.5, r144 51 94 300 5.9x smaller Per-layer (w/ TinyEngine) MbV2 w0.5, r144 64 113 315 4.9x smaller</cell><cell>FBNet-A w0.45, r144 76 132 310 4.1x smaller Per-patch (2×2)</cell><cell cols="3">MCUNet w1.0, r144 56 85 234 4.2x smaller Per-patch (3×3) 0 200 400 600 800</cell><cell>240 w0.5, r144 MbV2 360 480 617 741 711 +20% +15%</cell><cell>301</cell><cell>301 redistribute 293 MbV2-RD 329 w0.5, r144 564 562 540 +4% +4%</cell><cell>FBNet-A w0.45, r144 445 413 613 789 732 +19%</cell><cell>367 MCUNet 314 w1.0, r144 432 522 494 +14% +21%</cell><cell>376</cell><cell>431</cell></row><row><cell></cell><cell cols="5">(a) Measured Peak SRAM (kB)</cell><cell></cell><cell></cell><cell></cell><cell>120</cell><cell cols="2">(b) Measured Latency (ms)</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0</cell><cell></cell></row><row><cell></cell><cell>315</cell><cell></cell><cell>300</cell><cell></cell><cell>310</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">234</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="2">64 113</cell><cell>94</cell><cell>51</cell><cell>76 132</cell><cell>85</cell><cell>56</cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2 .</head><label>2</label><figDesc>MCUNetV2 significantly improves the ImageNet accuracy on microcontrollers, outperforming the state-of-the-arts by 4.6% under 256kB SRAM and 3.3% under 512kB. Lower or mixed precisions (marked gray) are orthogonal techniques, which we leave for future work. Out-of-memory (OOM) results are struck out.</figDesc><table><row><cell cols="2">Model / Library</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="4">Quant. MACs SRAM</cell><cell>Flash</cell><cell>Top-1</cell><cell>Top-5</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">STM32F412 (256kB SRAM, 1MB Flash)</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="6">MbV2 0.35× (r=144) [41] / TinyEngine [27]</cell><cell>int8</cell><cell>24M</cell><cell cols="2">308kB</cell><cell>862kB</cell><cell cols="2">49.0% 73.8%</cell></row><row><cell cols="6">Proxyless 0.3× (r=176) [6] / TinyEngine [27]</cell><cell>int8</cell><cell>38M</cell><cell cols="2">292kB</cell><cell>892kB</cell><cell cols="2">56.2% 79.7%</cell></row><row><cell cols="6">MbV1 0.5× (r=192) [22] / Rusci et al. [39]</cell><cell cols="5">mixed 110M &lt;256kB &lt;1MB</cell><cell>60.2%</cell></row><row><cell cols="5">MCUNet (TinyNAS / TinyEngine) [27]</cell><cell></cell><cell>int8</cell><cell>68M</cell><cell cols="2">238kB</cell><cell cols="2">1007kB 60.3%</cell><cell>-</cell></row><row><cell cols="5">MCUNet (TinyNAS / TinyEngine) [27]</cell><cell></cell><cell>int4</cell><cell>134M</cell><cell cols="2">233kB</cell><cell cols="2">1008kB 62.0%</cell><cell>-</cell></row><row><cell cols="3">MCUNetV2-M4</cell><cell></cell><cell></cell><cell></cell><cell>int8</cell><cell>119M</cell><cell cols="2">196kB</cell><cell cols="3">1010kB 64.9% 86.2%</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">STM32H743 (512kB SRAM, 2MB Flash)</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="6">MbV1 0.75× (r=224) [22] / Rusci et al. [39]</cell><cell cols="5">mixed 317M &lt;512kB &lt;2MB</cell><cell>68.0%</cell></row><row><cell cols="5">MCUNet (TinyNAS / TinyEngine) [27]</cell><cell></cell><cell>int8</cell><cell>126M</cell><cell cols="2">452kB</cell><cell cols="2">2014kB 68.5%</cell><cell>-</cell></row><row><cell cols="5">MCUNet (TinyNAS / TinyEngine) [27]</cell><cell></cell><cell>int4</cell><cell>474M</cell><cell cols="2">498kB</cell><cell cols="2">2000kB 70.7%</cell><cell>-</cell></row><row><cell cols="3">MCUNetV2-H7</cell><cell></cell><cell></cell><cell></cell><cell>int8</cell><cell>256M</cell><cell cols="2">465kB</cell><cell cols="3">2032kB 71.8% 90.7%</cell></row><row><cell>VWW Accuracy (%)</cell><cell>84 86 88 90 92 94</cell><cell></cell><cell>MCUNetV2</cell><cell cols="2">MCUNet</cell><cell>84 86 88 90 92 94</cell><cell cols="2">MbV2+TF-Lite</cell><cell></cell><cell cols="2">Proxyless+TF-Lite</cell></row><row><cell></cell><cell>20</cell><cell>88</cell><cell>156</cell><cell>224</cell><cell>292</cell><cell>360</cell><cell>150</cell><cell>320</cell><cell>490</cell><cell>660</cell><cell>830</cell><cell>1000</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 3 .</head><label>3</label><figDesc>MCUNetV2 significantly improves Pascal VOC<ref type="bibr" target="#b12">[13]</ref> object detection on MCU by allowing a higher input resolution. Under STM32H743 MCU constraints, MCUNetV2-H7 improves the mAP by 16.9% compared to<ref type="bibr" target="#b26">[27]</ref>, achieving a record performance on MCU. It can also scale down to cheaper MCU STM32F412 with only 256kB SRAM while still improving mAP by 13.2% at 1.9× smaller peak SRAM and a similar computation.</figDesc><table><row><cell cols="3">MCU Model Constraint Model</cell><cell cols="4">#Param MACs peak SRAM VOC mAP Gain</cell></row><row><cell>H743 (∼$7)</cell><cell>SRAM &lt;512kB</cell><cell cols="2">MbV2+CMSIS [27] 0.87M 34M MCUNet [27] 1.20M 168M</cell><cell>519kB 466kB</cell><cell>31.6% 51.4%</cell><cell>-0%</cell></row><row><cell></cell><cell></cell><cell>MCUNetV2-H7</cell><cell>0.67M 343M</cell><cell>438kB</cell><cell>68.3%</cell><cell>+16.9%</cell></row><row><cell cols="2">F412 (∼$4) &lt;256kB</cell><cell>MCUNetV2-M4</cell><cell>0.47M 172M</cell><cell>247kB</cell><cell>64.6%</cell><cell>+13.2%</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 4 .</head><label>4</label><figDesc>MCUNetV2 outperforms existing methods for memory-efficient face detection on WIDER FACE<ref type="bibr" target="#b47">[48]</ref> dataset. Compared to RNNPool-Face-C<ref type="bibr" target="#b39">[40]</ref>, MCUNetV2-L can achieve similar mAP at 3.4× smaller peak SRAM and 1.6× smaller computation. The model statistics are profiled on 640 × 480 RGB input images following<ref type="bibr" target="#b39">[40]</ref>.</figDesc><table><row><cell>Method</cell><cell cols="2">MACs ↓ Peak Memory ↓</cell><cell></cell><cell>mAP ↑</cell><cell cols="3">mAP (≤3 faces) ↑</cell></row><row><cell></cell><cell></cell><cell>(fp32)</cell><cell cols="5">Easy Medium Hard Easy Medium Hard</cell></row><row><cell>EXTD [49]</cell><cell>8.49G</cell><cell cols="2">18.8MB (9.9×) 0.90</cell><cell>0.88</cell><cell>0.82 0.93</cell><cell>0.93</cell><cell>0.91</cell></row><row><cell>LFFD [20]</cell><cell>9.25G</cell><cell cols="2">18.8MB (9.9×) 0.91</cell><cell>0.88</cell><cell>0.77 0.83</cell><cell>0.83</cell><cell>0.82</cell></row><row><cell>RNNPool-Face-C [40]</cell><cell>1.80G</cell><cell cols="2">6.44MB (3.4×) 0.92</cell><cell>0.89</cell><cell>0.70 0.95</cell><cell>0.94</cell><cell>0.92</cell></row><row><cell>MCUNetV2-L</cell><cell>1.10G</cell><cell cols="2">1.89MB (1.0×) 0.92</cell><cell>0.90</cell><cell>0.70 0.94</cell><cell>0.93</cell><cell>0.92</cell></row><row><cell>EagleEye [52]</cell><cell>0.08G</cell><cell cols="2">1.17MB (1.8×) 0.74</cell><cell>0.70</cell><cell>0.44 0.79</cell><cell>0.78</cell><cell>0.75</cell></row><row><cell>RNNPool-Face-A [40]</cell><cell>0.10G</cell><cell cols="2">1.17MB (1.8×) 0.77</cell><cell>0.75</cell><cell>0.53 0.81</cell><cell>0.79</cell><cell>0.77</cell></row><row><cell>MCUNetV2-S</cell><cell>0.11G</cell><cell>672kB (1.0×)</cell><cell>0.85</cell><cell>0.81</cell><cell>0.55 0.90</cell><cell>0.89</cell><cell>0.87</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head></head><label></label><figDesc>An MCUNetV2 architecture on VWW. The color represents the kernel size; the height of each block represents the expansion ratio. The name is MB{expansion ratio} {kernel size}x{kernel size}. Blocks with dashed borders have stride=2. {}x{} in the bottom denotes the feature map resolution.</figDesc><table><row><cell></cell><cell cols="2">per-patch</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">per-layer</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>conv3x3</cell><cell>conv1x1</cell><cell>MB3 3x3</cell><cell>MB4 3x3</cell><cell>MB4 5x5</cell><cell>MB4 3x3</cell><cell>MB4 7x7</cell><cell>MB4 7x7</cell><cell>MB4 7x7</cell><cell>MB6 5x5</cell><cell>MB6 3x3</cell><cell>MB6 5x5</cell><cell>MB3 3x3</cell><cell>MB3 7x7</cell><cell>MB6 5x5</cell><cell>cls head</cell></row><row><cell>160x160</cell><cell cols="2">80x80</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="3">40x40 20x20</cell><cell></cell><cell cols="2">10x10</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>5x5</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Figure 9.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>We thank MIT-IBM Watson AI Lab, Samsung, Woodside Energy, and NSF CAREER Award #1943349 for supporting this research.</p></div>
+			</div>
+
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>smaller. MCUNetV2-S consistently outperforms RNNPool-Face-A <ref type="bibr" target="#b39">[40]</ref> and EagleEye <ref type="bibr" target="#b51">[52]</ref> at 1.8× smaller peak memory.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Analysis</head><p>Hyper-parameters for patch-based inference. We study the hyper-parameters used for patchbased inference: the number of blocks to be executed under patch-based inference n; the number of patches to split the input image p (splitting the image into p × p overlapping patches). We analyze MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> in Figure <ref type="figure">8</ref>(a), with a larger n, the patch size increases due to the growing receptive field. The peak memory first goes down since the output feature map is smaller then goes up due to larger receptive field overhead. n = 5 is optimal. For a larger p (given n=5), each patch is smaller, which helps to reduce the peak memory. However, it also leads to more computation overhead due to more spatial overlapping (Figure <ref type="figure">8</ref>(b)). Receptive field redistribution can reduce the overhead significantly (MbV2-RD). The optimal design is n * = 5, p * = 4 to reach the minimum peak memory with the smallest overhead. The choice of p and n varies for different networks. Therefore, we use an automated method to jointly optimize with neural architecture (Section 3.3).</p><p>Comparison to other solutions. We also compare MCUNetV2 with other methods that reduce inference peak memory. The comparison on MobileNetV2 <ref type="bibr" target="#b40">[41]</ref> is shown in Table <ref type="table">5</ref>. A straightforward way is to split the input image into non-overlapping patches ("Non-overlap") for the first several blocks as done in <ref type="bibr" target="#b11">[12]</ref>. Such a practice does not incur extra computation, but it breaks the feature propagation between patches and the translational invariance of CNNs. It achieves lower image classification accuracy and significantly degraded object detection mAP (on Pascal VOC) due to the lack of cross-patch communication (a similar phenomenon is observed in <ref type="bibr" target="#b29">[30]</ref>). For MobileNetV2 with RNNPool <ref type="bibr" target="#b39">[40]</ref>, it can reduce the peak memory but leads to inferior ImageNet accuracy and object detection mAP. Its training time is also 3.2× longer † due to the complicated data path and the RNN module. On the other hand, MCUNetV2 acts exactly the same as a normal network during training (per-layer forward/backward), while also matching the image classification and objection detection performance. MCUNetV2 can further improve the results with joint neural architecture and inference scheduling search (Section 4.2). Dissecting MCUNetV2 architecture. We visualize one of the MCUNetV2 model architecture on the VWW <ref type="bibr" target="#b9">[10]</ref> dataset in Figure <ref type="figure">9</ref>. We can find the following patterns:</p><p>• The kernel size in the per-patch inference stage is small (1 × 1 and 3 × 3) to reduce the receptive field and spatial overlapping, thus reducing computation overhead. † measured with official PyTorch code (MIT License) using a batch size of 64 on NVIDIA Titan RTX.</p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Tensorflow: A system for large-scale machine learning</title>
+		<author>
+			<persName><forename type="first">Martín</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianmin</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhifeng</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andy</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthieu</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Isard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">OSDI</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Ordering chaos: Memory-aware scheduling of irregularly wired neural networks for edge devices</title>
+		<author>
+			<persName><forename type="first">Jinwon</forename><surname>Byung Hoon Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jamie</forename><forename type="middle">Menjay</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hsin-Pai</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jilei</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hadi</forename><surname>Hou</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Esmaeilzadeh</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2003.02369</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Fused-layer cnn accelerators</title>
+		<author>
+			<persName><forename type="first">Manoj</forename><surname>Alwani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Ferdman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Milder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 49th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<author>
+			<persName><forename type="first">Colby</forename><surname>Banbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chuteng</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Igor</forename><surname>Fedorov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ramon</forename><surname>Matas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Urmish</forename><surname>Thakker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dibakar</forename><surname>Gope</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><forename type="middle">Janapa</forename><surname>Reddi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Mattina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Whatmough</surname></persName>
+		</author>
+		<title level="m">Micronets: Neural network architectures for deploying tinyml applications on commodity microcontrollers. Proceedings of Machine Learning and Systems</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="volume">3</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">Once for All: Train One Network and Specialize it for Efficient Deployment</title>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chuang</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianzhe</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhekai</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">ProxylessNAS: Direct Neural Architecture Search on Target Task and Hardware</title>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ligeng</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Cmix-nn: Mixed low-precision cnn library for memory-constrained edge devices</title>
+		<author>
+			<persName><forename type="first">Alessandro</forename><surname>Capotondi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manuele</forename><surname>Rusci</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Fariselli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luca</forename><surname>Benini</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Circuits and Systems II: Express Briefs</title>
+		<imprint>
+			<biblScope unit="volume">67</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="871" to="875" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">{TVM}: An automated end-to-end optimizing compiler for deep learning</title>
+		<author>
+			<persName><forename type="first">Tianqi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thierry</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ziheng</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lianmin</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eddie</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haichen</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Meghan</forename><surname>Cowan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Leyuan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuwei</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luis</forename><surname>Ceze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">OSDI</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Pact: Parameterized clipping activation for quantized neural networks</title>
+		<author>
+			<persName><forename type="first">Jungwook</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhuo</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Swagath</forename><surname>Venkataramani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I-Jen</forename><surname>Pierce</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijayalakshmi</forename><surname>Chuang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kailash</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gopalakrishnan</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.06085</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<author>
+			<persName><forename type="first">Aakanksha</forename><surname>Chowdhery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pete</forename><surname>Warden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rocky</forename><surname>Rhodes</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1906.05721</idno>
+		<title level="m">Visual wake words dataset</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">ImageNet: A Large-Scale Hierarchical Image Database</title>
+		<author>
+			<persName><forename type="first">Jia</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li-Jia</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li</forename><surname>Fei-Fei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">An image is worth 16x16 words: Transformers for image recognition at scale</title>
+		<author>
+			<persName><forename type="first">Alexey</forename><surname>Dosovitskiy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lucas</forename><surname>Beyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexander</forename><surname>Kolesnikov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dirk</forename><surname>Weissenborn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaohua</forename><surname>Zhai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Unterthiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mostafa</forename><surname>Dehghani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Minderer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Georg</forename><surname>Heigold</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sylvain</forename><surname>Gelly</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2010.11929</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">The pascal visual object classes (voc) challenge</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Everingham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luc</forename><surname>Van Gool</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">I</forename><surname>Christopher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Williams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Winn</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zisserman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">International journal of computer vision</title>
+		<imprint>
+			<biblScope unit="volume">88</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="303" to="338" />
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Sparse: Sparse architecture search for cnns on resource-constrained microcontrollers</title>
+		<author>
+			<persName><forename type="first">Igor</forename><surname>Fedorov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ryan</forename><forename type="middle">P</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Mattina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Whatmough</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Breaking high-resolution cnn bandwidth barriers with enhanced depth-first execution</title>
+		<author>
+			<persName><forename type="first">Koen</forename><surname>Goetschalckx</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marian</forename><surname>Verhelst</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Journal on Emerging and Selected Topics in Circuits and Systems</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="323" to="331" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Deep Compression: Compressing Deep Neural Networks with Pruning, Trained Quantization and Huffman Coding</title>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huizi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<editor>ICLR</editor>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Deep Residual Learning for Image Recognition</title>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaoqing</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">AMC: AutoML for Model Compression and Acceleration on Mobile Devices</title>
+		<author>
+			<persName><forename type="first">Yihui</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhijian</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hanrui</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li-Jia</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ECCV</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Channel pruning for accelerating very deep neural networks</title>
+		<author>
+			<persName><forename type="first">Yihui</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCV</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Lffd: A light and fast face detector for edge devices</title>
+		<author>
+			<persName><forename type="first">Yonghao</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dezhong</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lifang</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Meng</forename><surname>Jian</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1904.10633</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Shiming Xiang, and Chunhong Pan</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Searching for MobileNetV3</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Grace</forename><surname>Chu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Liang-Chieh</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Weijun</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yukun</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruoming</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hartwig</forename><surname>Adam</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCV</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">G</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Menglong</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dimitry</forename><surname>Kalenichenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Weijun</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tobias</forename><surname>Weyand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Andreetto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hartwig</forename><surname>Adam</surname></persName>
+		</author>
+		<title level="m">MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<author>
+			<persName><forename type="first">Liangzhen</forename><surname>Lai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naveen</forename><surname>Suda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vikas</forename><surname>Chandra</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1801.06601</idno>
+		<title level="m">Cmsis-nn: Efficient neural network kernels for arm cortex-m cpus</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">Tent: Efficient quantization of neural networks on the tiny edge with tapered fixed point</title>
+		<author>
+			<persName><forename type="first">Vedant</forename><surname>Hamed F Langroudi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tej</forename><surname>Karia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dhireesha</forename><surname>Pandit</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Kudithipudi</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2104.02233</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<author>
+			<persName><forename type="first">Edgar</forename><surname>Liberis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Łukasz</forename><surname>Dudziak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nicholas</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2010.14246</idno>
+		<title level="m">µnas: Constrained neural architecture search for microcontrollers</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">Edgar</forename><surname>Liberis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nicholas</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1910.05110</idno>
+		<title level="m">Neural networks on microcontrollers: saving memory at inference via operator reordering</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<title level="m" type="main">Mcunet: Tiny deep learning on iot devices</title>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei-Ming</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yujun</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Cohn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chuang</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Runtime neural pruning</title>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yongming</forename><surname>Rao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiwen</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jie</forename><surname>Zhou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">DARTS: Differentiable Architecture Search</title>
+		<author>
+			<persName><forename type="first">Haoxiao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Yang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">Swin transformer: Hierarchical vision transformer using shifted windows</title>
+		<author>
+			<persName><forename type="first">Ze</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yutong</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yue</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yixuan</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zheng</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baining</forename><surname>Guo</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2103.14030</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">MetaPruning: Meta Learning for Automatic Neural Network Channel Pruning</title>
+		<author>
+			<persName><forename type="first">Zechun</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haoyuan</forename><surname>Mu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zichao</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kwang-Ting</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCV</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Learning efficient convolutional networks through network slimming</title>
+		<author>
+			<persName><forename type="first">Zhuang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianguo</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiqiang</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gao</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shoumeng</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Changshui</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCV</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Resource-constrained neural architecture search on edge devices</title>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Lyu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hang</forename><surname>Yuan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Longfei</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunye</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Network Science and Engineering</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">ShuffleNet V2: Practical Guidelines for Efficient CNN Architecture Design</title>
+		<author>
+			<persName><forename type="first">Ningning</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hai-Tao</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ECCV</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<author>
+			<persName><forename type="first">Hongyu</forename><surname>Miao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Xiaozhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename></persName>
+		</author>
+		<idno type="arXiv">arXiv:2101.08744</idno>
+		<title level="m">Enabling large neural networks on tiny microcontrollers with swapping</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<author>
+			<persName><forename type="first">Prajit</forename><surname>Ramachandran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1710.05941</idno>
+		<title level="m">Searching for activation functions</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Xnor-net: Imagenet classification using binary convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Rastegari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vicente</forename><surname>Ordonez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Redmon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Farhadi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ECCV</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Redmon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Farhadi</surname></persName>
+		</author>
+		<title level="m">YOLOv3: An Incremental Improvement. arXiv</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Memory-driven mixed low precision quantization for enabling deep network inference on microcontrollers</title>
+		<author>
+			<persName><forename type="first">Manuele</forename><surname>Rusci</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alessandro</forename><surname>Capotondi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luca</forename><surname>Benini</surname></persName>
+		</author>
+		<editor>MLSys</editor>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Rnnpool: Efficient non-linear pooling for ram constrained inference</title>
+		<author>
+			<persName><forename type="first">Oindrila</forename><surname>Saha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Kusupati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Harsha</forename><surname>Vardhan Simhadri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manik</forename><surname>Varma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prateek</forename><surname>Jain</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2002.11921</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">MobileNetV2: Inverted Residuals and Linear Bottlenecks</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Menglong</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrey</forename><surname>Zhmoginov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Liang-Chieh</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<title level="m" type="main">Very deep convolutional networks for large-scale image recognition</title>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Zisserman</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1409.1556</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<title level="m" type="main">Optimally scheduling cnn convolutions for efficient memory access</title>
+		<author>
+			<persName><forename type="first">Arthur</forename><surname>Stoutchinin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francesco</forename><surname>Conti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luca</forename><surname>Benini</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1902.01492</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">MnasNet: Platform-Aware Neural Architecture Search for Mobile</title>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruoming</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Efficientnet: Rethinking model scaling for convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Machine Learning</title>
+				<imprint>
+			<publisher>PMLR</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="6105" to="6114" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">HAQ: Hardware-Aware Automated Quantization with Mixed Precision</title>
+		<author>
+			<persName><forename type="first">Kuan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhijian</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yujun</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">FBNet: Hardware-Aware Efficient ConvNet Design via Differentiable Neural Architecture Search</title>
+		<author>
+			<persName><forename type="first">Bichen</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoliang</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peizhao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanghan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fei</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuandong</forename><surname>Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Vajda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yangqing</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kurt</forename><surname>Keutzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Wider face: A face detection benchmark</title>
+		<author>
+			<persName><forename type="first">Shuo</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ping</forename><surname>Luo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><forename type="middle">Change</forename><surname>Loy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoou</forename><surname>Tang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Conference on Computer Vision and Pattern Recognition (CVPR)</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<monogr>
+		<title level="m" type="main">Extd: Extremely tiny face detector via iterative filter reuse</title>
+		<author>
+			<persName><forename type="first">Youngjoon</forename><surname>Yoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dongyoon</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sangdoo</forename><surname>Yun</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1906.06579</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">S3fd: Single shot scale-invariant face detector</title>
+		<author>
+			<persName><forename type="first">Shifeng</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhen</forename><surname>Lei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hailin</forename><surname>Shi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaobo</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stan</forename><forename type="middle">Z</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE international conference on computer vision</title>
+				<meeting>the IEEE international conference on computer vision</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="192" to="201" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">ShuffleNet: An Extremely Efficient Convolutional Neural Network for Mobile Devices</title>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xinyu</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mengxiao</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Real-time multi-scale face detector on embedded devices</title>
+		<author>
+			<persName><forename type="first">Xu</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoqing</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chaoyang</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinqiao</forename><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Sensors</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">9</biblScope>
+			<biblScope unit="page">2158</biblScope>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<monogr>
+		<author>
+			<persName><forename type="first">Shuchang</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuxin</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zekun</forename><surname>Ni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xinyu</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">He</forename><surname>Wen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuheng</forename><surname>Zou</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1606.06160</idno>
+		<title level="m">Dorefa-net: Training low bitwidth convolutional neural networks with low bitwidth gradients</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<author>
+			<persName><forename type="first">Chenzhuo</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huizi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1612.01064</idno>
+		<title level="m">Trained ternary quantization</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Neural Architecture Search with Reinforcement Learning</title>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">Learning Transferable Architectures for Scalable Image Recognition</title>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,815 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Deep learning with Elastic Averaging SGD</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Sixin</forename><surname>Zhang</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Anna</forename><surname>Choromanska</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Yann</forename><surname>Lecun</surname></persName>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<orgName type="institution">Courant Institute</orgName>
+								<address>
+									<region>NYU</region>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<orgName type="department">Center for Data Science</orgName>
+								<orgName type="institution">NYU &amp; Facebook AI Research</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Deep learning with Elastic Averaging SGD</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:41+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>We study the problem of stochastic optimization for deep learning in the parallel computing environment under communication constraints. A new algorithm is proposed in this setting where the communication and coordination of work among concurrent processes (local workers), is based on an elastic force which links the parameters they compute with a center variable stored by the parameter server (master). The algorithm enables the local workers to perform more exploration, i.e. the algorithm allows the local variables to fluctuate further from the center variable by reducing the amount of communication between local workers and the master. We empirically demonstrate that in the deep learning setting, due to the existence of many local optima, allowing more exploration can lead to the improved performance. We propose synchronous and asynchronous variants of the new algorithm. We provide the stability analysis of the asynchronous variant in the round-robin scheme and compare it with the more common parallelized method ADMM. We show that the stability of EASGD is guaranteed when a simple stability condition is satisfied, which is not the case for ADMM. We additionally propose the momentum-based version of our algorithm that can be applied in both synchronous and asynchronous settings. Asynchronous variant of the algorithm is applied to train convolutional neural networks for image classification on the CIFAR and ImageNet datasets. Experiments demonstrate that the new algorithm accelerates the training of deep architectures compared to DOWNPOUR and other common baseline approaches and furthermore is very communication efficient.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>One of the most challenging problems in large-scale machine learning is how to parallelize the training of large models that use a form of stochastic gradient descent (SGD) <ref type="bibr" target="#b0">[1]</ref>. There have been attempts to parallelize SGD-based training for large-scale deep learning models on large number of CPUs, including the Google's Distbelief system <ref type="bibr" target="#b1">[2]</ref>. But practical image recognition systems consist of large-scale convolutional neural networks trained on few GPU cards sitting in a single computer <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b3">4]</ref>. The main challenge is to devise parallel SGD algorithms to train large-scale deep learning models that yield a significant speedup when run on multiple GPU cards.</p><p>In this paper we introduce the Elastic Averaging SGD method (EASGD) and its variants. EASGD is motivated by quadratic penalty method <ref type="bibr" target="#b4">[5]</ref>, but is re-interpreted as a parallelized extension of the averaging SGD algorithm <ref type="bibr" target="#b5">[6]</ref>. The basic idea is to let each worker maintain its own local parameter, and the communication and coordination of work among the local workers is based on an elastic force which links the parameters they compute with a center variable stored by the master. The center variable is updated as a moving average where the average is taken in time and also in space over the parameters computed by local workers. The main contribution of this paper is a new algorithm that provides fast convergent minimization while outperforming DOWNPOUR method <ref type="bibr" target="#b1">[2]</ref> and other baseline approaches in practice. Simultaneously it reduces the communication overhead between the master and the local workers while at the same time it maintains high-quality performance measured by the test error. The new algorithm applies to deep learning settings such as parallelized training of convolutional neural networks.</p><p>The article is organized as follows. Section 2 explains the problem setting, Section 3 presents the synchronous EASGD algorithm and its asynchronous and momentum-based variants, Section 4 provides stability analysis of EASGD and ADMM in the round-robin scheme, Section 5 shows experimental results and Section 6 concludes. The Supplement contains additional material including additional theoretical analysis.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Problem setting</head><p>Consider minimizing a function F (x) in a parallel computing environment <ref type="bibr" target="#b6">[7]</ref> with p ∈ N workers and a master. In this paper we focus on the stochastic optimization problem of the following form</p><formula xml:id="formula_0">min x F (x) := E[f (x, ξ)],<label>(1)</label></formula><p>where x is the model parameter to be estimated and ξ is a random variable that follows the probability distribution P over Ω such that F (x) = Ω f (x, ξ)P(dξ). The optimization problem in Equation 1 can be reformulated as follows</p><formula xml:id="formula_1">min x 1 ,...,x p ,x p i=1 E[f (x i , ξ i )] + ρ 2 x i − x 2 ,<label>(2)</label></formula><p>where each ξ i follows the same distribution P (thus we assume each worker can sample the entire dataset). In the paper we refer to x i 's as local variables and we refer to x as a center variable. The problem of the equivalence of these two objectives is studied in the literature and is known as the augmentability or the global variable consensus problem <ref type="bibr" target="#b7">[8,</ref><ref type="bibr" target="#b8">9]</ref>. The quadratic penalty term ρ in Equation 2 is expected to ensure that local workers will not fall into different attractors that are far away from the center variable. This paper focuses on the problem of reducing the parameter communication overhead between the master and local workers <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b1">2,</ref><ref type="bibr" target="#b10">11,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b12">13]</ref>. The problem of data communication when the data is distributed among the workers <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b13">14]</ref> is a more general problem and is not addressed in this work. We however emphasize that our problem setting is still highly non-trivial under the communication constraints due to the existence of many local optima <ref type="bibr" target="#b14">[15]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">EASGD update rule</head><p>The EASGD updates captured in resp. Equation 3 and 4 are obtained by taking the gradient descent step on the objective in Equation 2 with respect to resp. variable x i and x,</p><formula xml:id="formula_2">x i t+1 = x i t − η(g i t (x i t ) + ρ(x i t − xt ))<label>(3)</label></formula><formula xml:id="formula_3">xt+1 = xt + η p i=1 ρ(x i t − xt ),<label>(4)</label></formula><p>where g i t (x i t ) denotes the stochastic gradient of F with respect to x i evaluated at iteration t, x i t and xt denote respectively the value of variables x i and x at iteration t, and η is the learning rate.</p><p>The update rule for the center variable x takes the form of moving average where the average is taken over both space and time. Denote α = ηρ and β = pα, then Equation 3 and 4 become</p><formula xml:id="formula_4">x i t+1 = x i t − ηg i t (x i t ) − α(x i t − xt ) (5) xt+1 = (1 − β)x t + β 1 p p i=1 x i t .<label>(6)</label></formula><p>Note that choosing β = pα leads to an elastic symmetry in the update rule, i.e. there exists an symmetric force equal to α(x i t − xt ) between the update of each x i and x. It has a crucial influence on the algorithm's stability as will be explained in Section 4. Also in order to minimize the staleness <ref type="bibr" target="#b15">[16]</ref> of the difference x i t − xt between the center and the local variable, the update for the master in Equation 4 involves x i t instead of x i t+1 .</p><p>Note also that α = ηρ, where the magnitude of ρ represents the amount of exploration we allow in the model. In particular, small ρ allows for more exploration as it allows x i 's to fluctuate further from the center x. The distinctive idea of EASGD is to allow the local workers to perform more exploration (small ρ) and the master to perform exploitation. This approach differs from other settings explored in the literature <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b16">17,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b21">22,</ref><ref type="bibr" target="#b22">23]</ref>, and focus on how fast the center variable converges. In this paper we show the merits of our approach in the deep learning setting.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Asynchronous EASGD</head><p>We discussed the synchronous update of EASGD algorithm in the previous section. In this section we propose its asynchronous variant. The local workers are still responsible for updating the local variables x i 's, whereas the master is updating the center variable x. Each worker maintains its own clock t i , which starts from 0 and is incremented by 1 after each stochastic gradient update of x i as shown in Algorithm 1. The master performs an update whenever the local workers finished τ steps of their gradient updates, where we refer to τ as the communication period. As can be seen in Algorithm 1, whenever τ divides the local clock of the i th worker, the i th worker communicates with the master and requests the current value of the center variable x. The worker then waits until the master sends back the requested parameter value, and computes the elastic difference α(x − x) (this entire procedure is captured in step a) in Algorithm 1). The elastic difference is then sent back to the master (step b) in Algorithm 1) who then updates x.</p><p>The communication period τ controls the frequency of the communication between every local worker and the master, and thus the trade-off between exploration and exploitation.</p><p>Algorithm 1: Asynchronous EASGD: Processing by worker i and the master Input: learning rate η, moving rate α,</p><formula xml:id="formula_5">communication period τ ∈ N Initialize: x is initialized randomly, x i = x, t i = 0 Repeat x ← x i if (τ divides t i ) then a) x i ← x i − α(x − x) b) x ← x + α(x − x) end x i ← x i − ηg i t i (x) t i ← t i + 1</formula><p>Until forever Algorithm 2: Asynchronous EAMSGD: Processing by worker i and the master Input: learning rate η, moving rate α, communication period τ ∈ N, momentum term δ Initialize: x is initialized randomly,</p><formula xml:id="formula_6">x i = x, v i = 0, t i = 0 Repeat x ← x i if (τ divides t i ) then a) x i ← x i − α(x − x) b) x ← x + α(x − x) end v i ← δv i − ηg i t i (x + δv i ) x i ← x i + v i t i ← t i + 1 Until forever 3.2 Momentum EASGD</formula><p>The momentum EASGD (EAMSGD) is a variant of our Algorithm 1 and is captured in Algorithm 2. It is based on the Nesterov's momentum scheme <ref type="bibr" target="#b23">[24,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b25">26]</ref>, where the update of the local worker of the form captured in Equation 3 is replaced by the following update</p><formula xml:id="formula_7">v i t+1 = δv i t − ηg i t (x i t + δv i t )<label>(7)</label></formula><formula xml:id="formula_8">x i t+1 = x i t + v i t+1 − ηρ(x i t − xt )</formula><p>, where δ is the momentum term. Note that when δ = 0 we recover the original EASGD algorithm.</p><p>As we are interested in reducing the communication overhead in the parallel computing environment where the parameter vector is very large, we will be exploring in the experimental section the asynchronous EASGD algorithm and its momentum-based variant in the relatively large τ regime (less frequent communication).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Stability analysis of EASGD and ADMM in the round-robin scheme</head><p>In this section we study the stability of the asynchronous EASGD and ADMM methods in the roundrobin scheme <ref type="bibr" target="#b19">[20]</ref>. We first state the updates of both algorithms in this setting, and then we study their stability. We will show that in the one-dimensional quadratic case, ADMM algorithm can exhibit chaotic behavior, leading to exponential divergence. The analytic condition for the ADMM algorithm to be stable is still unknown, while for the EASGD algorithm it is very simple <ref type="foot" target="#foot_0">1</ref> .</p><p>The analysis of the synchronous EASGD algorithm, including its convergence rate, and its averaging property, in the quadratic and strongly convex case, is deferred to the Supplement.</p><p>In our setting, the ADMM method <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28]</ref> involves solving the following minimax problem<ref type="foot" target="#foot_1">2</ref> , max</p><formula xml:id="formula_9">λ 1 ,...,λ p min x 1 ,...,x p ,x p i=1 F (x i ) − λ i (x i − x) + ρ 2 x i − x 2 ,<label>(8)</label></formula><p>where λ i 's are the Lagrangian multipliers. The resulting updates of the ADMM algorithm in the round-robin scheme are given next. Let t ≥ 0 be a global clock. At each t, we linearize the function</p><formula xml:id="formula_10">F (x i ) with F (x i t ) + ∇F (x i t ), x i − x i t + 1 2η x i − x i t 2</formula><p>as in <ref type="bibr" target="#b27">[28]</ref>. The updates become</p><formula xml:id="formula_11">λ i t+1 = λ i t − (x i t − xt ) if mod (t, p) = i − 1; λ i t if mod (t, p) = i − 1. (<label>9</label></formula><formula xml:id="formula_12">)</formula><formula xml:id="formula_13">x i t+1 = x i t −η∇F (x i t )+ηρ(λ i t+1 +xt) 1+ηρ if mod (t, p) = i − 1; x i t if mod (t, p) = i − 1. (<label>10</label></formula><formula xml:id="formula_14">) xt+1 = 1 p p i=1 (x i t+1 − λ i t+1 ).<label>(11)</label></formula><p>Each local variable x i is periodically updated (with period p). First, the Lagrangian multiplier λ i is updated with the dual ascent update as in Equation <ref type="formula" target="#formula_11">9</ref>. It is followed by the gradient descent update of the local variable as given in Equation <ref type="formula" target="#formula_13">10</ref>. Then the center variable x is updated with the most recent values of all the local variables and Lagrangian multipliers as in Equation <ref type="formula" target="#formula_14">11</ref>. Note that since the step size for the dual ascent update is chosen to be ρ by convention <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28]</ref>, we have re-parametrized the Lagrangian multiplier to be λ i t ← λ i t /ρ in the above updates. The EASGD algorithm in the round-robin scheme is defined similarly and is given below</p><formula xml:id="formula_15">x i t+1 = x i t − η∇F (x i t ) − α(x i t − xt ) if mod (t, p) = i − 1; x i t if mod (t, p) = i − 1. (<label>12</label></formula><formula xml:id="formula_16">) xt+1 = xt + i: mod (t,p)=i−1 α(x i t − xt ).<label>(13)</label></formula><p>At time t, only the i-th local worker (whose index i−1 equals t modulo p) is activated, and performs the update in Equations 12 which is followed by the master update given in Equation <ref type="formula" target="#formula_16">13</ref>.</p><p>We will now focus on the one-dimensional quadratic case without noise, i.e. F (x) = x 2 2 , x ∈ R. For the ADMM algorithm, let the state of the (dynamical) system at time t be s t = (λ 1 t , x 1 t , . . . , λ p t , x p t , xt ) ∈ R 2p+1 . The local worker i's updates in Equations 9, 10, and 11 are composed of three linear maps which can be written as</p><formula xml:id="formula_17">s t+1 = (F i 3 • F i 2 • F i 1 )(s t ).</formula><p>For simplicity, we will only write them out below for the case when i = 1 and p = 2:</p><formula xml:id="formula_18">F 1 1 =     1 −1 0 0 1 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1     , F 1 2 =      1 0 0 0 0 ηρ 1+ηρ 1−η 1+ηρ 0 0 ηρ 1+ηρ 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1      , F 1 3 =      1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0 − 1 p 1 p − 1 p 1 p 0      .</formula><p>For each of the p linear maps, it's possible to find a simple condition such that each map, where the i th map has the form</p><formula xml:id="formula_19">F i 3 • F i 2 • F i 1 ,</formula><p>is stable (the absolute value of the eigenvalues of the map are smaller or equal to one). However, when these non-symmetric maps are composed one after another as follows</p><formula xml:id="formula_20">F = F p 3 • F p 2 • F p 1 • . . . • F 1 3 • F 1 2 • F 1 1</formula><p>, the resulting map F can become unstable! (more precisely, some eigenvalues of the map can sit outside the unit circle in the complex plane). We now present the numerical conditions for which the ADMM algorithm becomes unstable in the round-robin scheme for p = 3 and p = 8, by computing the largest absolute eigenvalue of the map F. Figure <ref type="figure" target="#fig_0">1</ref> summarizes the obtained result. </p><formula xml:id="formula_21">F = F p 3 • F p 2 • F p 1 • . . . • F 1 3 • F 1 2 • F 1 1</formula><p>as a function of η ∈ (0, 10 −2 ) and ρ ∈ (0, 10) when p = 3 and p = 8. To simulate the chaotic behavior of the ADMM algorithm, one may pick η = 0.001 and ρ = 2.5 and initialize the state s 0 either randomly or with λ i 0 = 0, x i 0 = x0 = 1000, ∀i. Figure should be read in color. On the other hand, the EASGD algorithm involves composing only symmetric linear maps due to the elasticity. Let the state of the (dynamical) system at time t be s t = (x 1 t , . . . , x p t , xt ) ∈ R p+1 . The activated local worker i's update in Equation <ref type="formula" target="#formula_15">12</ref>and the master update in Equation 13 can be written as s t+1 = F i (s t ). In case of p = 2, the map F 1 and F 2 are defined as follows</p><formula xml:id="formula_22">F 1 = 1 − η − α 0 α 0 1 0 α 0 1 − α , F 2 = 1 0 0 0 1 − η − α α 0 α 1 − α</formula><p>For the composite map F p • . . . • F 1 to be stable, the condition that needs to be satisfied is actually the same for each i, and is furthermore independent of p (since each linear map F i is symmetric).</p><p>It essentially involves the stability of the 2 × 2 matrix</p><formula xml:id="formula_23">1 − η − α α α 1 − α , whose two (real) eigenvalues λ satisfy (1 − η − α − λ)(1 − α − λ) = α 2 .</formula><p>The resulting stability condition (|λ| ≤ 1) is simple and given as 0 ≤ η ≤ 2, 0 ≤ α ≤ 4−2η 4−η .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Experiments</head><p>In this section we compare the performance of EASGD and EAMSGD with the parallel method DOWNPOUR and the sequential method SGD, as well as their averaging and momentum variants.</p><p>All the parallel comparator methods are listed below<ref type="foot" target="#foot_2">3</ref> :</p><p>• DOWNPOUR <ref type="bibr" target="#b1">[2]</ref>, the pseudo-code of the implementation of DOWNPOUR used in this paper is enclosed in the Supplement. • Momentum DOWNPOUR (MDOWNPOUR), where the Nesterov's momentum scheme is applied to the master's update (note it is unclear how to apply it to the local workers or for the case when τ &gt; 1). The pseudo-code is in the Supplement. • A method that we call ADOWNPOUR, where we compute the average over time of the center variable x as follows: z t+1 = (1 − α t+1 )z t + α t+1 xt , and α t+1 = 1 t+1 is a moving rate, and z 0 = x0 . t denotes the master clock, which is initialized to 0 and incremented every time the center variable x is updated.</p><p>• A method that we call MVADOWNPOUR, where we compute the moving average of the center variable x as follows: z t+1 = (1 − α)z t + αx t , and the moving rate α was chosen to be constant, and z 0 = x0 . t denotes the master clock and is defined in the same way as for the ADOWNPOUR method.</p><p>All the sequential comparator methods (p = 1) are listed below:</p><p>• SGD <ref type="bibr" target="#b0">[1]</ref> with constant learning rate η.</p><p>• Momentum SGD (MSGD) <ref type="bibr" target="#b25">[26]</ref> with constant momentum δ.</p><p>• ASGD <ref type="bibr" target="#b5">[6]</ref> with moving rate α t+1 = 1 t+1 .</p><p>• MVASGD <ref type="bibr" target="#b5">[6]</ref> with moving rate α set to a constant.</p><p>We perform experiments in a deep learning setting on two benchmark datasets: CIFAR-10 (we refer to it as CIFAR) <ref type="foot" target="#foot_3">4</ref> and ImageNet ILSVRC 2013 (we refer to it as ImageNet) <ref type="foot" target="#foot_4">5</ref> . We focus on the image classification task with deep convolutional neural networks. We next explain the experimental setup. The details of the data preprocessing and prefetching are deferred to the Supplement.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Experimental setup</head><p>For all our experiments we use a GPU-cluster interconnected with InfiniBand. Each node has 4 Titan GPU processors where each local worker corresponds to one GPU processor. The center variable of the master is stored and updated on the centralized parameter server [2]<ref type="foot" target="#foot_5">6</ref> .</p><p>To describe the architecture of the convolutional neural network, we will first introduce a notation. Let (c, y) denotes the size of the input image to each layer, where c is the number of color channels and y is both the horizontal and the vertical dimension of the input. Let C denotes the fully-connected convolutional operator and let P denotes the max pooling operator, D denotes the linear operator with dropout rate equal to 0.5 and S denotes the linear operator with softmax output non-linearity. We use the cross-entropy loss and all inner layers use rectified linear units. For the ImageNet experiment we use the similar approach to <ref type="bibr" target="#b3">[4]</ref>  For the CIFAR experiment we use the similar approach to <ref type="bibr" target="#b28">[29]</ref> with the following 7-layer convolutional neural network (3,28)C(64,24)P(64,12)C(128,8)P(128,4)C(64,2)D(256,1)S(10,1).</p><p>In our experiments all the methods we run use the same initial parameter chosen randomly, except that we set all the biases to zero for CIFAR case and to 0.1 for ImageNet case. This parameter is used to initialize the master and all the local workers<ref type="foot" target="#foot_6">7</ref> . We add l 2 -regularization λ 2 x 2 to the loss function F (x). For ImageNet we use λ = 10 −5 and for CIFAR we use λ = 10 −4 . We also compute the stochastic gradient using mini-batches of sample size 128.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Experimental results</head><p>For all experiments in this section we use EASGD with β = 0.9<ref type="foot" target="#foot_7">8</ref> , for all momentum-based methods we set the momentum term δ = 0.99 and finally for MVADOWNPOUR we set the moving rate to α = 0.001. We start with the experiment on CIFAR dataset with p = 4 local workers running on a single computing node. For all the methods, we examined the communication periods from the following set τ = {1, 4, 16, 64}. For comparison we also report the performance of MSGD which outperformed SGD, ASGD and MVASGD as shown in Figure <ref type="figure">6</ref> in the Supplement. For each method we examined a wide range of learning rates (the learning rates explored in all experiments are summarized in Table <ref type="table">1</ref>, 2, 3 in the Supplement). The CIFAR experiment was run 3 times independently from the same initialization and for each method we report its best performance measured by the smallest achievable test error. From the results in Figure <ref type="figure" target="#fig_2">2</ref>, we conclude that all DOWNPOURbased methods achieve their best performance (test error) for small τ (τ ∈ {1, 4}), and become highly unstable for τ ∈ {16, 64}. While EAMSGD significantly outperforms comparator methods for all values of τ by having faster convergence. It also finds better-quality solution measured by the test error and this advantage becomes more significant for τ ∈ {16, 64}. Note that the tendency to achieve better test performance with larger τ is also characteristic for the EASGD algorithm. We next explore different number of local workers p from the set p = {4, 8, 16} for the CIFAR experiment, and p = {4, 8} for the ImageNet experiment <ref type="foot" target="#foot_8">9</ref> . For the ImageNet experiment we report the results of one run with the best setting we have found. EASGD and EAMSGD were run with τ = 10 whereas DOWNPOUR and MDOWNPOUR were run with τ = 1. The results are in Figure <ref type="figure">3  and 4</ref>. For the CIFAR experiment, it's noticeable that the lowest achievable test error by either EASGD or EAMSGD decreases with larger p. This can potentially be explained by the fact that larger p allows for more exploration of the parameter space. In the Supplement, we discuss further the trade-off between exploration and exploitation as a function of the learning rate (section 9.5) and the communication period (section 9.6). Finally, the results obtained for the ImageNet experiment also shows the advantage of EAMSGD over the competitor methods.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusion</head><p>In this paper we describe a new algorithm called EASGD and its variants for training deep neural networks in the stochastic setting when the computations are parallelized over multiple GPUs. Experiments demonstrate that this new algorithm quickly achieves improvement in test error compared to more common baseline approaches such as DOWNPOUR and its variants. We show that our approach is very stable and plausible under communication constraints. We provide the stability analysis of the asynchronous EASGD in the round-robin scheme, and show the theoretical advantage of the method over ADMM. The different behavior of the EASGD algorithm from its momentumbased variant EAMSGD is intriguing and will be studied in future works. on ImageNet with the 11-layer convolutional neural network. Initial learning rate is decreased twice, by a factor of 5 and then 2, when we observe that the online predictive loss <ref type="bibr" target="#b29">[30]</ref> stagnates. EAMSGD achieves significant accelerations compared to other methods, e.g. the relative speed-up for p = 8 (the best comparator method is then DOWNPOUR) to achieve the test error 49% equals 1.8, and simultaneously it reduces the communication overhead (DOWNPOUR uses communication period τ = 1 and EAMSGD uses τ = 10).</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: The largest absolute eigenvalue of the linear mapF = F p 3 • F p 2 • F p 1 • . . . • F 1 3 • F 1 2 • F 1</figDesc><graphic url="image-1.png" coords="5,151.16,161.93,110.09,110.05" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head></head><label></label><figDesc>with the following 11-layer convolutional neural network (3,221)C(96,108)P(96,36)C(256,32)P(256,16)C(384,14) C(384,13)C(256,12)P(256,6)D(4096,1)D(4096,1)S(1000,1).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Training and test loss and the test error for the center variable versus a wallclock time for different communication periods τ on CIFAR dataset with the 7-layer convolutional neural network.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 3 :Figure 4 :</head><label>34</label><figDesc>Figure 3: Training and test loss and the test error for the center variable versus a wallclock time for different number of local workers p for parallel methods (MSGD uses p = 1) on CIFAR with the 7-layer convolutional neural network. EAMSGD achieves significant accelerations compared to other methods, e.g. the relative speed-up for p = 16 (the best comparator method is then MSGD) to achieve the test error 21% equals 11.1.</figDesc></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">This condition resembles the stability condition for the synchronous EASGD algorithm (Condition 17 for p = 1) in the analysis in the Supplement.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">The convergence analysis in<ref type="bibr" target="#b26">[27]</ref> is based on the assumption that "At any master iteration, updates from the workers have the same probability of arriving at the master.", which is not satisfied in the round-robin scheme.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">We have compared asynchronous ADMM<ref type="bibr" target="#b26">[27]</ref> with EASGD in our setting as well, the performance is nearly the same. However, ADMM's momentum variant is not as stable for large communication periods.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3">Downloaded from http://www.cs.toronto.edu/ ˜kriz/cifar.html.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_4">Downloaded from http://image-net.org/challenges/LSVRC/2013.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="6" xml:id="foot_5">Our implementation is available at https://github.com/sixin-zh/mpiT.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="7" xml:id="foot_6">On the contrary, initializing the local workers and the master with different random seeds 'traps' the algorithm in the symmetry breaking phase.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="8" xml:id="foot_7"><ref type="bibr" target="#b7">8</ref> Intuitively the 'effective β' is β/τ = pα = pηρ (thus ρ = β τ pη ) in the asynchronous setting.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="9" xml:id="foot_8">For the ImageNet experiment, the training loss is measured on a subset of the training data of size 50,000.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>The authors thank R. Power, J. Li for implementation guidance, J. Bruna, O. Henaff, C. Farabet, A. Szlam, Y. Bakhtin for helpful discussion, P. L. Combettes, S. Bengio and the referees for valuable feedback.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Online algorithms and stochastic approximations</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Bottou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Online Learning and Neural Networks</title>
+				<imprint>
+			<publisher>Cambridge University Press</publisher>
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Large scale distributed deep networks</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Corrado</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Monga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ranzato</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Senior</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yang</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Imagenet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="1106" to="1114" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">OverFeat: Integrated Recognition, Localization and Detection using Convolutional Networks</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sermanet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Eigen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mathieu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fergus</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Lecun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<publisher>ArXiv</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">Numerical Optimization, Second Edition</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Nocedal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Wright</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+			<publisher>Springer</publisher>
+			<pubPlace>New York</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Acceleration of stochastic approximation by averaging</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Polyak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">B</forename><surname>Juditsky</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIAM Journal on Control and Optimization</title>
+		<imprint>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="838" to="855" />
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<title level="m" type="main">Parallel and Distributed Computation</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bertsekas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">N</forename><surname>Tsitsiklis</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1989">1989</date>
+			<publisher>Prentice Hall</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Optimization theory: the finite dimensional case</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">R</forename><surname>Hestenes</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1975">1975</date>
+			<publisher>Wiley</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Distributed optimization and statistical learning via the alternating direction method of multipliers</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Boyd</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parikh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Chu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Peleato</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Eckstein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Found. Trends Mach. Learn</title>
+		<imprint>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="1" to="122" />
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Fundamental limits of online and distributed algorithms for statistical learning and estimation</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Shamir</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Multi-gpu training of convnets</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Yadan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Taigman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ranzato</surname></persName>
+		</author>
+		<idno>Arxiv. 2013</idno>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">Gpu asynchronous stochastic gradient descent to speed up neural network training</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Paine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jin</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename></persName>
+		</author>
+		<idno>Arxiv. 2013</idno>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">1-bit stochastic gradient descent and application to dataparallel distributed training of speech dnns</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Seide</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Fu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Droppo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Yu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2014-09">2014. September 2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Scaling up machine learning: Parallel and distributed approaches</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bekkerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Bilenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Langford</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<publisher>Camridge Universityy Press</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">The loss surfaces of multilayer networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Choromanska</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">B</forename><surname>Henaff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mathieu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">B</forename><surname>Arous</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lecun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">AISTATS</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">More effective distributed ml via a stale synchronous parallel parameter server</title>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Ho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Cipar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">K</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">A</forename><surname>Gibson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Ganger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">P</forename><surname>Xing</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Towards an optimal stochastic alternating direction method of multipliers</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Azadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sra</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Asynchronous stochastic approximations</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Borkar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIAM Journal on Control and Optimization</title>
+		<imprint>
+			<biblScope unit="volume">36</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="840" to="851" />
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Distributed asynchronous incremental subgradient methods</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Nedić</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bertsekas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Borkar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Inherently Parallel Algorithms in Feasibility and Optimization and their Applications</title>
+				<imprint>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="page" from="381" to="407" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Slow learners are fast</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Langford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Smola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zinkevich</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Distributed delayed stochastic optimization</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Duchi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Hogwild: A Lock-Free Approach to Parallelizing Stochastic Gradient Descent</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Recht</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Re</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">J</forename><surname>Wright</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Niu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Parallelized stochastic gradient descent</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zinkevich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Weimer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Smola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Smooth minimization of non-smooth functions</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Nesterov</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Math. Program</title>
+		<imprint>
+			<biblScope unit="volume">103</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="127" to="152" />
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">An optimal method for stochastic composite optimization</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Lan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Mathematical Programming</title>
+		<imprint>
+			<biblScope unit="volume">133</biblScope>
+			<biblScope unit="issue">1-2</biblScope>
+			<biblScope unit="page" from="365" to="397" />
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">On the importance of initialization and momentum in deep learning</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Martens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dahl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Asynchronous distributed admm for consensus optimization</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kwok</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Stochastic alternating direction method of multipliers</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Ouyang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tran</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Gray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 30th International Conference on Machine Learning</title>
+				<meeting>the 30th International Conference on Machine Learning</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="80" to="88" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Regularization of neural networks using dropconnect</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">D</forename><surname>Zeiler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lecun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fergus</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">On the generalization ability of on-line learning algorithms</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Cesa-Bianchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Conconi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Gentile</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Information Theory</title>
+		<imprint>
+			<biblScope unit="volume">50</biblScope>
+			<biblScope unit="issue">9</biblScope>
+			<biblScope unit="page" from="2050" to="2057" />
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<title level="m" type="main">Introductory lectures on convex optimization</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Nesterov</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+			<publisher>Springer Science &amp; Business Media</publisher>
+			<biblScope unit="volume">87</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,457 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Eliminating Synchronization-Related Atomic Operations with Biased Locking and Bulk Rebiasing</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Kenneth</forename><surname>Russell</surname></persName>
+							<email>kenneth.russell@sun.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Sun Microsystems, Inc</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">David</forename><surname>Detlefs</surname></persName>
+							<email>david.detlefs@alum.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Sun Microsystems, Inc</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Eliminating Synchronization-Related Atomic Operations with Biased Locking and Bulk Rebiasing</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="MD5">29DB4E4E82A1FC2D5449BE6ECA5DC312</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.3" ident="GROBID" when="2023-07-28T04:24+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>D.3.4 [Programming Languages]: Processors-Optimization General Terms Algorithms</term>
+					<term>Languages</term>
+					<term>Performance Java</term>
+					<term>synchronization</term>
+					<term>monitor</term>
+					<term>lock</term>
+					<term>atomic</term>
+					<term>optimization</term>
+					<term>bias</term>
+					<term>rebias</term>
+					<term>revoke</term>
+					<term>reservation</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>The Java TM programming language contains built-in synchronization primitives for use in constructing multithreaded programs. Efficient implementation of these synchronization primitives is necessary in order to achieve high performance.</p><p>Recent research <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b9">10,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b6">7]</ref> has focused on the run-time elimination of the atomic operations required to implement object monitor synchronization primitives. This paper describes a novel technique called store-free biased locking which eliminates all synchronization-related atomic operations on uncontended object monitors. The technique supports the bulk transfer of object ownership from one thread to another, and the selective disabling of the optimization where unprofitable, using epoch-based bulk rebiasing and revocation. It has been implemented in the production version of the Java HotSpot TM VM and has yielded significant performance improvements on a range of benchmarks and applications. The technique is applicable to any virtual machine-based programming language implementation with mostly block-structured locking primitives.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Background and Motivation</head><p>The Java programming language contains built-in support for monitors to facilitate the construction of multithreaded programs. Much research has been dedicated to decreasing the execution cost of the associated synchronization primitives.</p><p>A class of optimizations which can be termed lightweight locking <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b1">2,</ref><ref type="bibr" target="#b4">5]</ref> are focused on avoiding as much as possible the use of "heavy-weight" operating system mutexes and condition variables to implement Java monitors. The assumption behind these techniques is that most lock acquisitions in real programs are uncontended. Lightweight locking techniques use atomic operations upon monitor entry, and sometimes upon exit, to ensure correct synchronization. These techniques fall back to using OS mutexes and condition variables when contention occurs.</p><p>A related class of optimizations which can be termed biased locking <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b6">7,</ref><ref type="bibr" target="#b8">9]</ref> rely on the further property that not only are most monitors uncontended, they are only entered and exited by one thread during the lifetime of the monitor. Such monitors may be profitably biased toward the owning thread, allowing that thread to enter and exit the monitor without using atomic operations. If another thread attempts to enter a biased monitor, even if no contention occurs, a relatively expensive bias revocation operation must be performed. The profitability of such an optimization relies on the benefit of the elimination of atomic operations being higher than the penalty of revocation.</p><p>Current refinements of biased locking techniques <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref> decrease or eliminate the penalty of bias revocation, but do not optimize certain synchronization patterns which occur in practice, and also impact peak performance of the algorithm.</p><p>Multiprocessor systems are increasingly prevalent; so much so that uniprocessors are now the exception rather than the norm. Atomic operations are significantly more expensive on multiprocessors than uniprocessors, and their use may impact scalability and performance of real applications such as javac by 20% or more (Section 6). It is crucial at this juncture to enable biased locking optimizations for industrial applications, and to optimize as many patterns of synchronization in these applications as possible.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.1">Contributions</head><p>This paper presents a novel technique for eliminating atomic operations associated with the Java language's synchronization primitives called store-free biased locking (SFBL). It is similar to, and is inspired by, the lock reservation technique <ref type="bibr" target="#b8">[9]</ref> and its refinements <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref>. The specific contributions of our work are:</p><p>• We build upon invariants preserved by the Java HotSpot VM to eliminate repeated stores to the object header. Store elimination makes it easier to transfer bias ownership between threads.</p><p>• We introduce bulk rebiasing and revocation to amortize the cost of per-object bias revocation while retaining the benefits of the optimization.</p><p>• An epoch-based mechanism which invalidates previously held biases facilitates the bulk transfer of bias ownership from one thread to another.</p><p>Our technique is the first to support efficient transfer of bias ownership from one thread to another for sets of objects. Previous techniques do not optimize the situation in which more than one thread locks a given object. niques, and allow biased locking to be enabled by default for all applications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.2">Organization of this Paper</head><p>The rest of this paper is organized as follows. Section 2 describes the lightweight locking technique in the Java HotSpot VM and its invariants. Section 3 describes the basic version of our biased locking technique. Section 4 describes the bulk rebiasing and revocation techniques used to amortize the cost of bias revocation. Section 5 improves the scalability of bulk rebiasing and revocation using epochs. Section 6 discusses results from various benchmarks. Section 7 provides detailed comparisons to earlier work. Section 8 describes how to obtain our implementation, and Section 9 concludes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Overview of Lightweight Locking in the Java HotSpot VM</head><p>The lightweight locking technique used by the Java HotSpot VM <ref type="bibr" target="#b3">[4]</ref> has not been described in the literature. Because knowledge of some of its aspects is required to understand store-free biased locking (SFBL), we present a brief overview here. The Java HotSpot VM uses a two-word object header. The first word is called the mark word and contains synchronization, garbage collection and hash code information. The second word points to the class of the object. See figure <ref type="figure">1</ref> for an overview of the layout and possible states of the mark word.</p><p>Our biased locking technique relies on three invariants. First, the locking primitives in the language must be mostly block-structured. Second, optimized compiled code, if it is produced by the virtual machine, must only be generated for methods with block-structured locking. Third, interpreted execution must detect unstructured locking precisely. We now show how these invariants are maintained in our VM.</p><p>Whenever an object is lightweight locked by a monitorenter bytecode, a lock record is either implicitly or explicitly allocated on the stack of the thread performing the lock acquisition operation. The lock record holds the original value of the object's mark word and also contains metadata necessary to identify which object is locked. During lock acquisition, the mark word is copied into the lock record (such a copy is called a displaced mark word), and an atomic compare-and-swap (CAS) operation is performed to attempt to make the object's mark word point to the lock record. If the CAS succeeds, the current thread owns the lock. If it fails, because some other thread acquired the lock, a slow path is taken in which the lock is inflated, during which operation an OS mutex and condition variable are associated with the object. During the inflation process, the object's mark word is updated with a CAS to point to a data structure containing pointers to the mutex and condition variable.</p><p>During an unlock operation, an attempt is made to CAS the mark word, which should still point to the lock record, with the displaced mark word stored in the lock record. If the CAS succeeds, there was no contention for the monitor and lightweight locking remains in effect. If it fails, the lock was contended while it was held and a slow path is taken to properly release the lock and notify other threads waiting to acquire the lock.</p><p>Recursive locking is handled in a straightforward fashion. If during lightweight lock acquisition it is determined that the current thread already owns the lock by virtue of the object's mark word pointing into its stack, a zero is stored into the on-stack lock record rather than the current value of the object's mark word. If zero is seen in a lock record during an unlock operation, the object is known to be recursively locked by the current thread and no update of the object's mark word occurs. The number of such lock records implicitly records the monitor recursion count. This is a significant property to the best of our knowledge not attained by most other JVMs <ref type="foot" target="#foot_0">1</ref> .</p><p>The Java HotSpot VM contains both a bytecode interpreter and an optimizing compiler. The interpreter and compiler-generated code create activation records called frames on a thread's native stack during activation (i.e., execution) of Java methods. We designate these frames as interpreted or compiled. Interpreted frames contain data from exactly one method, while due to inlining, compiled frames may include data from more than one method.</p><p>Interpreted frames contain a region which holds the lock records for all monitors owned by the activation. During interpreted method execution this region grows or shrinks depending upon the number of locks held. In compiled frames, there is no such region. Instead, lock records are allocated by the compiler in a fashion similar to register spill stack slots. During compilation, metadata is generated which describes the set of locks held and the location of their lock records at each potential safepoint <ref type="bibr" target="#b14">[15]</ref> in compiled code. The presence of lock records allows the runtime system to enumerate the locked objects and their displaced mark words within each frame. This information is used during various operations internal to the JVM, including bias revocation, which will be described later.</p><p>The Java Virtual Machine Specification <ref type="bibr" target="#b10">[11]</ref> requires that an IllegalMonitorStateException be thrown if a monitorexit bytecode is executed without having previously executed a matching monitorenter. The interpreter detects this situation by checking that a lock record exists for an object being unlocked. It is not specified what happens when a monitorenter bytecode is executed in a method followed by removal of the corresponding frame from the stack without executing a monitorexit bytecode. In this case a JVM may legally either throw an exception or not. The Java Hotspot VM's interpreter eagerly detects this situation by iterating through the lock records when removing an interpreted frame and forcibly unlocking the corresponding objects. It then throws an exception if any locked objects were found.</p><p>The Java HotSpot client <ref type="bibr" target="#b7">[8]</ref> and server <ref type="bibr" target="#b12">[13]</ref> optimizing compilers will only compile and inline methods if dataflow analysis has proven that all monitorenter and monitorexit operations are properly paired; in other words, every lock of a given object has a matching unlock on the same object. Attempts to leave an object locked after the method returns, or to unlock an object not locked by that method, are detected by dataflow analysis. Such methods, which almost never occur in practice, are never compiled or inlined but always interpreted.</p><p>Because interpreted execution precisely detects unstructured locking, and because compiled execution is proven through monitor matching to perform correct block-structured locking, it is guaranteed that an object's locking state matches the program's execution at all times. It is never the case that an object's locking state claims that it is owned by a particular thread when in fact the method which performed the lightweight lock has already exited. A method may not unlock an object unless precisely that activation, and not one further up the stack, locked the object. These are essential properties enabling both the elimination of the recursion count described above as well as our biased locking technique in general. Complications arise in monitor-related optimizations such as lock coarsening in JVMs which do not maintain such invariants <ref type="bibr" target="#b15">[16]</ref>.</p><p>In summary, the following invariants in a programming language and virtual machine are essential prerequisites of our biased locking technique. First, the locking primitives in the language must be mostly block-structured. Second, compiled code, if it exists in the VM, must only be produced for methods with blockstructured locking. Third, interpreted execution must detect illegal locking states eagerly. These three invariants imply that an explicit recursion count for the lock is not necessary. Additionally, some mechanism must be present to record a "lock record" for the object externally to the object. In the Java HotSpot VM a lock record is allocated on the stack, although it might be allocated elsewhere.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Store-Free Biased Locking</head><p>Assuming the invariants in Section 2, the SFBL algorithm is simple to describe. When an object is allocated and biasing is enabled for its data type (discussed further in Section 4), a bias pattern is placed in the mark word indicating that the object is biasable (figure <ref type="figure">1</ref>). The Java HotSpot VM uses the value 0x5 in the low three bits of the mark word as the bias pattern.</p><p>The thread ID may be a direct pointer to the JVM's internal representation of the current thread, suitably aligned so that the low bits are zero. Alternatively, a dense numbering scheme may be used to allow better packing of thread IDs and potentially more fields in the biasable object mark word.</p><p>During lock acquisition of a biasable but unbiased object, an attempt is made to CAS the current thread ID into the mark word's thread ID field. If this CAS succeeds, the object is now biased toward the current thread, as in figure <ref type="figure" target="#fig_0">2</ref>. The current thread becomes the bias owner. The bias pattern remains in the mark word alongside the thread ID.</p><p>If the CAS fails, another thread is the bias owner, so that thread's bias must be revoked. The state of the object will be made to appear as if it had been locked by the bias owner using the JVM's underlying lightweight locking scheme. To do this, the thread attempting to bias the object toward itself must manipulate the stack of the bias owner. To enable this a global safepoint is reached, at which point no thread is executing bytecodes. The bias owner's stack is walked and the lock records associated with the object are filled in with the values that would have been produced had lightweight locking been used to lock the object. Next, the object's mark word is updated to point to the oldest associated lock record on the stack. Finally, the threads blocked on the safepoint are released. Note that if the lock were not actually held at the present moment in time by the bias owner, it would be correct to revert the object back to the "biasable but unbiased" state and re-attempt the CAS to acquire the bias. This possibility is discussed further in section 4.</p><p>If the CAS succeeded, subsequent lock acquisitions examine the object's mark word. If the object is biasable and the bias owner is the current thread, the lock is acquired with no further work and no updates to the object header; the displaced mark word in the lock record on the stack is left uninitialized, since it will never be examined while the object is biasable. If the object is not biasable, lightweight locking and its fallback paths are used to acquire the lock. If the object is biasable but biased toward another thread, the CAS failure path described in the previous paragraph will be taken, including the associated bias revocation.</p><p>When an object is unlocked, the state of its mark word is tested to see if the bias pattern is still present. If it is, the unlock operation succeeds with no other tests. It is not even necessary to test whether the thread ID is equal to the current thread's ID. If another thread had attempted to acquire the lock while the current thread was actually holding the lock and not just the bias, the bias revocation process would have ensured that the object's mark word was reverted to the unbiasable state.</p><p>Since the SFBL unlock path does no error checking, the correctness of the unlock path hinges on the interpreter's detection of unstructured locking. The lock records in interpreter activations ensure that the body of the monitorexit operation will not be executed if the object was not locked in the current activation. The guarantee of matched monitors in compiled code implies that no error checking is required in the SFBL unlock path in compiled code.</p><p>Figure <ref type="figure" target="#fig_0">2</ref> shows the state transitions of the mark word of an object under the biased locking algorithm. The bulk rebiasing edge, which is described further in sections 4 and 5, is only an effective, not an actual, transition and does not necessarily involve an update to the object's mark word. Recursive locking edges, which update the on-stack lock records but not the mark word, and the heavyweight locking state, which involves contention with one or more other threads, are omitted for clarity. thread is profitable, in particular when one thread allocates many objects and performs an initial synchronization operation on each, but another thread performs subsequent work on them.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Bulk Rebiasing and Revocation</head><p>When attempting to selectively disable biased locking, we must be able to identify objects for which it is unprofitable. If one were able to associate an object with its allocation site, one might find patterns of shared objects; for example, all objects allocated at a particular site might seem to be shared between multiple threads. Experiments indicate this correlation is present in many programs <ref type="bibr" target="#b5">[6]</ref>. Being able to selectively disable the insertion of the biasable mark word at that site would be ideal. However, due to its overhead, allocation site tracking is to the best of our knowledge not currently exploited in production JVMs.</p><p>We have found empirically that selectively disabling SFBL for a particular data type is a reasonable way to avoid unprofitable situations. We therefore amortize the cost of rebiasing and individual object bias revocation by performing such rebiasing and revoking in bulk on a per-data-type basis.</p><p>Heuristics are added to the basic SFBL algorithm to estimate the cost of individual bias revocations on a per-data-type basis. When the cost exceeds a certain threshold, a bulk rebias operation is attempted. All biasable instances of the data type have their bias owner reset, so that the next thread to lock the object will reacquire the bias. Any biasable instance currently locked by a thread may optionally have its bias revoked or left alone.</p><p>If bias revocations for individual instances of a given data type persist after one or more bulk rebias operations, a bulk revocation is performed. The mark words of all biasable instances of the data type are reset to the lightweight locking algorithm's initial value. For currently-locked and biasable instances, the appropriate lock records are written to the stack, and their mark words are adjusted to point to the oldest lock record. Further, SFBL is disabled for any newly allocated instances of the data type.</p><p>The most obvious way of finding all instances of a certain data type is to walk through the object heap, which is how these techniques were initially implemented (Section 5 describes the current implementation). Despite the computational expense involved, bulk rebiasing and revocation are surprisingly effective.</p><p>Figure <ref type="figure" target="#fig_1">3</ref> illustrates the benefits of the bulk revocation and rebiasing heuristics compared to the basic biased locking algorithm 2 . The javac sub-benchmark from SPECjvm98 computes many identity hash codes, forcing bias revocation of the affected objects since there are no bits available to store the hash code in the biasable state 2 Machine configuration is "2xAMD" described in Section 6.</p><p>(see figure <ref type="figure">1</ref>). Bulk revocation benefits this and similar situations, here in particular because our early implementations performed relatively inefficient bias revocation in this case. SPECjbb2000 and SPECjbb2005 transfer a certain number of objects between threads as each warehouse is added to the benchmark, not enough to impact scores greatly but enough to trigger the bulk revocation heuristic. The addition of bulk rebiasing, which is then triggered at the time of addition of each warehouse, reclaims the gains to be had.</p><p>Note that the addition of both bulk revocation and rebiasing does not reduce the peak performance of biased locking compared to the basic algorithm without these operations. This is discussed further in Section 7.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Epoch-Based Bulk Rebiasing and Revocation</head><p>Though walking the object heap to implement bulk rebias and revocation algorithms is workable for relatively small heaps, it does not scale well as the heap grows. To address this problem, we introduce the concept of an epoch, a timestamp indicating the validity of the bias. As shown in figure <ref type="figure">1</ref>, the epoch is a bitfield in the mark word of biasable instances. Each data type has a corresponding epoch as long as the data type is biasable. An object is now considered biased toward a thread T if both the bias owner in the mark word is T, and the epoch of the instance is equal to the epoch of the data type.</p><p>With this scheme, bulk rebiasing of objects of class C becomes much less costly. We still stop all mutator threads at a safepoint; without stopping the mutator threads we cannot reliably tell whether or not a biased object is currently locked. The thread performing the rebiasing:</p><p>1. Increments the epoch number of class C. This is a fixed-width integer, with the same bit-width in the class as in the object headers. Thus, the increment operation may cause wrapping, but as we will argue below, this does not compromise correctness.</p><p>2. Scans all thread stacks to locate objects of class C that are currently locked, updating their bias epochs to the new current bias epoch for class C. Alternatively, based on heuristic consideration, these objects' biases could be revoked.</p><p>No heap scan is necessary; objects whose epoch numbers were not changed will, for the most part, now have a different epoch number than their class, and will be considered to be in the biasable but unbiased state.</p><p>The pseudocode for the lock-acquisition operation then looks much like: Above we made the qualification that incrementing a class's bias epoch will "for the most part" rebias all objects of the given class. This qualification is necessary because of the finite width of the epoch field, which allows integer wrapping. If the epoch field is N bits wide, and X is an object of type T, then if 2ˆN bulk rebiasing operations for class T occur without any lock operation updating the bias epoch of X to the current epoch, then it will appear that X is again biased in the current epoch, that is, that its bias is valid. Note that this is purely a performance concern -it is perfectly permissible, from a correctness viewpoint, to consider X biased. It may mean that if a thread other than the bias holder attempts to lock X, an individual bias revocation operation may be required. But a sufficiently large value of N can decrease the frequency of this situation significantly: objects that are actually locked between one epoch and the next have their epoch updated to the current epoch, so this situation only occurs with infrequently-locked objects. Further, we could arrange for operations that naturally visit all live objects, namely garbage collection, to normalize lock states, converting biased objects with invalid epochs into biasable-but-unbiased objects. (If done in a stop-world collection this can be done with non-atomic stores; in a concurrent marker, however, the lock word would have to be updated with an atomic operation, since the marking thread would potentially compete with mutator threads to modify the lock word.) Therefore, wrapping issues could also be prevented by choosing N large enough to make it highly likely that a full-heap garbage-collection would occur before 2ˆN bulk rebias operations for a given type can occur.</p><formula xml:id="formula_0">Listing 1.</formula><p>In practice, wrapping of the epoch field can be ignored. Benchmarking has not uncovered any situations where individual bias revocations are provoked due to epoch overflow. The current implementation of biased locking in the Java HotSpot VM normalizes object headers during GC, so the mark words of biasable objects with invalid epochs are reverted to the unbiased state. This is done purely to reduce the number of mark words preserved during GC, not to counteract epoch overflow.</p><p>It is a straightforward extension to support bulk revocation of biases of a given data type. Recall that in bulk revocation, unlike bulk rebiasing, it is desired to completely disable the biased locking optimization for the data type, instead of allowing the object to be potentially rebiased to a new thread. Rather than incrementing the epoch in the data type, the "biasable" property for that data type may be disabled, and a dynamic test of this property added to the lock sequence: This variant of the lock sequence is the one currently implemented in the Java HotSpot VM.</p><formula xml:id="formula_1">Listing 2.</formula><p>Epoch-based rebiasing and revocation may also be extended to rebias objects at a granularity between the instance and class level. For example, we might distinguish between objects of a given class based on their allocation site; JIT-generated allocation code could be modified to insert an allocation site identifier in the object header. Each allocation site could have its own epoch, and the locking sequence could check the appropriate epoch for the object: To simplify the allocation path for new instances as well as storage of the per-data-type epochs, a prototype mark word is kept in each data type. This is the value to which the mark word of new instances will be set. The epoch is stored in the prototype mark word as long as the prototype is biasable.</p><p>In practice, a single logical XOR operation in assembly code computes the bitwise difference between the instance's mark word and the prototype mark word of the data type. A sequence of tests are performed on the result of the XOR to determine whether the bias is held by the current thread and currently valid, whether the epoch has expired, whether the data type is no longer biasable, or whether the bias is assumed not held, and the system reacts appropriately. Listing 4 shows the complete SPARC assembly code for the lock acquisition path of SFBL with epochs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Results</head><p>Figure <ref type="figure" target="#fig_2">4</ref> shows the performance impact of our biased locking and epoch-based bulk rebiasing and revocation technique on several industry-standard benchmarks on a variety of processor architectures and configurations 3 . (Figure <ref type="figure" target="#fig_3">5</ref> separates out the Monte Carlo benchmark from the SciMark suite to avoid distorting the graph.) These graphs illustrate not only the effectiveness of the technique, but also the relative cost of atomic operations on various CPUs.</p><p>Absolute performance comparisons with previous work <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref> are not possible, because as of this writing a JVM implementing the lock reservation technique has not been publicly released 4,5 . Even if such a JVM were available, isolating the effects of the lock reservation or biased locking techniques would be non-trivial. Differences in the optimizations performed by different dynamic compilers can cause even the relative speedup due to this optimization to differ; for example, if the overall generated code quality is low, the relative speedup due to biased locking might be less than if the overall code quality were high. We nonetheless observe that the magnitude of the improvements shown in figures 4 and 5 is comparable to previous work <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref>.</p><p>Some benchmarks clearly improve dramatically, while others show little or only modest improvement. In the SPECjvm98 benchmark suite, the db, jack, javac, and jess benchmarks show the most   improvement, while the others were largely unaffected. The composite score is improved by approximately 10-15%. In the SciMark suite, the Monte Carlo benchmark is greatly improved because its inner loop is dominated by synchronization overhead. The other benchmarks in this suite are largely unaffected by biased locking and due to the benchmark's scoring system only a roughly 5% overall speedup is attained. The SPECjbb2000 and SPECjbb2005 benchmarks net a 5-10% gain on most systems.</p><p>The SPLASH-2 <ref type="bibr" target="#b16">[17]</ref> benchmarks Water and Barnes are multithreaded scientific applications ported to Java and analyzed by Salcianu and Rinard <ref type="bibr" target="#b13">[14]</ref>. These two benchmarks have also been run under the lock reservation technique and its refinements <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref>. In our configuration, each of these benchmarks is run with 128 parallel compute threads over a duration of approximately 100 iterations per thread. We note that while our technique yields no speedup for these benchmarks, it also does not suffer the performance penalty of stop-the-owner lock reservation.</p><p>The results from these benchmarks indicate the relative cost of atomic operations on various CPUs. The Monte Carlo benchmark is effectively a synchronization microbenchmark and indicates that CMPXCHG is very costly on multiprocessor Intel x86 systems. The SPECjvm98 results support this conclusion, as the largest gains in this suite were also achieved on the multiprocessor Intel system. Multiprocessor UltraSPARC and AMD Opteron systems have better CAS and CMPXCHG performance, a conclusion again largely supported by the data. The db benchmark is an exception, where the largest gain was seen on an older UltraSPARC III system; we believe this may be related to relatively poor associativity of the data cache on this chip. The UltraSPARC T1 processor has a very cheap CAS instruction, so the gains from biased locking are relatively less on this architecture. The db benchmark from SPECjvm98 is again an outlier, which we believe again to be related to the data cache configuration on this chip.</p><p>The Volano benchmark is adversely affected by the SFBL algorithm. We believe this is due to the relatively high cost of per-object revocation in our system due to the need to reach a global safepoint. Volano in particular starts hundreds of threads to perform I/O, and the cost of a global safepoint increases as the number of concurrent threads increases. This is discussed further in section 7.</p><p>Figure <ref type="figure" target="#fig_4">6</ref> illustrates the scalability improvements of epoch-based bulk rebiasing and revocation. The graphs show the performance of a single-JVM run of the SPECjbb2005 benchmark on an Ultra-SPARC T1 processor. The maximum heap size is set to 3500 MB. In the left graph the bulk rebias and revocation operations are implemented by iterating through the object heap. In the right graph the epoch-based bulk rebias and revocation technique is used. In this benchmark, bulk rebias operations tend to occur at the beginning of each measurement period, when another concurrent worker thread is added to the benchmark. (The cost of these operations is included in the throughput computation due to the nature of the benchmark.) The ragged throughput curve in the left graph indicates poor scalability, or alternatively a high degree of variance in throughput, due to the high cost of the associated heap iterations.</p><p>Epoch-based bulk rebiasing and revocation clearly solve the scalability problems associated with these operations as the heap size increases.</p><p>Figure <ref type="figure">7</ref> provides as direct a comparison as possible of the effectiveness of biased locking with that of lock reservation <ref type="bibr" target="#b8">[9]</ref>. Column 2 shows the number of lock operations executed in typical runs of several benchmarks 6 . The absolute number of lock operations executed for any particular benchmark is not crucial; it more generally indicates whether the benchmark is synchronization-intensive. The percentages in columns 3 and 4 indicate the fraction of these lock operations which were optimizable by our biased locking implementation. Column 3 counts the initial bias of the object toward this overall fraction, while column 4 counts only the number of subsequent successful biased lock acquisitions. We report both numbers in the interest of full disclosure, though the difference is most significant only for the SPECjbb2000 benchmark. The data in column 5 is that presented in Table <ref type="table">5</ref> in <ref type="bibr" target="#b8">[9]</ref>; the benchmarks were chosen to match those presented in this earlier work.</p><p>These statistics indicate that the effectiveness of biased locking compares favorably to that of lock reservation. The percentage of optimized lock operations in the synchronization-heavy SPECjvm98 benchmarks is roughly equal in both algorithms. Biased locking appears to be able to optimize a much larger percentage of the lock operations in the SPECjbb2000 benchmark. We believe this is attributable to bulk rebiasing, which is heuristically triggered soon after the addition of each new warehouse in a given run. It appears that this benchmark transfers significant numbers of biased objects between threads. However, we did not find that the relative speedup on this benchmark due to biased locking was significantly greater than that due to lock reservation. This indicates that multiple metrics must be used to evaluate such techniques, and also suggests that the additional optimized synchronized lock operations are not in the benchmark's critical code path. On the Volano benchmark, biased locking does not optimize as many lock operations as lock reservation. Note also that this is the benchmark on which biased locking yields a performance degradation rather than a gain. Here there appears to be a correlation between the percentage of optimized locks and the benchmark's overall performance, 6 Machine configuration is "2xAMD" described earlier.</p><p>though this percentage alone is again not sufficient to completely evaluate the algorithm.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Comparison to Earlier Work</head><p>SFBL is similar to, and is inspired by, lock reservation <ref type="bibr" target="#b8">[9]</ref> and its refinements <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref>. Lock reservation is directly comparable to our basic biased locking technique described in Section 3. Both techniques eliminate all atomic operations for uncontended synchronization and have a severe penalty for bias revocation. Our technique avoids subtle race conditions because objects' headers are not repeatedly updated with non-atomic stores. However, because an explicit recursion count is not maintained, it is more difficult in our technique to determine at any given point in time whether a biased lock is actually held by a given thread.</p><p>The global safepoint required for bias revocation in our technique is more expensive than the signal used in lock reservation. It can be a barrier to scalability in applications such as Volano with many threads, many contended lock operations, and ongoing dynamic class loading. However, our experience has been that the combination of these characteristics in an application is rare. We have prototyped a per-thread safepoint mechanism and are investigating its performance characteristics. We also believe a less expensive per-object bias revocation technique is possible for uncontended locks while maintaining the useful locking invariants in the Java HotSpot VM, and plan to investigate this in the future.</p><p>Reservation-based spin locks <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref> are comparable to our addition of bulk rebiasing and revocation described in Section 4. Both techniques build on top of an underlying biased locking algorithm to reduce the impact of bias revocation. An advantage of reservation-based spin locks is that they largely eliminate, rather than reduce or amortize, the cost of bias revocation. However, reservation-based spin locks do not support transfer of bias ownership between threads. The first thread to lock a given object will always be the bias owner, and other threads will still need to use atomic operations to enter and exit the lock, eliminating the benefits of the optimization for these other threads. In contrast, epoch-based bulk rebiasing allows direct transfer of biases in the aggregate from one thread to another, at the cost of a small number of per-object revocations. Our experience indicates this supports optimization of significantly more synchronization patterns in real programs.</p><p>Neither reservation-based spin locks nor our algorithm optimize the case of a single object or small set of objects being locked and unlocked multiple times sequentially by two or more threads, but always in uncontended fashion. Our bulk rebiasing technique optimizes this case in the aggregate, when many such objects are locked in this pattern. Efficient optimization of this synchronization pattern is an important area for future research.</p><p>Reservation-based spin locks appear to adversely impact the peak performance of the lock reservation optimization as can be seen in the published results for db and jack <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b9">10]</ref>. In contrast, epoch-based bulk rebiasing and revocation appear to reduce the adverse impacts of the biased locking optimization without impacting peak performance, as shown in Sections 4 and 6. We believe the high cost of per-object bias revocation in our system is responsible for the negative impact on the Volano benchmark, and plan to reduce this cost in the future. Nonetheless, feedback from customers indicates that our current biased locking implementation yields good results in the field with no pathological performance problems.</p><p>Speculative locking <ref type="bibr" target="#b6">[7]</ref>, another biased locking technique, eliminates all synchronization-related atomic operations, but requires a separate field in each object instance to hold the thread ID. This space increase makes the technique unsuitable for most data types. Additionally, speculative locking does not support the transfer of bias ownership from one thread to another, nor selective disabling of the optimization where unprofitable.</p><p>Previous lightweight locking techniques <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b1">2,</ref><ref type="bibr" target="#b4">5]</ref> exhibit quite different performance characteristics for contended and uncontended locking and contain very different techniques for falling back to heavyweight operating system locks under contention. Some of these techniques use only one atomic operation per pair of lock/unlock operations rather than two. Nonetheless, all of these techniques use at least one atomic operation per lock/unlock sequence so are not directly comparable to SFBL. Potentially, any of these techniques could be used as the underlying synchronization technique for SFBL or a similar biased locking technique.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.">Availability</head><p>Our technique is implemented in the current development version of the Java HotSpot VM. Binaries for various architectures and source code can be downloaded from http://mustang.dev.java.net/. The current build contains the per-data-type epoch-based rebiasing and revocation presented here. The biased locking optimization is currently enabled by default and can be disabled for comparison purposes by specifying -XX:-UseBiasedLocking on the command line.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9.">Conclusion</head><p>Current trends toward multiprocessor systems in the computing industry make synchronization-related atomic operations an increasing impediment to the scalability of applications. Biased locking techniques are crucial to continued performance improvement of programming language implementations.</p><p>We have presented a new biased locking technique which optimizes more synchronization patterns than previous techniques:</p><p>• It eliminates repeated stores to the object header. Store elimination makes it easier to transfer bias ownership between threads.</p><p>• It introduces bulk rebiasing and revocation to amortize the cost of per-object bias revocation while retaining the benefits of biased locking.</p><p>• Epoch-based bulk rebiasing and revocation yield efficient bulk transfer of bias ownership from one thread to another.</p><p>Our technique is applicable to any programming language and virtual machine with mostly block-structured locking and a few invariants in the interpreter and dynamic compiler. It yields good performance increases on a range of benchmarks with few penalties, and customer feedback indicates that it performs well on Java programs in the field. We believe our technique can be extended to optimize even more synchronization patterns.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. State transitions of an object's mark word under biased locking.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Percentage speedups yielded by basic SFBL algorithm and additions of first bulk revocation and then also bulk rebiasing.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. Percentage speedup/slowdown of SPECjvm98, SciMark, SPECjbb, Volano, and SPLASH-2 benchmarks due to biased locking.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 5 .</head><label>5</label><figDesc>Figure 5. Percentage speedup of Monte Carlo benchmark from SciMark suite due to biased locking.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 6 .</head><label>6</label><figDesc>Figure 6. Scalability of a single-JVM SPECjbb2005 run on Ultra-SPARC T1 before and after the introduction of epoch-based bulk rebiasing and revocation.</figDesc><graphic coords="7,313.09,323.01,243.04,121.80" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>Biased locking acquisition supporting epoch-based bulk rebiasing.</figDesc><table><row><cell>void lock(Object* obj, Thread* t) {</cell></row><row><cell>int lw = obj-&gt;lock_word;</cell></row><row><cell>if (lock_state(lw) == Biased</cell></row><row><cell>&amp;&amp; bias_epoch(lw) ==</cell></row><row><cell>obj-&gt;class-&gt;bias_epoch) {</cell></row><row><cell>if (lock_or_bias_owner(lw) == t-&gt;id) {</cell></row><row><cell>// Current thread is the bias owner.</cell></row><row><cell>return;</cell></row><row><cell>} else {</cell></row><row><cell>// Need to revoke the object's bias.</cell></row><row><cell>revoke_bias(obj, t);</cell></row><row><cell>}</cell></row><row><cell>} else {</cell></row><row><cell>// normal locking/unlocking protocol,</cell></row><row><cell>// possibly with bias acquisition.</cell></row><row><cell>}</cell></row><row><cell>}</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head></head><label></label><figDesc>SPARC assembly code for SFBL lock acquisition with epochs. // inputs: Robj = pointer to object, Rmark = object's mark word, Rtemp = temporary // globals: Gthread = register containing current thread pointer // effects: sets condition codes before branching to DONE label. The mark has the bias pattern and we are not the bias owner in the current epoch. // Figure out more details about the state of the mark in order to know what operations can be // legally performed on the object's mark. // If the low three bits in the xor result aren't clear, that means the prototype mark is no longer // biased and we have to revoke the object's bias. btst biased_lock_mask, Rtemp br notZero, false, pn, TRY_REVOKE_BIAS // Biasing is still enabled for this data type. See whether the epoch of the current bias is still // valid. If not, attempt to rebias the object toward the current thread. btst epoch_mask, Rtemp br notZero, false, pn, TRY_REBIAS // Epoch of the current bias is still valid but owner is unknown. Try to acquire bias using an // atomic operation. If this fails the object's bias will be revoked. Note that we first construct // the presumed unbiased mark so we don't accidentally destroy another thread's valid bias. Try to reset the mark of this object to the prototype value and fall through to the CAS-based // fast locking. Note that if CAS fails, it means that another thread raced to revoke the bias of // this particular object, so it's still okay to continue in the normal locking code.</figDesc><table><row><cell>3 2xP4: 2-CPU 3.06 GHz Hyperthreaded Pentium IV, 4 GB RAM, Solaris 9 2xAMD: 2-CPU 1.8 GHz AMD Opteron, 2 GB RAM, Suse Linux 8 SP3 4xAMD: 4-CPU 2.2 GHz Dual-core AMD Opteron, 16 GB RAM, Solaris 10 2xUS-III: 2-CPU 750 MHz UltraSPARC III, 2 GB RAM, Solaris 8 1xUS-T1: 1-CPU 1.2 GHz 8-core (32-thread) UltraSPARC T1, 32 GB RAM, Solaris 10 NOT EQUAL =&gt; fast lock failed, go to slow case in run-time system EQUAL =&gt; fast lock succeeded // Test whether the lock is currently biased toward our thread and whether the epoch is still valid // // Note that the runtime guarantees sufficient alignment of thread pointers to allow age to be // placed into low bits and3 Rmark, biased_lock_mask /* 0b111 */, Rtemp cmp Rtemp, bias_pattern /* 0b101 */ br notEqual, false /* annul next instruction */, pn /* predict not taken */, CAS_LABEL ld_ptr [Robj + class_offset], Rtemp ld_ptr [Rtemp + prototype_mark_offset], Rtemp or3 Gthread, Rtemp, Rtemp xor3 Rmark, Rtemp, Rtemp andcc Rtemp, ~age_mask, Rtemp br equal, true, pt, DONE_LABEL nop // and3 Rmark, biased_lock_mask | age_mask | epoch_mask, Rmark or3 Gthread, Rmark, Rtemp cas Robj, Rmark, Rtemp // Test whether bias succeeded; if not, DONE path will revoke bias cmp Rmark, Rtemp br always, false, pt, DONE nop TRY_REBIAS: // Epoch has expired; attempt to acquire bias anew ld ptr [Robj + class_offset], Rtemp ld ptr [Rtemp + prototype_mark_offset], Rtemp or3 Gthread, Rtemp, Rtemp cas Robj, Rmark, Rtemp // Test whether bias succeeded; if not, DONE path will revoke bias cmp Rmark, Rtemp br always, false, pt, DONE nop TRY_REVOKE_BIAS: // ld_ptr [Robj + class_offset], Rtemp ld_ptr [Rtemp + prototype_mark_offset], Rtemp cas Robj, Rmark, Rtemp // Fall through to the normal CAS-based lock 32-bit JVMs used on all configurations. Listing 4. // CAS_LABEL:</cell></row><row><cell>// Normal CAS-based locking code</cell></row><row><cell>// ...</cell></row><row><cell>DONE:</cell></row><row><cell>// Test of condition codes and call to slow case in run-time system if necessary;</cell></row><row><cell>// continuation of program</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>An arbitrary Java virtual machine implementation is hereafter referred to as a JVM.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" xml:id="foot_1"><p>Analysis of execution logs of SFBL for the SPECjvm98, SPECjbb-2000, SPECjbb2005 and SciMark benchmark suites yields two insights. First, there are certain objects for which biased locking is obviously unprofitable, such as producer-consumer queues where two or more threads are involved. Such objects necessarily have lock contention, and many such objects may be allocated during a program's execution. It would be ideal to be able to identify such objects and disable biased locking only for them. Second, there are situations in which the ability to rebias a set of objects to another</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_2"><p>In the week before final submission of this paper, IBM released SPECjbb2005 scores with a JVM, due to ship in September 2006, supporting an -XlockReservation command line option for the first time.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_3"><p><ref type="bibr" target="#b4">5</ref> Since the first availability of biased locking in the Sun JVM, BEA has introduced an -Xlazyunlocking JVM command-line option, the implementation of which is undocumented.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>We thank David Cox, our manager, for supporting this work; Gilad Bracha, Dave Dice, Paul Hohensee, Vladimir Kozlov, and Tom Rodriguez for reviewing early drafts of this paper; and Martin Rinard and Alex Salcianu for access to their Java ports of the Water and Barnes benchmarks. We also thank the anonymous reviewers for their helpful comments and suggestions.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">An efficient meta-lock for ubiquitous synchronization</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Agesen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Detlefs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Garthwaite</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Knippel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Ramakrishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>White</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">proceedings of OOPSLA &apos;99</title>
+		<meeting>OOPSLA &apos;99</meeting>
+		<imprint>
+			<date type="published" when="1999-11">November 1999</date>
+			<biblScope unit="page" from="207" to="222" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Thin locks: featherweight synchronization for Java</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">F</forename><surname>Bacon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Konuru</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Murthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Serrano</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">proceedings of PLDI &apos;98</title>
+		<meeting>PLDI &apos;98</meeting>
+		<imprint>
+			<date type="published" when="1998-06">June 1998</date>
+			<biblScope unit="page" from="258" to="268" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Method and apparatus to provide concurrency control over objects without atomic operations on nonshared objects</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">F</forename><surname>Bacon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Fink</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">U.S. Patent Number</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+		</imprint>
+	</monogr>
+	<note>issued August 3, 2004. Assignee: International Business Machines Corporation</note>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Method and apparatus for concurrent thread synchronization</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Bak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">G</forename><surname>Lindholm</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">U.S. Patent Number</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<date type="published" when="2000-12-26">December 26, 2000</date>
+			<publisher>Assignee: Sun Microsystems, Inc</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Implementing fast Java monitors with relaxed locks</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Dice</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">proceedings of the Java Virtual Machine Research and Technology Symposium (JVM &apos;01)</title>
+		<meeting>the Java Virtual Machine Research and Technology Symposium (JVM &apos;01)</meeting>
+		<imprint>
+			<date type="published" when="2001-04">April 2001</date>
+			<biblScope unit="page" from="79" to="90" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">D</forename><surname>Dice</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+	<note>Personal communication</note>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Method and apparatus for speculatively locking objects in an object-based system</title>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">A</forename><surname>Gomes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Bak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">P</forename><surname>Stoutamire</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">U.S. Patent Number</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<date type="published" when="2002-11-26">November 26. 2002</date>
+			<publisher>Assignee: Sun Microsystems, Inc</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">A compiler for the Java HotSpot TM virtual machine. The School of Niklaus Wirth</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Griesemer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mitrovic</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The Art of Simplicity</title>
+		<imprint>
+			<date type="published" when="2000-01">January 2000</date>
+			<biblScope unit="page" from="133" to="152" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Lock reservation: Java locks can mostly do without atomic operations</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kawachiya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Koseki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Onodera</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">proceedings of OOPSLA &apos;02</title>
+		<meeting>OOPSLA &apos;02</meeting>
+		<imprint>
+			<date type="published" when="2002-11">November 2002</date>
+			<biblScope unit="page" from="130" to="141" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kawachiya</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+		<respStmt>
+			<orgName>Graduate School of Media and Governance at Keio University</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Ph.D thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">The Java TM Virtual Machine Specification, Second Edition</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Lindholm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Yellin</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+			<publisher>Addison-Wesley</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Lock reservation for Java reconsidered</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Onodera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kawachiya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Koseki</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">proceedings of ECOOP &apos;04</title>
+		<meeting>ECOOP &apos;04</meeting>
+		<imprint>
+			<date type="published" when="2004-06">June 2004</date>
+			<biblScope unit="page" from="559" to="583" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">The Java HotSpot TM server compiler</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Paleczny</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Vick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Click</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">proceedings of the Java Virtual Machine Research and Technology Symposium (JVM &apos;01)</title>
+		<meeting>the Java Virtual Machine Research and Technology Symposium (JVM &apos;01)</meeting>
+		<imprint>
+			<date type="published" when="2001-04">April 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Pointer and escape analysis for multithreaded programs</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Salcianu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Rinard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Eighth ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming</title>
+		<meeting>the Eighth ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming<address><addrLine>Snowbird, Utah</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2001-06">June 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">System and method for facilitating safepoint synchronization in a multithreaded computer system</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">W</forename><surname>Schmidt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">U.S. Patent Number</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<biblScope unit="page">59</biblScope>
+			<date type="published" when="2003-02-18">February 18, 2003</date>
+			<publisher>Assignee: Sun Microsystems, Inc</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Accelerating Java synchronization in Just-In-Time compiler-generated code. 3rd Workshop on Compiler-Driven Performance</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stoodley</surname></persName>
+		</author>
+		<ptr target="http://www.cs.ualberta.ca/~amaral/cascon/CDP04/" />
+		<imprint>
+			<date type="published" when="2004-10">October 2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">The SPLASH-2 programs: characterization and methodological considerations</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">C</forename><surname>Woo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ohara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Torrie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">P</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 22nd International Symposium on Computer Architecture</title>
+		<meeting>the 22nd International Symposium on Computer Architecture<address><addrLine>Santa Margherita Ligure, Italy</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1995-06">June 1995</date>
+			<biblScope unit="page" from="24" to="36" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

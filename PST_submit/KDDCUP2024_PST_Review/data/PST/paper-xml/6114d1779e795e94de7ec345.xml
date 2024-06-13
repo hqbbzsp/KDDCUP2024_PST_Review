@@ -1,0 +1,2623 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">DMon: Efficient Detection and Correction of Data Locality Problems Using Selective Profiling</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Tanvir</forename><forename type="middle">Ahmed</forename><surname>Khan</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of Michigan</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Ian</forename><surname>Neal</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">University of Michigan</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Gilles</forename><surname>Pokam</surname></persName>
+							<affiliation key="aff2">
+								<orgName type="institution">Intel Corporation</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Barzan</forename><surname>Mozafari</surname></persName>
+							<affiliation key="aff3">
+								<orgName type="institution">University of Michigan</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Baris</forename><surname>Kasikci</surname></persName>
+							<affiliation key="aff4">
+								<orgName type="institution">University of Michigan</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">DMon: Efficient Detection and Correction of Data Locality Problems Using Selective Profiling</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:33+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Poor data locality hurts an application's performance. While compiler-based techniques have been proposed to improve data locality, they depend on heuristics, which can sometimes hurt performance. Therefore, developers typically find data locality issues via dynamic profiling and repair them manually. Alas, existing profiling techniques incur high overhead when used to identify data locality problems and cannot be deployed in production, where programs may exhibit previously-unseen performance problems.</p><p>We present selective profiling, a technique that locates data locality problems with low-enough overhead that is suitable for production use. To achieve low overhead, selective profiling gathers runtime execution information selectively and incrementally. Using selective profiling, we build DMon, a system that can automatically locate data locality problems in production, identify access patterns that hurt locality, and repair such patterns using targeted optimizations.</p><p>Thanks to selective profiling, DMon's profiling overhead is 1.36% on average, making it feasible for production use. DMon's targeted optimizations provide 16.83% speedup on average (up to 53.14%), compared to a baseline that uses the highest level of compiler optimization. DMon speeds up PostgreSQL, one of the most popular database systems, by 6.64% on average (up to 17.48%). grants #1553169, #1629397, #2010810, and the Applications Driving Architectures (ADA) Research Center, a JUMP Center co-sponsored by SRC and DARPA. Any opinions, findings, conclusions, or recommendations expressed in this material are those of the authors and do not necessarily reflect the views of the funding agencies. We thank Yifan Zhao for running several PostgreSQL experiments. We also thank Xiaohe Cheng, Zhiqi Chen, and Shariq Hafeez for testing DMon on various applications. Finally, we thank Kevin Loughlin for his feedback on this paper's earlier versions.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Poor data locality is the root cause of many performance problems <ref type="bibr" target="#b5">[6,</ref><ref type="bibr" target="#b32">34,</ref><ref type="bibr" target="#b47">48]</ref>. Rapidly increasing data footprints of modern applications due to heavily data-driven use cases (e.g., analytics <ref type="bibr" target="#b108">[109]</ref>, machine learning <ref type="bibr" target="#b0">[1]</ref>, etc.) make matters worse, precipitating data locality problems further <ref type="bibr" target="#b5">[6]</ref>.</p><p>Recent work shows that up to 64% of all CPU cycles are lost due to poor data locality for widely used data center applications <ref type="bibr" target="#b89">[90]</ref>.</p><p>Although many compiler optimizations aim to eliminate data locality problems statically <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b22">22,</ref><ref type="bibr" target="#b23">23,</ref><ref type="bibr" target="#b69">70,</ref><ref type="bibr" target="#b70">71]</ref>, such optimizations rely on compile-time heuristics, which may not accurately identify and repair problems that manifest dynami-cally at run time. In fact, as we ( §6.2) and others <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b25">27]</ref> demonstrate, compiler-based techniques can sometimes even hurt performance when the assumptions made by those heuristics do not hold in practice.</p><p>To overcome the limitations of static optimizations, the systems community has invested substantial effort in developing dynamic profiling tools <ref type="bibr" target="#b26">[28,</ref><ref type="bibr" target="#b36">38,</ref><ref type="bibr" target="#b56">57,</ref><ref type="bibr">97,</ref><ref type="bibr" target="#b100">102]</ref>. Dynamic profilers are capable of gathering detailed and more accurate execution information, which a developer can use to identify and resolve data locality problems.</p><p>Traditionally, existing dynamic profiling tools have been used offline, namely during testing and development, where test cases are designed to adequately represent real-world program behavior. However, due to the proliferation of cloud computing and mobile devices, programs exhibit vast variations in terms of how they execute and consume data in production <ref type="bibr" target="#b47">[48,</ref><ref type="bibr" target="#b83">84]</ref>. Consequently, it has become increasingly difficult for offline profiling to be representative of how programs behave in production settings.</p><p>Unfortunately, existing dynamic profilers incur considerable overheads when used to detect data locality issues, and therefore they are not suitable for production environments <ref type="bibr">[13, 57, 60-62, 77, 78]</ref>.</p><p>In this paper, we present selective profiling, a data locality profiling technique that not only accurately detects data locality problems, but also incurs low overhead, making it suitable for production deployment. Using selective profiling, we design DMon, a system that can automatically detect and eliminate data locality problems in production systems.</p><p>Selective profiling is a lightweight technique to continuously monitor production executions for symptoms of poor data locality (e.g., frequent memory stalls, increased cache misses, etc.). As these high-level indicators of data locality problems are identified, selective profiling automatically transitions to incrementally monitoring more precise information about the source location and exact cause of the data locality problem-this is done by traversing a hierarchical abstraction we introduce, called the data locality tree ( §3), which allows DMon to monitor hardware events in a selective way to create an accurate profile at low run-time overhead.</p><p>After gathering the profile, DMon performs an offline analysis to identify common patterns of memory accesses. DMon then matches these patterns to a set of existing data locality optimizations ( §4.1), which it primarily applies automatically, in a targeted manner (unlike static techniques). For cases where DMon cannot automatically apply an optimization, it provides detailed information about the locality problem to the developer, who can fix the problem manually; in our evaluation, this case occurs only once and the developer can apply DMonsuggested optimization with minimal effort (&lt;10 LOC). We provide four optimization passes ( §4.2) which DMon can use to automatically fix data locality problems and are sufficient for DMon to fix major data locality problems we identify across the systems we test in our evaluation ( §6).</p><p>Selective profiling incurs 1.36% monitoring overhead on average, making it an ideal profiling technique for detecting data locality issues in production. The run-time overhead of selective profiling is significantly (i.e., 9×) lower than that of the state-of-the-art data locality profiler <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b67">68]</ref>. Overall, targeted optimizations performed by DMon for 13 applications deliver on average 16.83% (up to 53.14%) speedup. To show the effectiveness of DMon for large real-world systems, we applied DMon to PostgreSQL <ref type="bibr" target="#b91">[92]</ref>, a popular open-source database system, where DMon-guided optimizations provided on average 6.64% and up to 17.48% speedup across all 22 TPC-H [26] queries. Furthermore, the optimizations enabled by DMon provides 20% more speedup, on average, than optimizations provided by the same state-of-the-art profiler.</p><p>Overall, we make the following contributions:</p><p>• Selective profiling, a data locality profiling technique that automatically and incrementally monitors fine-grained execution information to accurately detect data locality problems with low overhead. • DMon, a system that implements selective profiling to detect data locality problems in production systems. DMon automatically selects specific optimizations based on memory access patterns, and applies these well-known optimization techniques automatically in most cases. • By evaluating DMon in the context of widely-used applications, we show that selective profiling can detect data locality issues in production with low overhead (1.36% on average). Moreover, we show that selective profile-guided targeted data locality optimizations provide significant performance speedup (16.83% on average, up to 53.14%).</p><p>We explain the key design challenge for accurately and efficiently detecting data locality problems in §2. We describe selective profiling in §3, DMon's design in §4, and DMon's implementation in §5. We evaluate DMon in §6, compare DMon to related work in §7, and conclude in §8.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Challenges</head><p>It is challenging to accurately pinpoint data locality problems, while incurring low run-time performance overhead.</p><p>Compiler-based static data locality optimizations <ref type="bibr" target="#b13">[14,</ref><ref type="bibr" target="#b69">70,</ref><ref type="bibr" target="#b70">71,</ref><ref type="bibr" target="#b81">82,</ref><ref type="bibr" target="#b90">91]</ref> are appealing because they incur no run-time overhead. However, static techniques apply optimizations based on compile-time heuristics, which may not accurately identify program locations that suffer from poor locality at run time. In fact, compiler-based techniques can sometimes even hurt performance when the assumptions made by those heuristics do not hold in practice <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b25">27]</ref>.</p><p>To demonstrate how compile-time heuristics can hurt performance, we use a compiler-based data prefetching technique <ref type="bibr" target="#b70">[71]</ref> to improve data locality in two matrix decomposition benchmarks <ref type="bibr" target="#b102">[104]</ref>, lu_cb and lu_ncb from the PARSEC suite <ref type="bibr" target="#b11">[12]</ref>. This optimization combines loop splitting and explicit data prefetching to increase data locality. Using the benchmarks' standard inputs, we determine that 50% of all the cache misses in lu_cb and lu_ncb stem from a single function, which we optimized using compiler-guided data prefetching <ref type="bibr" target="#b70">[71]</ref>. The optimization provides a 19.4% speedup for lu_ncb, but yields a 19.85% slowdown for lu_cb. This occurs because, for lu_ncb, prefetching reduces all cache misses; however, for lu_cb, there was a dramatic increase in L2 cache misses despite a reduction in L1 and L3 cache misses.</p><p>Dynamic profilers can accurately pinpoint data locality problems <ref type="bibr">[13, 57, 60-62, 77, 78]</ref>, however, they impose considerable overhead (i.e., &gt;10% on average), as they track too much information: memory accesses, timestamps, cache events, etc. Consequently, existing data locality profilers are not deployed in production.</p><p>A potential remedy to the high overhead of existing profilers is statistical sampling, which can collect information with reasonable overhead <ref type="bibr" target="#b8">[9]</ref>. For instance, the state-of-theart Intel VTune profiler <ref type="bibr" target="#b84">[85]</ref> samples information such as hardware and software performance counters, timestamps, program locations, and accessed memory addresses to gather the necessary information for detecting data locality issues.</p><p>Alas, even sampling is not enough to reduce the overhead incurred by popularly available profilers (e.g., Intel VTune) to detect data locality problems to levels acceptable for production use. To assess the impact of sampling, we use the state-of-the-art profiler VTune to detect the data locality issues in our evaluation targets. Despite sampling-based data collection, VTune still incurs 26% overhead on average (and up to 60%), which is unacceptable for production settings.</p><p>We argue that not only the monitored execution information must be deliberately chosen to only pertain to data locality problems, but monitoring must occur incrementally, only when there are increasingly clear signs of poor data locality. Next, we explain how selective profiling achieves this. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Front-end Bound</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Back-end Bound</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Selective Profiling</head><p>Selective profiling is a monitoring technique that incrementally monitors more detailed, yet more targeted, run-time information to identify data locality problems. Next, we discuss the three key components of selective profiling: (1) Targeted Monitoring, (2) Incremental Monitoring, and (3) Sampling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Targeted Monitoring</head><p>Unlike existing offline profilers <ref type="bibr" target="#b56">[57,</ref><ref type="bibr">97,</ref><ref type="bibr" target="#b96">98,</ref><ref type="bibr" target="#b100">102,</ref><ref type="bibr" target="#b104">106]</ref> that monitor many hardware events and information such as program locations, selective profiling needs to carefully choose which information to monitor in order to accurately and efficiently detect data locality problems. A straw-man approach is to only monitor events such as data cache misses, which are directly related to data locality problems. However, simply monitoring data cache misses in isolation can be misleading. For instance, a seemingly large number of data cache misses may have no impact on the performance of an application that spends a lot of time fetching instructions to execute (a common theme in modern Web services <ref type="bibr" target="#b7">[8,</ref><ref type="bibr" target="#b47">48]</ref>).</p><p>Selective profiling monitors a select group of hardware events that allow it to determine if the execution of a program is bounded by a subset of those events that we call the data locality tree. As shown in Fig. <ref type="figure">1</ref>, the data locality tree is a hierarchical abstraction of data locality-related performance events from Intel's Top-Down methodology <ref type="bibr" target="#b104">[106]</ref>. The Top-Down methodology provides a breakdown of performance events in Intel CPUs, which a developer can use as a guideline to navigate their manual profiling efforts. However, unlike Top-Down, selective profiling automatically transitions from one layer to another, incrementally monitoring more events at each layer of the tree, as increasing evidence of data locality issues is observed at run time.</p><p>At layer 1, selective profiling determines whether the execution is back-end bound-i.e., spends a large portion of If an execution is memory bound in layer 2, selective profiling monitors events that provide a breakdown of the execution into 4 categories in layer 3. Of those 4 categories, only 3 are related to data locality problems: L2 bound and L3 bound represent the time spent accessing the L2 and the L3 cache, respectively; "DRAM bound" represents the time spent accessing the DRAM. If a program is L1 bound, the data or instructions that the program uses are already as close to the processor as possible and it is hard to improve data locality further. In such cases, the program may have other performance problems, such as false sharing <ref type="bibr" target="#b92">[93]</ref> or lock contention <ref type="bibr" target="#b86">[87]</ref>.</p><p>Selective profiling also tracks information to map performance problems back to code. In layer 4, selective profiling records program location information along with hardware events. For example, if a program is L2 bound, selective profiling records L1 cache misses and the location of the instruction causing the miss. By locating and reducing L1 cache misses, the execution time will potentially not be L2 bound, and the locality problem will likely be fixed. Similarly, if a program is L3 or DRAM bound, selective profiling records L2 and L3 cache misses and associated program locations, respectively.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Incremental Monitoring</head><p>Unfortunately, merely restricting the scope of monitored performance events to the data locality tree is not sufficient for low overhead monitoring of data locality issues. Thus, selective profiling instead adopts an incremental monitoring approach. This approach increases the amount of information gathered at run time to efficiently identify program locations that may have a locality problem.</p><p>Fig. <ref type="figure">2</ref> shows the details of incremental monitoring. By default, selective profiling monitors the hardware events that provide the layer 1 breakdown. Selective profiling only transitions to monitoring layer 2 events if the execution is back-end bound for at least 10% of a time-slice p (100ms by default).</p><p>We use 10% as the default threshold, which we empirically determine to be a reasonable threshold ( §6.4). We also choose 100ms as a reasonable time-slice for our programs, since the shortest execution across our benchmarks was 1 second and the longest was 2867 seconds. Nonetheless, the percentage and monitoring periods are both configurable. We explore the sensitivity of our results to all these parameters in §6. <ref type="bibr" target="#b3">4</ref>.</p><p>If selective profiling determines that the execution is also memory bound for at least 10% of the same interval p, it starts monitoring layer 3 events. If selective profiling determines that the execution is L2, L3, or DRAM bound for at least 10% of the same interval p, it transitions to layer 4. Selective profiling then gathers L1, L2, and L3 cache miss events and program locations where the misses occur.</p><p>Incremental monitoring is key to ensuring selective profiling's low performance overhead. Successive layers are more costly to monitor as they must count more events-for example, layer 2 requires counting 3× more hardware performance events than layer 1. However, unless selective profiling determines that an execution is back-end bound, it only needs to monitor events at layer 1. As shown in §6.1, only monitoring layer 1 events incurs a negligible overhead (0.7% on average).</p><p>Programs can go through phases of different locality issues (e.g., L2 cache misses in one phase and L3 cache misses in another phase). Selective profiling can pinpoint the root cause of the locality problem for each phase, provided the duration of a given phase is at least 4p (where p is the duration of selective profiling's time-slice, per layer). If this time-slice is too long, selective profiling may miss some short-running phases. The time slice is configurable. We empirically determine that a time slice of 100ms is effective in practice ( §6.4).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Sampling</head><p>In addition to targeted and incremental monitoring, selective profiling also employs sampling at layer 4 for recording L1, L2, and L3 cache misses to further reduce the overhead. Although sampling can reduce run-time overhead, it can also reduce the coverage of data locality issues that selective profiling detects if the sampling period is too high. We define coverage as the ratio of the number of locality issues detected with a given sampling rate to the number of locality issues detected with the highest possible sampling rate.</p><p>By default, selective profiling uses a conservative sampling period of 1000 (1 sample per 1000 events), which we have empirically found to yield high coverage (97%, discussed in §6.4) in detecting locality problems across the 13 benchmarks we evaluated. The developer, however, can use a lower sampling period (up to 1 sample per 100 events, as allowed per Linux's perf interface). We analyze the coverage versus overhead trade-off of different sampling periods in §6.4.</p><p>Selective profiling does not apply sampling in layers 1-3 since sampling reduces coverage. Moreover, in layers 1-3, selective profiling's incremental monitoring reduces the overhead to a negligible amount in all tested applications (on average 1.36%). Therefore, selective profiling does not need to apply sampling at those layers. However, if the overhead of the first three layers is high, selective profiling can optionally enable sampling at those layers as well. Now, we describe how data locality information collected via selective profiling can be used to guide automated and manual profile-guided optimizations using DMon.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">DMon</head><p>Selective profiling detects program locations with poor data locality in production. DMon analyzes these locations offline to identify the data access patterns causing data locality issues. Based on the recognized access patterns, DMon applies existing compiler optimizations only to these program locations in a targeted manner to improve data locality. We offer four such optimizations which we describe in §4.2. These optimizations can be automatically applied in most cases for C/C++ applications; for applications written in other programming languages, selective profiling results can still enable manual optimizations ( §6.3).</p><p>Fig. <ref type="figure" target="#fig_0">3</ref> shows how DMon employs selective profiling to identify and eliminate data locality issues. In step 1 , DMon monitors programs in production to determine whether they suffer from poor locality using selective profiling.</p><p>Steps 2 -3 happen offline, during recompilation. In step 2 , DMon determines the memory access patterns that are causing poor data locality ( §4.1). In step 3 , based on the identified access patterns, either profile-guided automatic optimizations or manual optimizations can be performed to improve data locality ( §4.2). The optimized program is then rebuilt and redeployed in production.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Static Memory Access Pattern Analysis</head><p>Once selective profiling identifies memory access instructions that suffer from poor locality in production, DMon analyzes the corresponding program locations offline to determine the cause of the problems. DMon only analyzes memory access instructions that incur more than 10% of the total cache miss events sampled in layer 4 of selective profiling. To determine the patterns of data locality issues, we initially analyze the results of selective profiling manually for the benchmarks from the popular PARSEC <ref type="bibr" target="#b11">[12]</ref> benchmark suite. Based on our manual analysis of program statements causing data locality issues, we identify four key memory access patterns that can lead to poor data locality. Table <ref type="table" target="#tab_2">1</ref> shows one example of each of these memory access patterns that cause poor data locality. Perhaps unsurprisingly, all the accesses that contribute significantly to poor data locality are in loops that execute many times and access a relatively large amount of data compared to other memory access operations in the application. These four memory access patterns also cause data locality problems in a diverse set of real-world applications (as we show in §6.3).</p><p>For lu_ncb, most cache misses that hurt program performance happen while accessing arrays in a loop. Since the loop induction variable (i) is directly used to index those arrays, we call this pattern direct addressing. For radix, the loop induction variable (i) is used to index an auxiliary array to load an intermediate value (this_key). The loaded intermediate value is used as index while accessing another array, and the last access suffers from poor data locality. We categorize this pattern as indirect addressing.</p><p>For radiosity, most cache misses occur in a while loop, where two member variables (dst and next) of a structure (int_list) are accessed repeatedly. We determine that this structure also contains four other member variables not accessed in this loop. Since only accessing a subset of all member variables causes cache misses, we call this access pattern as unbalanced access. Finally, for dedup, locality suffers while accessing a chain of structure pointers (pointers H, Elmnts[Child], and seq, and finally a member variable l2num) in a loop. We denote this pattern as pointer chasing.</p><p>Based on findings of these manual observations, we design the static memory access pattern analysis component of DMon, as shown in Fig. <ref type="figure" target="#fig_1">4</ref>. Although DMon's pattern detection is inspired by the manual analysis of locality issues in PARSEC, we show in our evaluation that the patterns DMon identifies generalize to a broad set of systems ( §6.2 and §6.3). In particular, the four patterns of poor locality constitute the root causes of all the data locality problems we discover in nine other benchmarks that we had not studied previously. As shown in Fig. <ref type="figure" target="#fig_1">4</ref>, DMon determines the addressing mode of the memory instruction (i.e., direct or indirect addressing). If the access is made to a structure instance, DMon also determines the type of the access (i.e., unbalanced access and pointer chasing). We discuss each analysis next. Addressing mode. DMon's static analysis checks if the instruction uses direct or indirect addressing. Here, direct addressing occurs if the computation of the accessed location does not involve another memory address (e.g.,for(i=...)</p><formula xml:id="formula_0">a[i]).</formula><p>Conversely, indirect memory addressing occurs if the computation of the accessed location involves computing another memory address (e.g.,for(i=..</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>.) a[b[i]]).</head><p>Structure access pattern. In addition to determining the addressing mode, DMon's static analysis checks to see if the instruction accesses a member of a structure. DMon does this by mapping the instruction to the compiler intermediate representation and checking if it accesses a structure field. DMon searches for two patterns when a structure member is accessed, namely unbalanced access and pointer chasing.</p><p>DMon concludes that there is an unbalanced access pattern, when accesses to only a subset of member variables incur a large fraction of cache misses. Pointer chasing occurs when the accessed memory location belongs to a hierarchy of nested structures (e.g., A-&gt;B-&gt;C).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Optimizations Implemented in DMon</head><p>To show the usefulness of selective profiling, we implement four profile-guided data locality optimization passes using LLVM <ref type="bibr" target="#b55">[56]</ref> for C/C++ programs. Our passes optimize the four patterns of poor data locality that DMon identifies. For applications written in other languages, selective profiling results can be used to apply manual optimizations ( §6.3).</p><p>As shown in Fig. <ref type="figure" target="#fig_1">4</ref>, DMon recommends applying a specific optimization technique based on the addressing mode and the structure access patterns of the memory access instruction. While these optimizations are well-known and usually applied statically, selective profiling information enables the targeted Direct prefetching. The first optimization we implement uses direct prefetching <ref type="bibr" target="#b70">[71]</ref> to fix locality problems that stem from memory accesses that use direct addressing. Direct prefetching fetches the cache lines that a program will access in the near future into the cache to improve data locality.</p><p>At a high level, direct prefetching works by splitting each loop suffering from poor data locality into three loops, as shown in Fig. <ref type="figure">5</ref>. The first loop is responsible for prefetching the initial cache line that contains the data accessed by the loop. The second loop starts prefetching the next cache line(s). It also simultaneously performs the original computation that was carried out in the original loop, starting with the first prefetched cache line. The third and last loop completes the computation using the last prefetched cache line.</p><p>Direct prefetching can be applied based on compile-time heuristics only. However, this can cause significant performance degradation <ref type="bibr" target="#b27">[29]</ref>, as we also show in our evaluation ( §6.2). This happens because these heuristics might (1) bloat the code footprint by adding unnecessary prefetching instructions (e.g., for lines that would anyways be prefetched by the hardware prefetcher), and (2) cause cache pollution by prefetching data that is not frequently-accessed.</p><p>Direct prefetching can also be applied in hardware with popular hardware prefetchers including next-line and stride prefetchers that most modern processors supposedly employ <ref type="bibr" target="#b40">[42,</ref><ref type="bibr" target="#b93">94]</ref>. However, DMon finds that many directly addressed memory accesses suffer from poor data locality, because the underlying hardware prefetchers can not prefetch the cache lines in a timely manner. This is because prefetchers work in a reactive manner, i.e., it takes several iterations for the hardware prefetcher to detect the pattern and start prefetching, but if prefetching is done with explicit instructions, the performance benefits are immediate.</p><p>Instead of applying direct prefetching based on compiletime heuristics, our pass only applies it to program locations where DMon identifies that direct addressing access pattern is causing poor data locality.  Indirect prefetching. Our second optimization uses indirect prefetching <ref type="bibr" target="#b2">[3]</ref>, which is similar to direct prefetching in that it brings data that will soon be used into the cache. Unlike direct prefetching, indirect prefetching also has to prefetch one additional cache line per each level of indirection. Fig. <ref type="figure">6</ref> shows an example of indirect prefetching. Here, the original loop increments elements in an array, b. However, the index of the array b is computed using another array, a. The loop on the right side prefetches the cache line containing the elements of b that will be accessed in the near future (prefetch 2 ). Prefetching the elements of b requires accessing the elements of a. Thus, to prefetch the elements of b, we need to (1) have an array boundary check, and (2) also prefetch the cache line containing the elements of a (prefetch 1 ). Structure splitting. The third optimization, structure splitting, moves infrequently-accessed members of a structure with a pointer to a new structure that only contains those members. Structure splitting is beneficial only when the total size of infrequently-accessed member(s) is larger than the pointer size. Thus, the size of the original structure is reduced, fitting into fewer cache lines. During memory access pattern analysis, if DMon detects that an unbalanced access pattern (i.e., a subset of structure members are accessed more frequently than others) to members of a structure is causing poor locality, structure splitting is an appropriate optimization. Fig. <ref type="figure" target="#fig_3">7</ref> shows an example of structure splitting. Here, before structure splitting, the structure S has three members (a, b, c) of types A, B, C, respectively. In the original program, an instance of S spans two cache lines. Both cache lines need to be accessed each time the program accesses an instance of S. For example, if neither of these cache lines is present in the L1 cache, the program will incur two L1 cache misses.</p><p>After structure splitting, the new structure S' fits in a single cache line (Cache Line 1) because the infrequently-accessed member b is moved into a new structure S2, residing in its own cache line (Cache Line 2). Consequently, when the program accesses an instance of S, it will usually only need to access the cache line (Cache Line 1) containing the frequentlyaccessed members (a, c), which would incur a single L1 cache miss (rather than two).</p><p>Structure splitting has been previously explored <ref type="bibr" target="#b22">[22]</ref> in type-safe languages (e.g., Java). However, implementing structure splitting in a type-unsafe language (we target C/C++) is more challenging. This is because structure splitting needs to ensure that the program continues operating correctly when the layout of the structure is modified. More specifically, all the instructions that used to refer to the old layout need to be updated to refer to the new layout.</p><p>In our optimization pass, we addresses this challenge using a complete, interprocedural, inclusion-based pointer analysis <ref type="bibr" target="#b4">[5]</ref> that can determine all instructions that could possibly access the split structures. As shown in §6.2, this optimization can automatically be applied in all but one of the benchmarks.</p><p>Structure merging. The final optimization, structure merging, is the inverse of structure splitting as it replaces a frequently-accessed pointer member of a structure with the data that the pointer references. The key idea is to eliminate the pointer chasing pattern that DMon identifies by removing a level of indirection for frequently-accessed elements.</p><p>Fig. <ref type="figure" target="#fig_4">8</ref> shows an example of structure merging. Before merging, the structure S has three members (a, b, p) of types A, B, S2*, respectively. The instance of S resides in the first cache line, and the pointer p points to an instance of structure S2 that resides in the second cache line. The size of a, b, and c is such that they can all fit in one cache line. If c is accessed as frequently as a and b, then data locality can be improved by merging these two structures into one. This structure merge will also bypass one memory access (S'-&gt;C instead of S-&gt;S2-&gt;C). Structure merging only combines member variables across different structure types and hence does not perform exhaustive data structure conversions (e.g., transforming a linked list into an array) <ref type="bibr" target="#b22">[22,</ref><ref type="bibr" target="#b23">23]</ref>.</p><p>DMon employs structure merging conservatively so that it will only be applied if soundness can be guaranteed. In other words, DMon applies this optimization only if all updates via the structure pointer can be safely redirected (e.g., in Fig. <ref type="figure" target="#fig_4">8</ref>, all changes to S-&gt;S2-&gt;C could be replaced by S'-&gt;C). To ensure this, structure merging also uses the same pointer analysis <ref type="bibr" target="#b4">[5]</ref> that structure splitting uses.</p><p>Other optimizations.. DMon can be easily extended to accommodate additional optimizations if needed to fix different patterns of memory accesses which cause data locality problems. For example, DMon can work as a framework to apply optimizations like loop reordering, blocking, tiling, and strip mining in a profile-guided manner. However, many of these optimizations require expensive memory access trace collection which can not be deployed in production due to high  overheads <ref type="bibr" target="#b63">[64]</ref>. In the future, we intend to explore how these optimizations can be applied based on more efficient profiling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Implementation</head><p>DMon's selective profiling prototype is implemented for Intel processors. In particular, selective profiling relies on the Linux perf [97] interface for profiling hardware events in layers 1-4 ( §3). We initially build the benchmarks using debug information and the highest level of compiler optimization (-O3), and then use the strip utility <ref type="bibr" target="#b99">[101]</ref> to remove the debug information. During in-production monitoring, selective profiling records the program counter for each sampled cache miss event in layer 4. To efficiently deal with multi-threaded applications, selective profiling maintains a per-thread buffer (2MB per thread) to record the program counters. When the buffer gets full, the previous samples get overwritten. Offline, DMon uses the program counter, the stripped debug information, and the program binary to find the source code location where a cache miss occurred in production.</p><p>We implement DMon's optimizations in the LLVM [56] compiler framework. We use clang <ref type="bibr" target="#b97">[99]</ref> to generate the LLVM intermediate representation (IR) that the optimization passes of DMon can operate on. The optimizations rely on the program's debug information to map the source code location to LLVM IR, because a 1-to-1 mapping between machine code and LLVM IR does not exist.</p><p>Similar to other state-of-the-art profile-guided optimization techniques <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b67">68]</ref>, DMon's use of debug information for mapping machine code to LLVM and locating code locations to optimize can introduce inaccuracies. This happens due to optimizations such as inlining. Although it is possible to improve the accuracy of such mapping using more invasive instrumentation and tracing <ref type="bibr" target="#b6">[7]</ref>, this would be prohibitively costly for production usage <ref type="bibr" target="#b47">[48]</ref>. In our evaluation ( §6), we show that the accuracy provided by debug information can lead to substantial speedup.</p><p>The optimizations for structure splitting and structure merging use a whole-program pointer analysis <ref type="bibr" target="#b18">[19]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Evaluation</head><p>In this section, we first evaluate the efficiency of selective profiling by measuring its run-time monitoring overhead. Then, we evaluate the effectiveness of DMon by showing the extent to which fixing the locality problems detected by DMon improves performance of popular benchmarks. Next, we evaluate selective profiling's generality by applying it to widely-used real-world applications. Finally, we perform sensitivity studies to evaluate how DMon's overhead and detection results vary in response to changes of the different system parameters of DMon. Hardware. We use a 20-core 2.2 GHz Intel Xeon NUMA (with 2 sockets) machine, with 64 KB of L1-cache (32 KB instruction and 32 KB data), 1024 KB of L2-cache, 14 MB of L3-cache (shared across the same NUMA node), and 96 GB of RAM. Like most Intel processors, each core in the machine uses two hardware prefetchers (next-line and sequential load history driven prefetchers) in the L1 data cache and two hardware prefetchers (adjacent cache line and streaming prefetchers) in the L2 cache <ref type="bibr" target="#b40">[42,</ref><ref type="bibr" target="#b93">94]</ref>. We configure multithreaded applications and benchmarks to run with 8 threads.</p><p>Benchmarks. We use a combination of benchmarks and real-world programs that have been widely used in prior performance profiling and optimization work. In particular, we use all 12 benchmarks from the PARSEC <ref type="bibr" target="#b11">[12]</ref> suite, all 11 benchmarks from the SPLASH-2X <ref type="bibr" target="#b101">[103]</ref> suite, and all 3 benchmarks written in C from the NPB <ref type="bibr" target="#b9">[10]</ref> suite, as well as HashJoin, RandomAccess, kcstashtest, and DIS, which are programs with poor data locality from other popular benchmark suites <ref type="bibr" target="#b10">[11,</ref><ref type="bibr">24,</ref><ref type="bibr" target="#b62">63,</ref><ref type="bibr" target="#b72">73]</ref>. We also study one of the most popular and heavily-optimized open-source databases, PostgreSQL <ref type="bibr" target="#b80">[81]</ref>, running the TPC-H analytical workload <ref type="bibr">[26]</ref>. Finally, we study real-world applications from the Renaissance benchmark suite <ref type="bibr" target="#b82">[83]</ref>.</p><p>Metrics. In all our plots, we report speedup numbers as the ratio between the execution time of the original application compiled with the highest level of optimization (-O3) and its run time after applying DMon-guided optimizations. Negative speedup denotes slow-down. Similarly, we report selective profiling overhead as the percentage increase in benchmark execution time while enabling selective profiling. We report performance data as the average of 25 runs in all experiments.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Selective Profiling Efficiency</head><p>We evaluate the selective profiling efficiency by studying the overhead selective profiling incurs during dynamic detection of locality problems. Fig. <ref type="figure" target="#fig_6">9</ref> shows this overhead. We present results for all the benchmarks we evaluated, including the ones for which selective profiling did not find locality optimization opportunities. For each benchmark, we present the overhead of each layer of monitoring (1-4) that selective profiling employs. Since, selective profiling monitors only one layer at a time, the effective overhead for a given program is less than the maximum overhead across four layers. Across all layers and benchmarks, selective profiling incurs up to 4.92% overhead, and on average only 1.36% overhead. On average, selective profiling incurs an overhead of 0.7% in layer 1, an overhead of 1.5% in layer 2, an overhead of 2.5% in layer 3, and an overhead of 2% in layer 4. For benchmarks that do not have locality problems, layers 2-4 are never triggered.</p><p>In only 3 out of all 28 benchmarks, selective profiling incurs more than 3% overhead: IS (4.6%), kcstashtest (4.2%), and HashJoin (4.9%). However, as we detail in §6.2, optimizations suggested by DMon also provide greater speedups for these benchmarks than for others (IS 30.3%, kcstashtest 32.4%, and HashJoin 53.1%-compared to 16.83% average speedup enabled by DMon). These benchmarks suffer the most from poor locality, and consequently, selective profiling incurs more overhead to pinpoint the root cause of those problems.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Effectiveness</head><p>We evaluate the effectiveness of DMon by studying (1) data locality problems detected by DMon, (2) speedups provided by DMon-guided optimizations, (3) comparison of the speedups provided by DMon-guided optimizations to the speedups provided by Google's AutoFDO <ref type="bibr" target="#b16">[17]</ref>-the state-of-the-art profile-guided locality optimization approach, (4) whether DMon-guided optimizations generalize across different program inputs, and ( <ref type="formula">5</ref>) the overhead on compilation times due to DMon-guided optimizations.</p><p>Locality issues detected by DMon. Table <ref type="table" target="#tab_6">2</ref> summarizes the data locality problems that DMon detects. For brevity, Table <ref type="table" target="#tab_6">2</ref> omits benchmarks where less than 10% of the execution time is bounded by locality problems, as these benchmarks could not benefit from eliminating locality improvements. We also omit these benchmarks in our average performance numbers.</p><p>Additionally, Table <ref type="table" target="#tab_6">2</ref> shows the most prominent level of the memory hierarchy for the locality issues detected by selective profiling. Note that, in many cases, DRAM accesses constitute the locality bottlenecks. This is expected, since the highestlatency memory access instructions are served from DRAM. Finally, Table <ref type="table" target="#tab_6">2</ref> also reports the program locations (as "file": "line number") that suffer the most from poor locality, along with the optimizations DMon recommends in each case.</p><p>As shown, DMon successfully identifies locality problems and suggests appropriate optimizations in each case. In all cases but one (fmm), DMon applies optimizations automatically. For fmm, while the direct prefetching is applied automatically, structure splitting cannot be applied automatically. This is because, due to excessive type casts, the compile-time optimization cannot exactly determine which program statements may access the modified structure, and therefore cannot automatically update such statements. Nonetheless, since DMon points the developer to the exact source of the locality issue in fmm, the fix can easily be applied manually with an 8 LOC update. Moreover, structure splitting and merging can be applied automatically for other applications (dedup and radiosity)  where the automatic transformation can identify and update all statements pointing to the split and merged structures.</p><p>Speedup. Table <ref type="table" target="#tab_7">3</ref> compares the speedup provided by the DMon-guided optimizations. Optimizations guided by DMon provide up to 53.14% and on average 16.83% (8% median) speedup. To study the impact of the targeted optimizations guided by selective profiling results, we also report the speedup achieved by the same optimizations if they are applied indiscriminately (i.e., in a non-targeted way), through purely-static compiler passes <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b70">71]</ref>.</p><p>As shown in Table <ref type="table" target="#tab_7">3</ref>, DMon-guided optimizations outperform compile-time optimizations in 10/13 benchmarks. Crucially, static optimizations hurt performance in 5/13 cases due to being applied too broadly (with no runtime information), and therefore causing outcomes such as cache pollution and code bloat. DMon-guided optimizations always improve the performance. In 3/13 benchmarks where static optimizations outperform DMon-guided optimizations, the margin is ≤ 5% which can be reduced by reducing the incremental monitoring threshold (default, 10%) of selective profiling.</p><p>Comparison against Google AutoFDO. We compare the speedup provided by DMon-guided optimizations to that of Google's AutoFDO <ref type="bibr" target="#b16">[17]</ref>, the state-of-the-art profile guided  We compare the speedup provided by DMon-guided optimizations to the speedup provided by AutoFDO in Fig. <ref type="figure" target="#fig_8">10</ref>. As shown, DMon-guided optimizations provide better speedup than AutoFDO for all five benchmarks. This is because Aut-oFDO could only identify data locality problems that can be solved by performing direct prefetching optimizations. By contrast, DMon can identify other data locality issues that can be addressed by additional locality optimizations (i.e., indirect prefetching, structure splitting, and structure merging).</p><p>For example, AutoFDO's direct prefetching slows down the execution of IS by 15%, while DMon-guided indirect prefetching provides a 30% speedup. Even for cases where both DMon   and AutoFDO suggest direct prefetching (e.g., ocean_cp), DMon-guided optimizations outperform AutoFDO, because, unlike AutoFDO, DMon provides hints as to where (e.g., L1, L2, or L3) the cache line should be prefetched. We compare selective profiling overhead against Auto-FDO's profiling overheads in Fig. <ref type="figure" target="#fig_10">11</ref>. For the 5 benchmarks in this study, selective profiling incurs 3.3% mean overhead, whereas AutoFDO incurs 978% mean overhead, making the latter unsuitable for production use.</p><p>Generalization across program inputs. Profile-guided optimizations perform best when the application is optimized with a profile that is representative of the application's common behavior <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b78">79,</ref><ref type="bibr" target="#b94">95]</ref>. DMon-guided fixes also generalize if the program shows similar data locality behavior across different inputs. Therefore, we evaluate DMon's generality across different program inputs for 9 benchmarks. These program inputs vary widely both in terms of input size (from megabytes to gigabytes) as well as execution times needed to process the input (from seconds to minutes).</p><p>We report a detailed case study using the radiosity benchmark to determine how well the locality optimizations suggested by DMon generalize to different inputs. We choose this benchmark because the fix suggested by DMon is structure splitting-an optimization that modifies the data layout, and hence has the potential to be affected by changing program inputs. Fig. <ref type="figure" target="#fig_11">12</ref> shows the speedup provided by DMon-guided optimizations for radiosity for various input sizes.</p><p>Here, for brevity, we refer to different input sizes using "#1" through "#6". DMon only observes the execution for the randomly selected input #4. After observing input #4, DMonguided optimizations are applied. Then, all inputs are rerun with the newly-optimized program, with the results of this run reported in Fig. <ref type="figure" target="#fig_11">12</ref>. As shown, the optimization suggested by DMon generalizes well to other inputs, providing considerable speedups in each case. Longer executions that use larger inputs benefit more from optimizations. Fig. <ref type="figure" target="#fig_0">13</ref> shows how DMon-guided optimizations improve data locality for unobserved inputs of several other benchmarks. Here, we include all benchmarks with at least 3 inputs. Across all evaluation targets, we find that data locality behavior follows a similar trend for different inputs. Hence, DMon's fixes generalize to different inputs for these benchmarks. Recompilation overhead. We evaluate the offline recompilation overhead while applying DMon-guided optimizations, though this does not impact the production overhead. We perform this experiment, because automated structure splitting and merging require pointer analysis, which is known to be expensive <ref type="bibr" target="#b54">[55]</ref>. However, the specific pointer analysis we employ is flow-and context-insensitive and scales well <ref type="bibr" target="#b38">[40]</ref>.</p><p>Fig. <ref type="figure" target="#fig_1">14</ref> shows the offline compilation overhead incurred by our DMon-guided optimizations on top of the baseline compilation overhead (clang). On average, DMon-guided optimizations incur 72% more overhead. However, the optimization takes on average less than 7 seconds and is no longer than 26 seconds. Even for large applications (e.g., PostgreSQL <ref type="bibr" target="#b91">[92]</ref> code base has over 1M LOC), the analysis takes 307 seconds. For an offline process, we believe these durations are reasonable and on par with standard compiler transformations that use whole-program pointer analysis. Moreover, this is a one-time compile-time overhead and will be amortized for long-running applications (e.g., data-center applications that are compiled once but run on thousands of servers for days). Finally, structure splitting and merging can be applied manually if the cost of pointer analysis is deemed prohibitive. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Real-World Case Studies</head><p>We evaluate the applicability of selective profiling and DMon to large systems by studying (1) speedups provided by DMon-guided optimizations on PostgreSQL <ref type="bibr" target="#b80">[81]</ref>-one of the most popular database systems, and (2) speedups achieved after manual repair of data problems detected by selective profiling for just-in-time (JIT) compiled real-world applications from the Renaissance benchmark suite <ref type="bibr" target="#b82">[83]</ref>. PostgreSQL case study. We evaluate DMon's ability to improve the locality (and thereby performance) of PostgreSQL v11.2 <ref type="bibr" target="#b80">[81]</ref>, one of the most popular open-source database management systems. For this study, we run the popular TPC-H [26] queries on a 1GB database stored in PostgreSQL. We intentionally select the database size to fit in memory to ensure a memory-bound workload (instead of disk-bound one), as the vast majority of real-world databases fit in memory <ref type="bibr" target="#b66">[67,</ref><ref type="bibr" target="#b79">80]</ref>.</p><p>To evaluate DMon, we profile PostgreSQL with DMon while serving all 22 TPC-H queries. For these queries, selective profiling incurs 1.2% average and 2.7% maximum overhead. For PostgreSQL, DMon identifies a locality problem in a function (ExecParallelHashNextTuple) that accesses the members area and parallel_state of structure hashtable <ref type="bibr" target="#b37">[39]</ref>. DMon identifies that this memory access is the primary reason for poor data locality in 6 out of 22 TPC-H queries. Moreover, this memory access causes L2 and L3 cache misses for all 22 TPC-H queries. The cause of the locality problem in this case is pointer chasing. Structure merging automatically repairs this problem and speeds up all 22 TPC-H queries, as shown in Fig. <ref type="figure" target="#fig_13">15</ref>. The L3 cache misses in PostgreSQL are reduced by up to 22.11% (3.05% on average) and the latency of the 22 TPC-H queries are improved by up to 17.48% (6.64% on average). We also test optimized PostgreSQL based on DMon-profile on larger databases <ref type="bibr">(10 and 100GB)</ref>, where DMon improves the latency of the 22 TPC-H queries by 4.68% on average. For larger databases (10 and 100GB), the overall performance gain due to DMon's optimizations are comparatively less than (2% on average) that of smaller databases (1GB). That is because the performance of PostgreSQL for larger databases are primarily bottlenecked by storage I/O costs.</p><p>These results are particularly encouraging, considering that</p><p>PostgreSQL is one of the most heavily-optimized codebases, having been improved by developers over the past 20 years. Most database developers hand-tune their code using the TPC benchmarks as regression tests (i.e., their performance is best on TPC). This fact makes it even more promising that DMonguided optimizations are able to improve the performance of these benchmark queries on a mature database system. We reported this data locality issue to the developers of PostgreSQL (for the version 11.2), which they have fixed since then.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Renaissance case study.</head><p>A key advantage of just-in-time (JIT) compilation over ahead-of-time compilation (e.g., Java vs. C++) is that JIT can apply dynamic optimizationsincluding limited data locality optimizations-using tiered compilation <ref type="bibr" target="#b64">[65]</ref>. We compare selective profile-guided data locality optimizations to tiered compilation from Open-JDK <ref type="bibr" target="#b98">[100]</ref> on real-world applications from the Renaissance suite <ref type="bibr" target="#b82">[83]</ref>. For these applications, selective profiling incurs 2.2% average and 2.6% maximum overhead.</p><p>We use selective profiling to detect data locality issues in three Renaissance applications (jdk-concurrent fj-kmeans, apache-spark page-rank, and Scala stm-bench7). We omit other Renaissance benchmarks for which selective profiling does not find any data locality problems. Most of the data locality issues found here corresponds to Java/Scala source code (we map binary instruction information back to Java code using perf-map-agent <ref type="bibr" target="#b44">[45]</ref>) of Renaissance applications. Since currently DMon's optimizations only support C/C++ applications, we manually apply data locality optimizations to these applications. In all cases, we modify &lt;10 LOC.</p><p>As shown in Fig. <ref type="figure" target="#fig_2">16</ref>, selective profile-guided optimizations provide on average 26% and up to 47% more speedup than tiered compilation. This demonstrates that selective profiling is effective even for JIT-compiled applications.</p><p>Apart from these real-world case studies, we have also tested DMon on Memcached <ref type="bibr" target="#b33">[35]</ref> and RocksDB <ref type="bibr" target="#b31">[33]</ref> with YCSB benchmarks <ref type="bibr" target="#b24">[25]</ref>. For these two applications, the individual pieces that make up the locality issues are relatively minor. Compiler-based data locality optimizations typically add extra instructions and logic in the code, which only helps when there are many cache misses causing slowdowns. For program statements responsible for a relatively small percentage of all cache misses (less than 5%), applying these optimizations do not provide any speedup, as the extra code and logic outweighs the benefits. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4">Sensitivity Analysis</head><p>We evaluate the impact of selective profiling's different parameters on effectiveness (coverage) and efficiency. In-Production Monitoring Time-Slice. The granularity of the monitoring time-slice is a key design decision for selective profiling's incremental monitoring scheme ( §3). Small timeslices allow selective profiling to identify locality problems for shorter-running applications, but also trigger frequent transitions during incremental monitoring and result in higher monitoring overhead. On the other hand, larger lower overhead but may fail to detect locality problems for shorter-running programs. Fig. <ref type="figure" target="#fig_15">17</ref> shows the impact of the time-slice granularity on selective profiling's detection coverage (left y-axis) and overhead (right y-axis) for the benchmark, (lu_ncb). We vary the time-slice granularity from 10ms to 500ms (with 10ms increments) and measure selective profiling's coverage in detecting data locality issues and the associated performance overhead.</p><p>As shown in Fig. <ref type="figure" target="#fig_15">17</ref>, selective profiling has lower coverage and higher overhead for smaller time-slices. As the time-slice granularity increases, selective profiling achieves greater coverage with lower overhead. Selective profiling's coverage is lower for smaller time-slices because selective profiling cannot monitor sufficient performance events in a small time slice. Beyond 100ms, both the coverage (99.07% on average with standard deviation of 3%) and the overhead (2.04% on average with standard deviation of 0.6%) lines flatten. Ergo, we set selective profiling's default time-slice as 100ms. Incremental Monitoring Threshold. We vary the threshold of incremental monitoring ( §3) from 1% to 50% and measure the coverage of data locality issues selective profiling detects for all 13 benchmarks in Table <ref type="table" target="#tab_6">2</ref>. 100% coverage is achieved when there is no incremental monitoring (i.e., DMon continuously monitors events at the all levels of the locality tree). As shown in Fig. <ref type="figure" target="#fig_16">18</ref>, selective profiling achieves greater than 80% coverage if the incremental monitoring scheme uses a threshold of &lt;29%. Nevertheless, we set the default-threshold as 10%, as this threshold achieves 100% coverage. In-Production Sampling Period. As described in §3, sampling period is a key design decision for selective profiling. Fig. <ref type="figure" target="#fig_17">19</ref> shows the impact of the sampling period on the coverage of locality issues selective profiling detects and its runtime   overhead. We compute coverage with respect to the baseline coverage of 100%, achievable via the lowest possible sampling period offered by Linux perf (sampling every 100th event). A sampling period k on the x-axis means selective profiling will record one out of each k events. The left y-axis represents the runtime overhead and the right y-axis represents the coverage of locality issues selective profiling detects. The overhead and coverage reported in Fig. <ref type="figure" target="#fig_17">19</ref> are arithmetic averages over all benchmarks. A smaller sampling period increases the overhead of selective profiling, but also increases coverage. In our experiments, we chose a sampling period of 1000, which yields a high coverage of 97% with 2.6% overhead on average in layer 4 of selective profiling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Related Work</head><p>DMon finds data locality problems with low overhead using selective profiling, identifies the root cause behind the problem, and guides optimizations to eliminate the problem. Existing profilers are not able to determine the root causes of data locality problems without incurring a high overhead. Profilers. General-purpose profilers <ref type="bibr" target="#b56">[57,</ref><ref type="bibr">97,</ref><ref type="bibr" target="#b100">102]</ref> report program hotspots without identifying the root cause behind performance problem. Consequently, recent studies propose specialized profilers to locate root cause for specific performance issues. Parallel profilers <ref type="bibr" target="#b34">[36,</ref><ref type="bibr" target="#b39">41,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b45">46]</ref> focus on critical path profiling to estimate potential performance gain <ref type="bibr" target="#b26">[28,</ref><ref type="bibr" target="#b105">107]</ref>. Synchronization profilers <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b28">30,</ref><ref type="bibr" target="#b106">108,</ref><ref type="bibr" target="#b109">110]</ref> identify lock contention. Similarly, we design selective profiling as a special-ized profiling technique for data locality. Selective profiling uses the APIs of a state-of-the-art profiler, Linux perf, and targets a subset of the events explored as part of the Top-Down <ref type="bibr" target="#b104">[106]</ref>. Our main contributions over perf and Top-Down are: (1) full automation in profiling, (2) low-enough overhead for production deployment, (3) ability to automatically identify targeted optimizations based on the underlying performance problem. Profile-guided data locality optimizations. Profile-guided approaches collect execution traces to identify where optimizations can be applied <ref type="bibr" target="#b20">[21,</ref><ref type="bibr" target="#b48">49,</ref><ref type="bibr" target="#b50">51,</ref><ref type="bibr" target="#b51">52,</ref><ref type="bibr" target="#b58">59,</ref><ref type="bibr" target="#b59">60,</ref><ref type="bibr" target="#b68">69,</ref><ref type="bibr" target="#b77">78]</ref>. Stateof-the-art techniques <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b35">37,</ref><ref type="bibr" target="#b73">[74]</ref><ref type="bibr" target="#b74">[75]</ref><ref type="bibr" target="#b75">[76]</ref> primarily address instruction locality. While prior work <ref type="bibr" target="#b49">[50,</ref><ref type="bibr" target="#b52">53,</ref><ref type="bibr" target="#b85">86]</ref> also optimizes data locality, these solutions incur &gt;10% profiling overhead. Selective profiling, however, incurs only 1.36% overhead on average ( §6.1). Static locality optimizations. Static approaches use complex analysis techniques to find opportunities to apply localityimproving transformations <ref type="bibr" target="#b13">[14,</ref><ref type="bibr" target="#b15">16,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b29">31,</ref><ref type="bibr" target="#b46">47,</ref><ref type="bibr" target="#b57">58,</ref><ref type="bibr" target="#b65">66,</ref><ref type="bibr" target="#b87">88,</ref><ref type="bibr" target="#b103">105]</ref>. Alas, these techniques use compile-time heuristics to apply transformations, which can lead to sub-optimal speedups or even reductions in performance. To avoid these issues, we use application profiles collected by selective profiling to apply optimizations in a targeted manner, leading to better speedups and avoiding transformations which hurt performance. Dynamic locality optimizations. There are several proposals for monitoring program execution and modifying program binaries to improve locality on the fly <ref type="bibr" target="#b30">[32,</ref><ref type="bibr" target="#b71">72,</ref><ref type="bibr" target="#b88">89,</ref><ref type="bibr" target="#b95">96]</ref>. These techniques require non-existent hardware support and incur high overhead (up to 6× <ref type="bibr" target="#b95">[96]</ref>). Just-in-time (JIT) compilation techniques <ref type="bibr" target="#b20">[21,</ref><ref type="bibr" target="#b41">43]</ref> provide limited data locality optimizations. On the other hand, DMon works with existing hardware, incurs negligible overhead, and guides optimizations that provide better speedup (16.83% on average).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">Conclusion</head><p>Poor data locality is a major performance problem that hurt applications in production. Unfortunately, existing data locality profilers are not efficient enough to be deployed in production. This is limiting, since production profiles are difficult to replicate offline. We address this problem by selective profiling, a technique capable of discovering data locality problems with negligible overhead (on average 1.36%) in production. We also design DMon, which guides automatic and manual data locality optimizations based on profiles generated using selective profiling. For an extensive set of real-world applications and widely-used benchmarks, DMon provides up to 53.14% and on average 16.83% speedup for the cases where DMon applies targeted optimizations after detecting significant data locality problems.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: How DMon leverages selective profiling to detect and repair data locality problems.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Static memory access pattern analysis in DMon and their corresponding optimizations. Shaded optimizations are mutually exclusive.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>1 2Figure 6 :</head><label>16</label><figDesc>Figure 6: Software prefetching for indirect memory access, adapted from [3].</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Structure splitting, example adapted from [22].</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Structure merging example.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Software.</head><label></label><figDesc>All experiments are conducted in Ubuntu 18.04 (kernel version 4.15.0-46-generic). The static compiler analyses are implemented in LLVM (7.0.0) on bitcode emitted by clang. Therefore, we use clang 7 as the baseline compiler.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Monitoring overhead of selective profiling (All σ &lt; 0.02µ).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Speedup comparison to AutoFDO (All σ &lt; 0.09µ) optimization technique. AutoFDO has limited data locality optimization capabilities [68]; our comparison is thus limited to five benchmarks for which AutoFDO can optimize locality.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Overhead comparison to AutoFDO (All σ &lt; 0.07µ)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: DMon-generated optimization after observing input #4 generalizes to unseen inputs (All σ &lt; 0.01µ).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 13 :Figure 14 :</head><label>1314</label><figDesc>Figure 13: Input generalization (All σ &lt; 0.04µ)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 15 :</head><label>15</label><figDesc>Figure 15: Speedup due to DMon-guided optimizations for 22 TPC-Hqueries on PostgreSQL (All σ &lt; 4.53% of µ).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>Figure 16 :</head><label>16</label><figDesc>Figure16: Speedup provided by selective profile-guided optimizations for just-in-time (JIT) compiled applications against tiered compilation (All σ &lt; 7.68% of µ).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>Figure 17 :</head><label>17</label><figDesc>Figure 17: Effect of granularity of in-production time-slice on detection coverage and overhead (All σ &lt; 3.03% of µ).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_16"><head>Figure 18 :</head><label>18</label><figDesc>Figure 18: Effect of incremental monitoring threshold on the coverage of locality problems selective profiling detects across all benchmarks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_17"><head>Figure 19 :</head><label>19</label><figDesc>Figure19: Effect of sampling period on the coverage of locality problems selective profiling detects and the average overhead across all benchmarks (σ &lt; 0.01µ).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head></head><label></label><figDesc>Figure1: The locality tree abstraction. Performance events that pertain to each tree node are in italic. There are no dedicated events to determine if a program is back-end bound. Instead, selective profiling subtracts from total stalls the sum of the stalls that cause other bottlenecks at layer 1 to determine if an execution is back-end bound.</figDesc><table><row><cell>Layer 1</cell><cell>Fetch Bubbles</cell><cell></cell><cell></cell><cell></cell><cell cols="2">Bad Speculation Recovery Bubbles</cell><cell>Retiring Retired Slots</cell></row><row><cell>Layer 2</cell><cell cols="2">Core Bound</cell><cell cols="2">Memory Bound</cell><cell cols="2">Execution Stalls Memory Stalls Load Memory Stalls Store …</cell></row><row><cell>Layer 3</cell><cell>L1 Bound</cell><cell cols="2">L2 Bound</cell><cell cols="2">L3 Bound</cell><cell>DRAM Bound</cell><cell>Memory Stalls L1 miss Memory Stalls L2 miss Memory Stalls L3 miss …</cell></row><row><cell>Layer 4</cell><cell></cell><cell cols="2">L1 cache misses</cell><cell cols="2">L2 cache misses</cell><cell>L3 cache misses</cell><cell>Data Locality Tree</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 1 :</head><label>1</label><figDesc>Four common memory access patterns that cause data locality problems in many applications. Here, we show their examples from the PARSEC<ref type="bibr" target="#b11">[12]</ref> benchmark suite.</figDesc><table><row><cell>Benchmark</cell><cell></cell><cell>Code snippet</cell><cell>Access pattern</cell></row><row><cell>lu_ncb</cell><cell cols="2">a[i] += alpha*b[i];</cell><cell>Direct Addressing</cell></row><row><cell>radix</cell><cell cols="2">this_key = key_from[i] &amp; bb; this_key = this_key &gt;&gt; shiftnum; tmp = rank_ff_mynum[this_key];</cell><cell>Indirect Addressing</cell></row><row><cell></cell><cell cols="2">while(int_list)</cell><cell></cell></row><row><cell>radiosity</cell><cell>{</cell><cell>if(int_list-&gt;dst==inter-&gt;dst)return(1); int_list = int_list-&gt;next ;</cell><cell>Unbalanced Access</cell></row><row><cell></cell><cell>}</cell><cell></cell><cell></cell></row><row><cell>dedup</cell><cell cols="2">if(LstElmnt-&gt;seq.l2num &gt; H-&gt;Elmnts[Child]-&gt;seq.l2num){</cell><cell>Pointer Chasing</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 2 :</head><label>2</label><figDesc>DMon's detection results of locality problems.</figDesc><table><row><cell>Benchmark</cell><cell>Execution time (seconds)</cell><cell>Memory hierarchy bottleneck</cell><cell>Program location</cell><cell>Optimization</cell><cell>Automated fix?</cell></row><row><cell>canneal</cell><cell>71.8</cell><cell>L3, DRAM</cell><cell cols="2">netlist_elem.cpp: 80 Direct Prefetching</cell><cell>Yes</cell></row><row><cell>dedup</cell><cell>5.1</cell><cell>DRAM</cell><cell>binheap.c: 93</cell><cell>Structure Merging</cell><cell>Yes</cell></row><row><cell>fmm</cell><cell>18.8</cell><cell>DRAM</cell><cell>interactions.C: 169</cell><cell>Structure Splitting Direct Prefetching</cell><cell>No Yes</cell></row><row><cell>ocean_cp</cell><cell>36.2</cell><cell>L2, L3, DRAM</cell><cell>multi.C: 273</cell><cell>Direct Prefetching</cell><cell>Yes</cell></row><row><cell>radiosity</cell><cell>95.8</cell><cell>L2, L3</cell><cell>rad_tools.C: 399</cell><cell>Structure Splitting</cell><cell>Yes</cell></row><row><cell>fft</cell><cell>1.2</cell><cell>DRAM</cell><cell>fft.C: 765</cell><cell>Direct Prefetching</cell><cell>Yes</cell></row><row><cell>lu_ncb</cell><cell>47.8</cell><cell>L3, DRAM</cell><cell>lu.C: 466</cell><cell>Direct Prefetching</cell><cell>Yes</cell></row><row><cell>radix</cell><cell>6.1</cell><cell>L2, L3, DRAM</cell><cell>radix.C: 624</cell><cell>Indirect Prefetching</cell><cell>Yes</cell></row><row><cell>IS</cell><cell>1</cell><cell>L3, DRAM</cell><cell>is.c: 392</cell><cell>Indirect Prefetching</cell><cell>Yes</cell></row><row><cell>RandomAccess</cell><cell>607.1</cell><cell>DRAM</cell><cell>randacc.c: 125</cell><cell>Indirect Prefetching</cell><cell>Yes</cell></row><row><cell>HashJoin</cell><cell>2867.3</cell><cell>L3, DRAM</cell><cell>npj2epb.c: 300</cell><cell>Indirect Prefetching</cell><cell>Yes</cell></row><row><cell>kcstashtest</cell><cell>3.20</cell><cell>L2, L3, DRAM</cell><cell>kcstashdb.h: 146</cell><cell>Direct Prefetching</cell><cell>Yes</cell></row><row><cell>DIS</cell><cell>165.3</cell><cell>L2, L3, DRAM</cell><cell>transitive.c: 107</cell><cell>Direct Prefetching</cell><cell>Yes</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 3 :</head><label>3</label><figDesc>Speedup comparison betweenDMon and compile-time optimizations.</figDesc><table><row><cell>Benchmark</cell><cell>Speedup provided by compile-time optimizations (%)</cell><cell>Speedup provided by DMon (%)</cell></row><row><cell>canneal</cell><cell>-7.90</cell><cell>1.07</cell></row><row><cell>dedup</cell><cell>-18.90</cell><cell>3.65</cell></row><row><cell>fmm</cell><cell>2.83</cell><cell>2.68</cell></row><row><cell>ocean_cp</cell><cell>-1.06</cell><cell>2.90</cell></row><row><cell>radiosity</cell><cell>-7.14</cell><cell>11.21</cell></row><row><cell>fft</cell><cell>1.11</cell><cell>4.57</cell></row><row><cell>lu_ncb</cell><cell>3.49</cell><cell>19.40</cell></row><row><cell>radix</cell><cell>0.96</cell><cell>1.85</cell></row><row><cell>IS</cell><cell>30.52</cell><cell>30.29</cell></row><row><cell>RandomAccess</cell><cell>38.83</cell><cell>47.67</cell></row><row><cell>HashJoin</cell><cell>9.74</cell><cell>53.14</cell></row><row><cell>kcstashtest</cell><cell>37.41</cell><cell>32.39</cell></row><row><cell>DIS</cell><cell>-0.28</cell><cell>7.93</cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>We thank the anonymous reviewers and our shepherd, Michael Stumm, for their insightful feedback and suggestions. This work was supported by the Intel Corporation, the NSF</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Tensorflow: A system for large-scale machine learning</title>
+		<author>
+			<persName><forename type="first">Martín</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianmin</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhifeng</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andy</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthieu</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manjunath</forename><surname>Kudlur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josh</forename><surname>Levenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajat</forename><surname>Monga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sherry</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><forename type="middle">G</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Tucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pete</forename><surname>Warden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Wicke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoqiang</forename><surname>Zheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">12th USENIX Symposium on Operating Systems Design and Implementation (OSDI 16)</title>
+				<meeting><address><addrLine>Savannah, GA</addrLine></address></meeting>
+		<imprint>
+			<publisher>USENIX Association</publisher>
+			<date type="published" when="2016-11">November 2016</date>
+			<biblScope unit="page" from="265" to="283" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<author>
+			<persName><forename type="first">Alfred</forename><forename type="middle">V</forename><surname>Aho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Monica</forename><forename type="middle">S</forename><surname>Lam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Sethi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><forename type="middle">D</forename><surname>Ullman</surname></persName>
+		</author>
+		<title level="m">Compilers: Principles, Techniques, and Tools</title>
+				<meeting><address><addrLine>Boston, MA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Addison-Wesley Longman Publishing Co., Inc</publisher>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+	<note>2nd Edition</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Software prefetching for indirect memory accesses</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2017 International Symposium on Code Generation and Optimization, CGO &apos;17</title>
+				<meeting>the 2017 International Symposium on Code Generation and Optimization, CGO &apos;17<address><addrLine>Piscataway, NJ, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="305" to="317" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Syncperf: Categorizing, detecting, and diagnosing synchronization performance bugs</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Mejbah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ul</forename><surname>Alam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tongping</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guangming</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abdullah</forename><surname>Muzahid</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twelfth European Conference on Computer Systems</title>
+				<meeting>the Twelfth European Conference on Computer Systems</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="298" to="313" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">Program analysis and specialization for the C programming language</title>
+		<author>
+			<persName><forename type="first">Lars</forename><surname>Ole</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andersen</forename></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1994">1994</date>
+		</imprint>
+		<respStmt>
+			<orgName>University of Cophenhagen</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">PhD thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Memory hierarchy for web search</title>
+		<author>
+			<persName><forename type="first">Grant</forename><surname>Ayers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jung</forename><surname>Ho Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Symposium on High Performance Computer Architecture (HPCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="643" to="656" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Classifying memory access patterns for prefetching</title>
+		<author>
+			<persName><forename type="first">Grant</forename><surname>Ayers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heiner</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting>the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="513" to="526" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Asmdb: understanding and mitigating front-end stalls in warehouse-scale computers</title>
+		<author>
+			<persName><forename type="first">Grant</forename><surname>Ayers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nayana</forename><forename type="middle">Prasad</forename><surname>Nagendra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">I</forename><surname>August</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyoun</forename><forename type="middle">Kyu</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Svilen</forename><surname>Kanev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trivikram</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heiner</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tipp</forename><surname>Moseley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th International Symposium on Computer Architecture</title>
+				<meeting>the 46th International Symposium on Computer Architecture</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="462" to="473" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Online performance analysis by statistical sampling of microprocessor performance counters</title>
+		<author>
+			<persName><forename type="first">Reza</forename><surname>Azimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Stumm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><forename type="middle">W</forename><surname>Wisniewski</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 19th annual international conference on Supercomputing</title>
+				<meeting>the 19th annual international conference on Supercomputing</meeting>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="101" to="110" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">The nas parallel benchmarks 2.0</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Bailey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Harris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><surname>Saphir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rob</forename><surname>Van Der</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Wijngaart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maurice</forename><surname>Woo</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Yarrow</surname></persName>
+		</author>
+		<idno>NAS-95-020</idno>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+			<publisher>NASA Ames Research Center</publisher>
+		</imprint>
+	</monogr>
+	<note type="report_type">Technical Report</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Main-memory hash joins on multicore cpus: Tuning to the underlying hardware</title>
+		<author>
+			<persName><forename type="first">Cagri</forename><surname>Balkesen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jens</forename><surname>Teubner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gustavo</forename><surname>Alonso</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Özsu</forename><surname>Tamer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2013 IEEE 29th International Conference on Data Engineering (ICDE)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="362" to="373" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Parsec vs. splash-2: A quantitative comparison of two multithreaded benchmark suites on chip-multiprocessors</title>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Bienia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjeev</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Workload Characterization, 2008. IISWC 2008. IEEE International Symposium on</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="47" to="56" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Continuous path and edge profiling</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Bond</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Mckinley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 38th annual IEEE/ACM International Symposium on Microarchitecture</title>
+				<meeting>the 38th annual IEEE/ACM International Symposium on Microarchitecture</meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="130" to="140" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Jagannathan Ramanujam, and Ponnuswamy Sadayappan. A practical automatic polyhedral parallelizer and locality optimizer</title>
+		<author>
+			<persName><forename type="first">Uday</forename><surname>Bondhugula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Albert</forename><surname>Hartono</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Acm Sigplan Notices</title>
+				<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="volume">43</biblScope>
+			<biblScope unit="page" from="101" to="113" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">An infrastructure for adaptive dynamic optimization</title>
+		<author>
+			<persName><forename type="first">Derek</forename><surname>Bruening</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><surname>Garnett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saman</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Code Generation and Optimization</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2003">2003. 2003. 2003</date>
+			<biblScope unit="page" from="265" to="275" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Compiler optimizations for improving data locality</title>
+		<author>
+			<persName><forename type="first">Steve</forename><surname>Carr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chau-Wen</forename><surname>Tseng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Sixth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS VI</title>
+				<meeting>the Sixth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS VI<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1994">1994</date>
+			<biblScope unit="page" from="252" to="262" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Autofdo: Automatic feedback-directed optimization for warehouse-scale applications</title>
+		<author>
+			<persName><forename type="first">Dehao</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">Xinliang</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tipp</forename><surname>Moseley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2016 International Symposium on Code Generation and Optimization</title>
+				<meeting>the 2016 International Symposium on Code Generation and Optimization</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="12" to="23" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Locality analysis through static parallel sampling</title>
+		<author>
+			<persName><forename type="first">Dong</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fangzhou</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sreepathi</forename><surname>Pai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation, PLDI 2018</title>
+				<meeting>the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation, PLDI 2018<address><addrLine>Philadelphia, PA, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2018">June 18-22. 2018. 2018</date>
+			<biblScope unit="page" from="557" to="570" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Andersen&apos;s inclusion-based pointer analysis re-implementation in LLVM</title>
+		<author>
+			<persName><forename type="first">Jia</forename><surname>Chen</surname></persName>
+		</author>
+		<ptr target="https://github.com/grievejia/andersen" />
+		<imprint>
+			<date type="published" when="2018-11">2018. Nov-2018</date>
+			<biblScope unit="volume">16</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">The effect of code expanding optimizations on instruction cache design</title>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">Y</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">P</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">M</forename><surname>Conte</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">W</forename><surname>Hwu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Trans. Comput</title>
+		<imprint>
+			<biblScope unit="volume">42</biblScope>
+			<biblScope unit="issue">9</biblScope>
+			<biblScope unit="page" from="1045" to="1057" />
+			<date type="published" when="1993-09">September 1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Profile-guided proactive garbage collection for locality optimization</title>
+		<author>
+			<persName><forename type="first">Wen-Ke</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Bhansali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trishul</forename><surname>Chilimbi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaofeng</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Weihaw</forename><surname>Chuang</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m">Proceedings of the 27th ACM SIGPLAN Conference on Programming Language Design and Implementation, PLDI &apos;06</title>
+				<meeting>the 27th ACM SIGPLAN Conference on Programming Language Design and Implementation, PLDI &apos;06<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="332" to="340" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Cache-conscious structure definition</title>
+		<author>
+			<persName><forename type="first">Bob</forename><surname>Trishul M Chilimbi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">R</forename><surname>Davidson</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Larus</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIG-PLAN Notices</title>
+				<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="page" from="13" to="24" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Cache-conscious structure layout</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Trishul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Chilimbi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">R</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Larus</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM SIGPLAN 1999 Conference on Programming Language Design and Implementation, PLDI &apos;99</title>
+				<meeting>the ACM SIGPLAN 1999 Conference on Programming Language Design and Implementation, PLDI &apos;99<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Benchmarking cloud serving systems with ycsb</title>
+		<author>
+			<persName><forename type="first">Brian</forename><forename type="middle">F</forename><surname>Cooper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Silberstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erwin</forename><surname>Tam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Raghu</forename><surname>Ramakrishnan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Russell</forename><surname>Sears</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1st ACM symposium on Cloud computing</title>
+				<meeting>the 1st ACM symposium on Cloud computing</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="143" to="154" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Stabilizer: Statistically sound performance evaluation</title>
+		<author>
+			<persName><forename type="first">Charlie</forename><surname>Curtsinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Emery</forename><forename type="middle">D</forename><surname>Berger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Eighteenth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS &apos;13</title>
+				<meeting>the Eighteenth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS &apos;13<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="219" to="228" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Coz: Finding code that counts with causal profiling</title>
+		<author>
+			<persName><forename type="first">Charlie</forename><surname>Curtsinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Emery</forename><forename type="middle">D</forename><surname>Berger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 25th Symposium on Operating Systems Principles</title>
+				<meeting>the 25th Symposium on Operating Systems Principles</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="184" to="197" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m" type="main">Is software prefetching (__builtin_prefetch) useful for performance?</title>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Lemire</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018-04">2018. April-2019</date>
+			<biblScope unit="volume">24</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Continuously measuring critical section pressure with the free-lunch profiler</title>
+		<author>
+			<persName><forename type="first">Florian</forename><surname>David</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gael</forename><surname>Thomas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julia</forename><surname>Lawall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gilles</forename><surname>Muller</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">49</biblScope>
+			<biblScope unit="issue">10</biblScope>
+			<biblScope unit="page" from="291" to="307" />
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Predicting wholeprogram locality through reuse distance analysis</title>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yutao</forename><surname>Zhong</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Acm Sigplan Notices</title>
+				<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="volume">38</biblScope>
+			<biblScope unit="page" from="245" to="257" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">On instruction organization</title>
+		<author>
+			<persName><forename type="first">Tyler</forename><surname>Dwyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandra</forename><surname>Fedorova</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">15th Workshop on Hot Topics in Operating Systems (HotOS {XV})</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<author>
+			<persName><surname>Facebook</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Rocksdb</surname></persName>
+		</author>
+		<ptr target="https://github.com/facebook/rocksdb/,2021" />
+		<title level="m">A persistent key-value store for flash and ram storage</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Clearing the clouds: a study of emerging scale-out workloads on modern hardware</title>
+		<author>
+			<persName><forename type="first">Almutaz</forename><surname>Michael Ferdman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Adileh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stavros</forename><surname>Kocberber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Volos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Djordje</forename><surname>Alisafaee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cansu</forename><surname>Jevdjic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adrian</forename><forename type="middle">Daniel</forename><surname>Kaynak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anastasia</forename><surname>Popescu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN Notices</title>
+				<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">47</biblScope>
+			<biblScope unit="page" from="37" to="48" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Distributed caching with memcached</title>
+		<author>
+			<persName><forename type="first">Brad</forename><surname>Fitzpatrick</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Linux journal</title>
+		<imprint>
+			<biblScope unit="volume">124</biblScope>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Kremlin: rethinking and rebooting gprof for the multicore age</title>
+		<author>
+			<persName><forename type="first">Saturnino</forename><surname>Garcia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donghwan</forename><surname>Jeon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">M</forename><surname>Louie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Bedford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Taylor</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">46</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="458" to="469" />
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">Propeller: Profile guided optimizing large scale llvm-based relinker</title>
+		<author>
+			<persName><surname>Google</surname></persName>
+		</author>
+		<ptr target="https://github.com/google/llvm-propeller" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Gprof: A call graph execution profiler</title>
+		<author>
+			<persName><forename type="first">Susan</forename><forename type="middle">L</forename><surname>Graham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><forename type="middle">B</forename><surname>Kessler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marshall</forename><forename type="middle">K</forename><surname>Mckusick</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Sigplan Notices</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="120" to="126" />
+			<date type="published" when="1982">1982</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">The PostgreSQL Global Development Group</title>
+		<ptr target="https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeHash.c" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">The ant and the grasshopper: fast and accurate pointer analysis for millions of lines of code</title>
+		<author>
+			<persName><forename type="first">Ben</forename><surname>Hardekopf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Calvin</forename><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 28th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+				<meeting>the 28th ACM SIGPLAN Conference on Programming Language Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="290" to="299" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">The cilkview scalability analyzer</title>
+		<author>
+			<persName><forename type="first">Yuxiong</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Charles</forename><forename type="middle">E</forename><surname>Leiserson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">M</forename><surname>Leiserson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the twenty-second annual ACM symposium on Parallelism in algorithms and architectures</title>
+				<meeting>the twenty-second annual ACM symposium on Parallelism in algorithms and architectures</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="145" to="156" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Optimizing application performance on intel core microarchitecture using hardwareimplemented prefetchers</title>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Hegde</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Intel Software Network</title>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<date type="published" when="2008-12">2008. -December-2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">The garbage collection advantage: Improving program locality</title>
+		<author>
+			<persName><forename type="first">Xianglong</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><forename type="middle">M</forename><surname>Blackburn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eliot</forename><forename type="middle">B</forename><surname>Moss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhenlin</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Perry</forename><surname>Cheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 19th Annual ACM SIGPLAN Conference on Object-oriented</title>
+				<meeting>the 19th Annual ACM SIGPLAN Conference on Object-oriented</meeting>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<author>
+			<persName><surname>Programming</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Languages</forename><surname>Systems</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Applications</surname></persName>
+		</author>
+		<title level="m">OOPSLA &apos;04</title>
+				<meeting><address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page" from="69" to="80" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Bottleneck identification and scheduling in multithreaded applications</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>José A Joao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Aater Suleman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGARCH Computer Architecture News</title>
+		<imprint>
+			<biblScope unit="volume">40</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="223" to="234" />
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<title level="m" type="main">jvm-profiling-tools. perf-map-agent</title>
+		<imprint>
+			<date type="published" when="2018-12-06">2018. Online; accessed 6-December-2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Harmony: Collection and analysis of parallel block vectors</title>
+		<author>
+			<persName><forename type="first">Melanie</forename><surname>Kambadur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kui</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martha</forename><forename type="middle">A</forename><surname>Kim</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2012 39th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="452" to="463" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">A compiler technique for improving whole-program locality</title>
+		<author>
+			<persName><forename type="first">Mahmut</forename><surname>Taylan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kandemir</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN Notices</title>
+				<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="volume">36</biblScope>
+			<biblScope unit="page" from="179" to="192" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Profiling a warehouse-scale computer</title>
+		<author>
+			<persName><forename type="first">Svilen</forename><surname>Kanev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Juan</forename><forename type="middle">Pablo</forename><surname>Darago</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kim</forename><surname>Hazelwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tipp</forename><surname>Parthasarathy Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Moseley</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gu-Yeon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Brooks</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 42Nd Annual International Symposium on Computer Architecture, ISCA &apos;15</title>
+				<meeting>the 42Nd Annual International Symposium on Computer Architecture, ISCA &apos;15<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="158" to="169" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Efficient tracing of cold code via bias-free sampling</title>
+		<author>
+			<persName><forename type="first">Baris</forename><surname>Kasikci</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Ball</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><surname>Candea</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Erickson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Madanlal</forename><surname>Musuvathi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 USENIX Annual Technical Conference (USENIX ATC 14)</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="243" to="254" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">A case for resource efficient prefetching in multicores</title>
+		<author>
+			<persName><forename type="first">Muneeb</forename><surname>Khan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Sandberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erik</forename><surname>Hagersten</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 43rd International Conference on Parallel Processing</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="101" to="110" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">I-spy: Context-driven conditional instruction prefetching with coalescing</title>
+		<author>
+			<persName><forename type="first">Tanvir</forename><surname>Ahmed Khan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akshitha</forename><surname>Sriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Devietti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gilles</forename><surname>Pokam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heiner</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baris</forename><surname>Kasikci</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MI-CRO)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="146" to="159" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Ripple: Profile-guided instruction cache replacement for data center applications</title>
+		<author>
+			<persName><forename type="first">Tanvir</forename><surname>Ahmed Khan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dexin</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akshitha</forename><surname>Sriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Devietti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gilles</forename><surname>Pokam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heiner</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baris</forename><surname>Kasikci</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th International Symposium on Computer Architecture (ISCA), ISCA 2021</title>
+				<meeting>the 48th International Symposium on Computer Architecture (ISCA), ISCA 2021</meeting>
+		<imprint>
+			<date type="published" when="2021-06">June 2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Huron: hybrid false sharing detection and repair</title>
+		<author>
+			<persName><forename type="first">Tanvir</forename><surname>Ahmed Khan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yifan</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gilles</forename><surname>Pokam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barzan</forename><surname>Mozafari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baris</forename><surname>Kasikci</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 40th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+				<meeting>the 40th ACM SIGPLAN Conference on Programming Language Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="453" to="468" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<title level="m" type="main">Github -andikleen/pmu-tools: Intel pmu profiling tools</title>
+		<author>
+			<persName><forename type="first">Andi</forename><surname>Kleen</surname></persName>
+		</author>
+		<ptr target="https://github.com/andikleen/pmu-tools" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Pointer-induced aliasing: A problem classification</title>
+		<author>
+			<persName><forename type="first">William</forename><surname>Landi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barbara</forename><forename type="middle">G</forename><surname>Ryder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 18th ACM SIGPLAN-SIGACT symposium on Principles of programming languages</title>
+				<meeting>the 18th ACM SIGPLAN-SIGACT symposium on Principles of programming languages</meeting>
+		<imprint>
+			<date type="published" when="1991">1991</date>
+			<biblScope unit="page" from="93" to="103" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">Llvm and clang: Next generation compiler technology</title>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Lattner</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The BSD conference</title>
+				<imprint>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="1" to="2" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<monogr>
+		<title level="m" type="main">Oprofile: A system profiler for linux</title>
+		<author>
+			<persName><forename type="first">John</forename><surname>Levon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Philippe</forename><surname>Elie</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">Cache locality optimization for recursive programs</title>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Lifflander</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sriram</forename><surname>Krishnamoorthy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN Notices</title>
+				<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">52</biblScope>
+			<biblScope unit="page" from="1" to="16" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<analytic>
+		<title level="a" type="main">Pinpointing data locality problems using data-centric analysis</title>
+		<author>
+			<persName><forename type="first">Xu</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Mellor-Crummey</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 9th Annual IEEE/ACM International Symposium on Code Generation and Optimization</title>
+				<meeting>the 9th Annual IEEE/ACM International Symposium on Code Generation and Optimization</meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="171" to="180" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">A data-centric profiler for parallel programs</title>
+		<author>
+			<persName><forename type="first">Xu</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Mellor-Crummey</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SC&apos;13: Proceedings of the International Conference on High Performance Computing, Networking, Storage and Analysis</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Arraytool: a lightweight profiler to guide array regrouping</title>
+		<author>
+			<persName><forename type="first">Xu</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kamal</forename><surname>Sharma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Mellor-Crummey</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 23rd International Conference on Parallel Architecture and Compilation Techniques (PACT)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="405" to="415" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<analytic>
+		<title level="a" type="main">Scaanalyzer: A tool to identify memory scalability bottlenecks in parallel programs</title>
+		<author>
+			<persName><forename type="first">Xu</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Wu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, SC &apos;15</title>
+				<meeting>the International Conference for High Performance Computing, Networking, Storage and Analysis, SC &apos;15<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="volume">47</biblScope>
+			<biblScope unit="page" from="1" to="47" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<analytic>
+		<title level="a" type="main">The hpc challenge (hpcc) benchmark suite</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">H</forename><surname>Piotr R Luszczek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jack</forename><forename type="middle">J</forename><surname>Bailey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeremy</forename><surname>Dongarra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><forename type="middle">F</forename><surname>Kepner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rolf</forename><surname>Lucas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daisuke</forename><surname>Rabenseifner</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Takahashi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2006 ACM/IEEE conference on Supercomputing</title>
+				<meeting>the 2006 ACM/IEEE conference on Supercomputing</meeting>
+		<imprint>
+			<publisher>Citeseer</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="volume">213</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<analytic>
+		<title level="a" type="main">Generalized profile-guided iterator recognition</title>
+		<author>
+			<persName><forename type="first">Stanislav</forename><surname>Manilov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Vasiladiotis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Björn</forename><surname>Franke</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th International Conference on Compiler Construction</title>
+				<meeting>the 27th International Conference on Compiler Construction</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="185" to="195" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<monogr>
+		<title level="m" type="main">What exactly does -xx:-tieredcompilation do?</title>
+		<author>
+			<persName><forename type="first">Markus</forename><surname>Weninger</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2016-11">2016. November-2019</date>
+			<biblScope unit="volume">11</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">A quantitative analysis of loop nest locality</title>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Olivier</forename><surname>Temam</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-VII Proceedings -Seventh International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting><address><addrLine>Cambridge, Massachusetts, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1996">October 1-5, 1996. 1996</date>
+			<biblScope unit="page" from="94" to="104" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<analytic>
+		<title level="a" type="main">Relaxed operator fusion for in-memory databases: Making compilation, vectorization, and prefetching work together at last</title>
+		<author>
+			<persName><forename type="first">Prashanth</forename><surname>Menon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todd</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Pavlo</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the VLDB Endowment</title>
+				<meeting>the VLDB Endowment</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="page" from="1" to="13" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<monogr>
+		<title level="m" type="main">Support for cache prefetching profiles. by mtrofin • pull request #75 • google/autofdo</title>
+		<author>
+			<persName><forename type="first">Mircea</forename><surname>Trofin</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018-11">2018. November-2019</date>
+			<biblScope unit="volume">17</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b68">
+	<analytic>
+		<title level="a" type="main">Data-driven spatial locality</title>
+		<author>
+			<persName><forename type="first">Svetozar</forename><surname>Miucin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandra</forename><surname>Fedorova</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Symposium on Memory Systems</title>
+				<meeting>the International Symposium on Memory Systems</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="243" to="253" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b69">
+	<monogr>
+		<title level="m" type="main">Tolerating latency through softwarecontrolled data prefetching</title>
+		<author>
+			<persName><surname>Todd C Mowry</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1994">1994</date>
+		</imprint>
+		<respStmt>
+			<orgName>to the Department of Electrical Engineering.Stanford University</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">PhD thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b70">
+	<analytic>
+		<title level="a" type="main">Design and evaluation of a compiler algorithm for prefetching</title>
+		<author>
+			<persName><forename type="first">Todd</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Monica</forename><forename type="middle">S</forename><surname>Lam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anoop</forename><surname>Gupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fifth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS V</title>
+				<meeting>the Fifth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS V<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="page" from="62" to="73" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b71">
+	<analytic>
+		<title level="a" type="main">Exploiting locality in graph analytics through hardwareaccelerated traversal scheduling</title>
+		<author>
+			<persName><forename type="first">Anurag</forename><surname>Mukkara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nathan</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maleen</forename><surname>Abeydeera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaosong</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Sanchez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 51st Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="1" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b72">
+	<monogr>
+		<title level="m" type="main">Data intensive systems (dis) benchmark performance summary</title>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Musmanno</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+		<respStmt>
+			<orgName>TITAN SYSTEMS CORP WALTHAM MA</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b73">
+	<analytic>
+		<title level="a" type="main">Hhvm jit: A profile-guided, regionbased compiler for php and hack</title>
+		<author>
+			<persName><forename type="first">Guilherme</forename><surname>Ottoni</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+				<meeting>the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="151" to="165" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b74">
+	<analytic>
+		<title level="a" type="main">Bolt: a practical binary optimizer for data centers and beyond</title>
+		<author>
+			<persName><forename type="first">Maksim</forename><surname>Panchenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rafael</forename><surname>Auler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bill</forename><surname>Nell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guilherme</forename><surname>Ottoni</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 IEEE/ACM International Symposium on Code Generation and Optimization</title>
+				<meeting>the 2019 IEEE/ACM International Symposium on Code Generation and Optimization</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="2" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b75">
+	<analytic>
+		<title level="a" type="main">Lightning bolt: powerful, fast, and scalable binary optimization</title>
+		<author>
+			<persName><forename type="first">Maksim</forename><surname>Panchenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rafael</forename><surname>Auler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Laith</forename><surname>Sakka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guilherme</forename><surname>Ottoni</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 30th ACM SIGPLAN International Conference on Compiler Construction</title>
+				<meeting>the 30th ACM SIGPLAN International Conference on Compiler Construction</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="119" to="130" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b76">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Paratools</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Threadspotter</surname></persName>
+		</author>
+		<ptr target="http://threadspotter.paratools.com/" />
+		<imprint>
+			<date type="published" when="2019-10">2019. Oct-2019</date>
+			<biblScope unit="volume">22</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b77">
+	<analytic>
+		<title level="a" type="main">Locating cache performance bottlenecks using data profiling</title>
+		<author>
+			<persName><forename type="first">Aleksey</forename><surname>Pesterev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nickolai</forename><surname>Zeldovich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><forename type="middle">T</forename><surname>Morris</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 5th European conference on Computer systems</title>
+				<meeting>the 5th European conference on Computer systems</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="335" to="348" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b78">
+	<analytic>
+		<title level="a" type="main">Profile guided code positioning</title>
+		<author>
+			<persName><forename type="first">Karl</forename><surname>Pettis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><forename type="middle">C</forename><surname>Hansen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM SIG-PLAN 1990 Conference on Programming Language Design and Implementation, PLDI &apos;90</title>
+				<meeting>the ACM SIG-PLAN 1990 Conference on Programming Language Design and Implementation, PLDI &apos;90<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1990">1990</date>
+			<biblScope unit="page" from="16" to="27" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b79">
+	<analytic>
+		<title level="a" type="main">Rethinking simd vectorization for in-memory databases</title>
+		<author>
+			<persName><forename type="first">Orestis</forename><surname>Polychroniou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arun</forename><surname>Raghavan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenneth</forename><forename type="middle">A</forename><surname>Ross</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2015 ACM SIG-MOD International Conference on Management of Data</title>
+				<meeting>the 2015 ACM SIG-MOD International Conference on Management of Data</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1493" to="1508" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b80">
+	<monogr>
+		<title level="m" type="main">The world&apos;s most advanced open source relational database</title>
+		<author>
+			<persName><surname>Postgresql</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Postgresql</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019-04">April-2019</date>
+			<biblScope unit="volume">23</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b81">
+	<analytic>
+		<title level="a" type="main">Iterative optimization in the polyhedral model: Part II, multidimensional time</title>
+		<author>
+			<persName><forename type="first">Louis-Noël</forename><surname>Pouchet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cédric</forename><surname>Bastoul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Albert</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Cavazos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI&apos;08)</title>
+				<meeting><address><addrLine>Tucson, Arizona</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM Press</publisher>
+			<date type="published" when="2008-06">June 2008</date>
+			<biblScope unit="page" from="90" to="100" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b82">
+	<analytic>
+		<title level="a" type="main">Renaissance: benchmarking suite for parallel applications on the jvm</title>
+		<author>
+			<persName><forename type="first">Aleksandar</forename><surname>Prokopec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Rosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Leopoldseder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gilles</forename><surname>Duboscq</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Petr</forename><surname>Tuma ; Lubomir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yudi</forename><surname>Bulej</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Doug</forename><surname>Villazon</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Simon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 40th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+				<meeting>the 40th ACM SIGPLAN Conference on Programming Language Design and Implementation</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">Martin Studener,. 2019</date>
+			<biblScope unit="page" from="31" to="47" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b83">
+	<monogr>
+		<title level="m" type="main">Improving iOS Startup Performance with Binary Layout Optimizations</title>
+		<author>
+			<persName><forename type="first">Manman</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shane</forename><surname>Nay</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019-10">2019. Oct-2019</date>
+			<biblScope unit="volume">25</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b84">
+	<monogr>
+		<title level="m" type="main">Sampling and vtune&apos;s disadvantages</title>
+		<author>
+			<persName><forename type="first">Roman</forename><surname>Oderov</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2012-04">2012. April-2019</date>
+			<biblScope unit="volume">23</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b85">
+	<analytic>
+		<title level="a" type="main">Reducing cache pollution through detection and elimination of non-temporal memory accesses</title>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Sandberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Eklöv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erik</forename><surname>Hagersten</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2010 ACM/IEEE International Conference for High Performance Computing, Networking, Storage and Analysis, SC &apos;10</title>
+				<meeting>the 2010 ACM/IEEE International Conference for High Performance Computing, Networking, Storage and Analysis, SC &apos;10<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="1" to="11" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b86">
+	<monogr>
+		<title level="m" type="main">Visualvm all-in-one java troubleshooting tool</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sedlacek</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Thomas</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b87">
+	<analytic>
+		<title level="a" type="main">New tiling techniques to improve cache temporal locality</title>
+		<author>
+			<persName><forename type="first">Yonghong</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiyuan</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="215" to="228" />
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b88">
+	<analytic>
+		<title level="a" type="main">Reactive tiling</title>
+		<author>
+			<persName><forename type="first">Jithendra</forename><surname>Srinivas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mahmut</forename><surname>Kandemir</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2015 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="91" to="102" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b89">
+	<analytic>
+		<title level="a" type="main">Softsku: Optimizing server architectures for microservice diversity@ scale</title>
+		<author>
+			<persName><forename type="first">Akshitha</forename><surname>Sriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abhishek</forename><surname>Dhanotia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th International Symposium on Computer Architecture</title>
+				<meeting>the 46th International Symposium on Computer Architecture</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="513" to="526" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b90">
+	<analytic>
+		<title level="a" type="main">A framework for enhancing data reuse via associative reordering</title>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Stock</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Kong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tobias</forename><surname>Grosser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Louis-Noël</forename><surname>Pouchet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fabrice</forename><surname>Rastello</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ramanujam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sadayappan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Conference on Programming Language Design and Implementation (PLDI)</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b91">
+	<analytic>
+		<title level="a" type="main">The design of postgres</title>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Stonebraker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lawrence</forename><forename type="middle">A</forename><surname>Rowe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1986 ACM SIGMOD International Conference on Management of Data, SIGMOD &apos;86</title>
+				<meeting>the 1986 ACM SIGMOD International Conference on Management of Data, SIGMOD &apos;86<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1986">1986</date>
+			<biblScope unit="page" from="340" to="355" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b92">
+	<analytic>
+		<title level="a" type="main">False sharing and spatial locality in multiprocessor caches</title>
+		<author>
+			<persName><forename type="first">Josep</forename><surname>Torrellas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">L</forename><surname>Lam</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Hennessy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Computers</title>
+		<imprint>
+			<biblScope unit="volume">43</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="651" to="663" />
+			<date type="published" when="1994">1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b93">
+	<analytic>
+		<title level="a" type="main">Disclosure of hardware prefetcher control on some intel processors</title>
+		<author>
+			<persName><surname>Vish Viswanathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Intel SW Developer Zone</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b94">
+	<analytic>
+		<title level="a" type="main">Predicting program behavior using real or estimated profiles</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">W</forename><surname>Wall</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">26</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="59" to="70" />
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b95">
+	<analytic>
+		<title level="a" type="main">On-the-fly structure splitting for heap objects</title>
+		<author>
+			<persName><forename type="first">Zhenjiang</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chenggang</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pen-Chung</forename><surname>Yew</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianjun</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Di</forename><surname>Xu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Wikipedia contributors. Perf (linux) -Wikipedia, the free encyclopedia</title>
+				<imprint>
+			<date type="published" when="2012">2012. 2018. April-2019</date>
+			<biblScope unit="volume">8</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b96">
+	<analytic>
+		<title level="a" type="main">Vtune -Wikipedia, the free encyclopedia</title>
+	</analytic>
+	<monogr>
+		<title level="m">Wikipedia contributors</title>
+				<imprint>
+			<date type="published" when="2018-04">2018. April-2019</date>
+			<biblScope unit="volume">23</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b97">
+	<analytic>
+		<title level="a" type="main">Clang -Wikipedia, the free encyclopedia</title>
+	</analytic>
+	<monogr>
+		<title level="m">Wikipedia contributors</title>
+				<imprint>
+			<date type="published" when="2019-04">2019. April-2019</date>
+			<biblScope unit="volume">24</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b98">
+	<monogr>
+		<ptr target="https://en.wikipedia.org/w/index.php?title=OpenJDK&amp;oldid=927329117" />
+		<title level="m">Openjdk -Wikipedia, the free encyclopedia</title>
+				<imprint>
+			<date type="published" when="2019-11">2019. November-2019</date>
+			<biblScope unit="volume">23</biblScope>
+		</imprint>
+	</monogr>
+	<note>Wikipedia contributors</note>
+</biblStruct>
+
+<biblStruct xml:id="b99">
+	<analytic>
+		<title level="a" type="main">Strip (unix) -Wikipedia, the free encyclopedia</title>
+	</analytic>
+	<monogr>
+		<title level="m">Wikipedia contributors</title>
+				<imprint>
+			<date type="published" when="2019-04">2019. April-2019</date>
+			<biblScope unit="volume">24</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b100">
+	<monogr>
+		<ptr target="https://en.wikipedia.org/w/index.php?title=DTrace&amp;oldid=950798652" />
+		<title level="m">Wikipedia contributors. Dtrace -Wikipedia, the free encyclopedia</title>
+				<imprint>
+			<date type="published" when="2020-04">2020. April-2020</date>
+			<biblScope unit="volume">25</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b101">
+	<monogr>
+		<title level="m" type="main">The splash-2 programs: Characterization and methodological considerations</title>
+		<author>
+			<persName><forename type="first">Cameron</forename><surname>Steven</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moriyoshi</forename><surname>Woo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Evan</forename><surname>Ohara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaswinder</forename><forename type="middle">Pal</forename><surname>Torrie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anoop</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gupta</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+			<publisher>ACM SIGARCH computer architecture news</publisher>
+			<biblScope unit="volume">23</biblScope>
+			<biblScope unit="page" from="24" to="36" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b102">
+	<analytic>
+		<title level="a" type="main">The performance advantages of integrating block data transfer in cache-coherent multiprocessors</title>
+		<author>
+			<persName><forename type="first">Cameron</forename><surname>Steven</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaswinder</forename><forename type="middle">Pal</forename><surname>Woo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">L</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Hennessy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Sixth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS VI</title>
+				<meeting>the Sixth International Conference on Architectural Support for Programming Languages and Operating Systems, ASPLOS VI<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1994">1994</date>
+			<biblScope unit="page" from="219" to="229" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b103">
+	<analytic>
+		<title level="a" type="main">HOTL: a higher order theory of locality</title>
+		<author>
+			<persName><forename type="first">Xiaoya</forename><surname>Xiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Luo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bin</forename><surname>Bao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Architectural Support for Programming Languages and Operating Systems, ASPLOS &apos;13</title>
+				<meeting><address><addrLine>Houston, TX, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2013">March 16 -20, 2013. 2013</date>
+			<biblScope unit="page" from="343" to="356" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b104">
+	<analytic>
+		<title level="a" type="main">A top-down method for performance analysis and counters architecture</title>
+		<author>
+			<persName><forename type="first">Ahmad</forename><surname>Yasin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="35" to="44" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b105">
+	<analytic>
+		<title level="a" type="main">Parallelismcentric what-if and differential analyses</title>
+		<author>
+			<persName><forename type="first">Adarsh</forename><surname>Yoga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Santosh</forename><surname>Nagarakatte</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 40th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+				<meeting>the 40th ACM SIGPLAN Conference on Programming Language Design and Implementation</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="485" to="501" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b106">
+	<monogr>
+		<title level="m" type="main">Syncprof: Detecting, localizing, and optimizing synchronization bottlenecks</title>
+		<author>
+			<persName><forename type="first">Tingting</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Pradel</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b107">
+	<monogr>
+		<title level="m">Proceedings of the 25th International Symposium on Software Testing and Analysis</title>
+				<meeting>the 25th International Symposium on Software Testing and Analysis</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="389" to="400" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b108">
+	<monogr>
+		<title level="m" type="main">Spark: Cluster computing with working sets</title>
+		<author>
+			<persName><forename type="first">Matei</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mosharaf</forename><surname>Chowdhury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Michael J Franklin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ion</forename><surname>Shenker</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Stoica</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<publisher>HotCloud</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b109">
+	<analytic>
+		<title level="a" type="main">wperf: generic off-cpu analysis to identify bottleneck waiting events</title>
+		<author>
+			<persName><forename type="first">Fang</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yifan</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sixiang</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yang</forename><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">13th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} 18)</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="527" to="543" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

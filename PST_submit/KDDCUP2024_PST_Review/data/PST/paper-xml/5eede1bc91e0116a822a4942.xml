@@ -1,0 +1,714 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">RIPTIDE: FAST END-TO-END BINARIZED NEURAL NETWORKS</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Josh</forename><surname>Fromm</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Meghan</forename><surname>Cowan</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Matthai</forename><surname>Philipose</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Luis</forename><surname>Ceze</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Shwetak</forename><surname>Patel</surname></persName>
+						</author>
+						<title level="a" type="main">RIPTIDE: FAST END-TO-END BINARIZED NEURAL NETWORKS</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:24+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Binarized neural networks have attracted much recent attention due to their promise of making convolutional neural networks fast and compact. However, these benefits have proven hard to realize in practice. In this paper, we identify the underlying barriers to high performance and propose solutions ranging from missing implementations for certain operations to carefully scheduled library support for binarized linear algebra operations. The combination of these innovations allows us to report the first measured end-to-end speedups for binarized networks. For instance, we show a 6.3× speedup over a standard VGGNet variant at state-of-the-art (64.2% for top-1 binarized classification of ImageNet) accuracy. More broadly, speedups range from 4-12× and the techniques we propose are crucial to achieving them.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">INTRODUCTION</head><p>Binarized neural networks (BNNs) represent their parameters and activations using very low bitwidths (e.g., 1 to 3 bits). During inference, the resulting networks use much less memory than conventional (e.g., 32-bit) representations and execute dramatically fewer operations by converting operations on large floating point vectors into "bitserial" versions that apply bitwise operations on packed bit vectors. For instance <ref type="bibr" target="#b19">(Rastegari et al., 2016)</ref> report convolution layers that use 58× fewer operations and 32 × less memory than the standard floating point versions. This increased efficiency typically comes at the cost of reduced inference accuracy, and a slew of recent work <ref type="bibr" target="#b6">(Courbariaux et al., 2016;</ref><ref type="bibr" target="#b22">Zhou et al., 2016;</ref><ref type="bibr" target="#b1">Cai et al., 2017;</ref><ref type="bibr" target="#b12">Hubara et al., 2016;</ref><ref type="bibr" target="#b20">Tang et al., 2017;</ref><ref type="bibr" target="#b8">Dong et al., 2017;</ref><ref type="bibr" target="#b9">Fromm et al., 2018;</ref><ref type="bibr" target="#b4">Choi et al., 2019)</ref> has therefore focused on closing the accuracy gap. Despite considerable progress in develop-ing more accurate models with low theoretical instruction counts, we are aware of no work that has realized measured performance gains on real-world processors. In this paper, we present Riptide, an end-to-end system for producing binarized versions of convolutional neural networks that yield significant speedups.</p><p>Measurable performance gains on binarized models are hard to achieve for three main reasons. First, for many recent higher-accuracy training techniques, no efficient bitserial implementation has been proposed. In some cases (e.g., where bits are scaled using non-linear scaling factors <ref type="bibr" target="#b1">(Cai et al., 2017)</ref>), it is unclear that such implementations even exist. Second, current work has focused on schemes for binarizing the "core" convolutional and fully-connected layers. However, once the dramatic gains of binarization on these layers has been realized, the "glue" layers (batch normalization, scaling and (re-) quantization) become bottlenecks. Bitserial implementations of these layers have traditionally been ignored. Finally, existing floating-point implementations have been carefully scheduled for various processor architectures over many decades via libraries such as BLAS, MKL and CuDNN. No corresponding libraries exist for low-bitwidth implementations. The "number-of-operations" speedup above does not therefore translate to wallclock-time speedups.</p><p>The Riptide system presented in this paper addresses these issues. We carefully analyze the barriers to realizing bitserial implementations of recently proposed accuracyenhancing techniques and suggest efficient options (Section 4.1). We show how to produce fully bitserial versions of glue layers, almost entirely eliminating their runtime overhead (Section 4.2). Finally, we show how to schedule binarized linear algebra routines by combining selected standard scheduling techniques (e.g., loop tiling, loop fusion and vectorization) with memory access optimization specific to packed representations (Section 4.3). Taken together, we show in our evaluation (Section 5.1) that these techniques yield binarized versions of standard networks (SqueezeNet, AlexNet, VGGNet, and Resnet) that show measured end-to-end speedups in the 4-12× range relative to optimized floating point implementations, while maintaining state-of-the-art accuracy. To our knowledge, these are the first reported numbers of measured speedup due to binarization.</p><p>Algorithm 1 Typical CNN forward propagation. Lines marked are glue layers that use floating point arithmetic.</p><p>1: Input: Image X, network with L convolutional layers. 2: c 0 = Conv(X) {Input layer block.} 3: a 0 = BatchNorm(c 0 ) 4: for k = 1 to L do </p><formula xml:id="formula_0">c hwf += A[h + i][w + j][c] * W f [i][j][c] 16:</formula><p>end for 17: end for Algorithm 2 Convolution block that replaces line 6 in Algorithm 1 for an N -bit binary network.</p><p>1: Input: Activation tensor x. 2: q = Quantize(x) {At least 5HWC ops.} 3: b = BitPack(q) {At least 3HWC ops. for c = 0 to C 64 do 10:</p><formula xml:id="formula_1">x hwf = Q n [h + i][w + j][c] ⊗ W f [i][j][c]</formula><p>11:</p><formula xml:id="formula_2">y hwf += 2 n popc(x hwf ) 12:</formula><p>end for 13: end for 14: y hwf = 2y hwf − KKC</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">BACKGROUND AND RELATED WORK</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Conventional Convolutional Networks</head><p>Algorithm 1 describes how a typical convolutional network processes an input image X. An initial convolution (line 2) extracts features from the color channels of X, then a stack of L convolutions (lines 4-10) is applied to progressively parse the activations of the previous layer into an embedding. An output dense layer (line 11) processes the embeddings to generate probabilities of what class the input image represents. Surrounding each convolution are intermediate "glue" layers (lines 7, 8, and 9) that apply some preprocessing to prepare the activation tensor for the next convolution. The number of operations in the network is completely dominated by the convolution layers, which are approximately KKC times (which is often two orders of magnitude) more operations than any glue layer. Noting the high concentration of operations in convolutions, many researchers have explored methods that optimize convolution to yield networks with superior inference times.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Binary Convolutional Networks</head><p>First introduced by <ref type="bibr" target="#b6">Courbariaux et al. (2016)</ref>, network binarization attempts to optimize networks by replacing full precision convolutions with the more efficient "bitserial" convolutions described in Algorithm 2. In a binary network, both weights and activations of the network are quantized to a single bit representing +1 or -1 (q = sign(x)). Not only does this give an immediate benefit of reducing the memory footprint of the model by 32×, it also allows a xnor-popcount operation (lines 10-11) to replace floating point multiply-accumulate. By packing bits into a larger datatype such as Int64 using Equation 1 (line 3), the amount of operations (and the theoretical runtime) in the inner loop of a bitserial convolution reduces from 2C to 3C 64 , a reduction of 43×.</p><formula xml:id="formula_3">b i,n = 63,N −1 j=0,n=0 (Q 64i+j ∧ n) (j − n) (1)</formula><p>The use of bitserial convolution requires additional glue layers (lines 2, 5, and 6). Because BatchNorm <ref type="bibr" target="#b14">(Ioffe &amp; Szegedy, 2015)</ref>, which normalizes and centers activations, is used ubiquitously in binary networks, the integer output of a bitserial convolution must be converted to floating point (line 5) then converted back to integer for the next layer and rounded into 2 N bins, where N is the number of quantization bits used (line 2). Although the total number of operations spent in glue layers (8HWC + 9HWF) is sizeable relative to the bitserial convolution ( KKF HW C</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>43</head><p>) for typical model dimensions, their impact on runtime has not been well examined.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Binary Accuracy Improvement Techniques</head><p>Although 1-bit binary models promise significant performance benefits, the accuracy they have been shown capable of achieving on challenging datasets like ImageNet has been underwhelming. For example, the AlexNet <ref type="bibr" target="#b15">(Krizhevsky et al., 2012)</ref> based BNN used by <ref type="bibr" target="#b6">Courbariaux et al. (2016)</ref> was only able to reach a top-1 accuracy of 27.9% when trained on ImageNet compared to the full precision model's 56%. The significant accuracy loss that comes with network binarization has been the focus of research in the space, with most papers introducing modifications to the core algorithm or new training techniques. <ref type="bibr" target="#b19">Rastegari et al. (2016)</ref> introduced XNOR-Net, which improved the accuracy of single bit binary models by adding the WeightScale function on line 6 of Algorithm 2. The term α k = mean(|W k |) was multiplied into the binary convolution output, where W k are the weights of one of the convolutional layer's filters. Weight scaling proved extremely useful for preserving both the magnitude and relative scale of weights. The authors additionally noted that applying batch normalization directly before quantization ensures maximum retention of information due to the centering around zero. These subtle but important changes allowed an XNOR-Net version of AlexNet to reach 44.2% accuracy on ImageNet.</p><p>Although XNOR-Net offered a substantial improvement to accuracy, follow-up works noted that even so, the accuracy achievable with 1-bit activations is simply not compelling and instead focus on using N ≥ 2 bits. <ref type="bibr" target="#b12">Hubara et al. (2016)</ref> and <ref type="bibr" target="#b22">Zhou et al. (2016)</ref> introduce QNN and DoReFA-Net respectively, both of which use 2-bit activations to achieve higher accuracy on ImageNet. Both works used very similar techniques and had similar results, here we'll discuss DoReFa-Net's multi-bit implementation as it is more precisely defined. Like XNOR-Net, DoReFa-Net quantizes weights using q = sign(x) and uses weight scale term α. Activations, on the other hand, are quantized into linearly spaced bins between zero and one (Equation <ref type="formula">2</ref>). DoReFa-Net uses clip(x, 0, 1) as activation function (line 9 in Algorithm 1), ensuring proper outputs from Equation 2. DoReFa-Net was able to reach an AlexNet top-1 accuracy of 50%, closing quite a bit of the gap between binary and floating point models. Although the original interest in binarization was due to its potential to enable high speed and low memory models without sacrificing too much accuracy, all follow up work has been focused on reducing the accuracy gap rather than the speedup itself. To our knowledge, no paper has reported an actual end-to-end speedup or described in detail the techniques required to yield one. In the following sections we examine the barriers that make such a measurement difficult and present Riptide, the first system to enable performant end-to-end binary models.</p><formula xml:id="formula_4">q bits = round((2 N − 1) * x) q approx = 1 2 N − 1 q bits (2)</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">CHALLENGES IN BINARIZATION</head><p>In this section we explore what it would take to create a highly performant end-to-end bitserial implementation. In doing so, we uncover multiple barriers that must be overcome. These challenges can be broken into three categories: choosing the proper binarization method from the many options discussed in Section 2, inefficiencies in glue layers, and generating efficient machine code that can compete against hand optimized floating point libraries.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Implementing core operations efficiently</head><p>The first step in building a binary network is choosing a quantization method. Although it may seem adequate to pick the method with the highest accuracy, it is often challenging to implement the most accurate models in a bitserial fashion (i.e., using logical operations on packed bit-vectors as described above). In particular, proposed algorithms often achieve higher accuracy by varying bit consistency and polarity so as to trade off accuracy for bitserial implementability.</p><p>Lines 10 and 11 of Algorithm 2 describe the inner loop of bitserial convolution when values are linearly quantized, as in Equation <ref type="formula">2</ref>. For n &gt; 2, the term 2 n (which can be implemented as a left shift) adds the scale of the current bit to the output of popcount before it is accumulated, this is possible because the spacing between incremental bits is naturally linear. Using a non-linear scale would require replacing the efficient shift operation with a floating point multiply.</p><p>Additionally, it is imperative that the values of bits are consistent, for example for N = 2, the value of the sum of bit pairs 01 and 10 must equal the value of bit pair 11. If this is not the case, values are effectively being assigned to bits that are conditional on their bit pairs. However, the use of popcount anonymizes bits by accumulating them before they can be scaled. Using a representation that does not have bit consistency would require multiplying each x hwf by a scaling constant and prevent the use of popcount, removing any reduction in computation benefits that quantization otherwise offers. High accuracy binarization techniques that attempt to better fit non-linear distributions by dropping bit consistency such as HWGQ are thus difficult to implement efficiently.</p><p>Quantization polarity describes what the bits of a quantized tensor represent. In unipolar quantization, bits with value 0 represent 0 and bits with value 1 represent 1. Conversely, in bipolar quantization bits with value 0 represent -1 and bits with value 1 represent 1. Early binarization models such as XNOR-Nets and QNNs use bipolar quantization for both weights and activations due to the ability of the xnor operation to elegantly replace multiplication in the inner loop of a binary convolution. Because bipolar quantization must be centered around zero, it is not possible to actually represent zero itself without breaking linearity. Not only does zero have some intrinsic significance to activations, but it also is ubiquitously used to pad convolutional layers.</p><p>In fact, this padding issue prevents QNNs and XNOR-Nets from being implemented as proposed by their authors.</p><p>Methods that use unipolar quantization for activations such as DoReFa-Net and PACT-SAWB <ref type="bibr" target="#b4">(Choi et al., 2019)</ref> are able to represent zeros but encounter other implementation issues. Because weights are always bipolar due to their need to be capable of representing inverse correlation (negative numbers), the unset bits in a quantized weight tensor represent -1 while the unset bits in quantized activation tensor represent 0. This polarity mismatch prevents a single bitwise operation and popcount from producing a correct result since the bits effectively represent three values instead of two. The current literature does not provide an answer to this issue and it is not clear how to efficiently and correctly implement mixed polarity models.</p><p>It is worth noting that there also exist Ternary Weight Networks <ref type="bibr" target="#b16">(Li et al., 2016)</ref> that use bipolar quantization and a mask tensor that specifies some bits as representing 0. Although ternary quantization is able to represent both zero and negative numbers, it is effectively using an extra bit to do so. Instead of being able to represent 2 N unique values, ternary quantization can only represent 2 N −1 + 1 values. This loss of expressiveness leads to ternary networks not having competitive accuracy with state-of-the-art unipolar models.</p><p>Attempting to navigate these numerous complications and implement an end-to-end system could easily lead to poor performance or incorrect output values at inference time. In section 4.1 we examine the impact of polarity on runtime and describe the quantization scheme used in Riptide.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Binarizing glue layers</head><p>In a typical floating point model, the vast bulk of compute goes into the core convolutional and dense layers. The interlayer glue operations such as non-linear activations, MaxPooling and BatchNormalization are so minimally compute intensive compared to core layers that their impact on runtime is ignored. However, in BNNs the number of operations in core layers is so greatly reduced that the time spent in glue layers actually becomes a major bottleneck.</p><p>To demonstrate the effect of glue layers, we consider the total number of operations in a binarized SqueezeNet <ref type="bibr" target="#b13">(Iandola et al., 2016)</ref>. We count the number of operations in all bitserial convolution layers at various assumed speedups and compare those counts to the total number of glue operations. These estimates are visualized in Figure <ref type="figure" target="#fig_2">1</ref>. We see glue layers make up a whopping 70% of the operations in a network given the optimal reduction in number of operations offered by binarization. Even assuming smaller speedups in practice, glue layers contribute a substantial fraction of the total estimated runtime at all scales where the speedups of binarization can justify its impact on accuracy.</p><p>Figure <ref type="figure" target="#fig_2">1</ref> makes it readily apparent that a high speed endto-end implementation must minimize or all-together remove glue layers. However, all high accuracy binarization techniques today rely on BatchNormalization and weight scaling in the floating point domain. The centering and normalization effects of BatchNormalization are essential to generating consistent and accurate quantized activation representations and weight scaling has been shown to dramatically increase model accuracy by allowing the magnitude of weight tensors to be efficiently captured. Because these layers require floating point arithmetic, interlayer type casting and requantization must also be inserted. To address this bottleneck, we introduce a novel fusible operation that completely removes the cost of glue layers and yields a speedup of multiple factors without loss of accuracy in Section 4.2 .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Generating fast machine-specific code</head><p>One major benefit of binarization is the substantial compression of the amount of memory required to store weights.  Ideally, this memory compression would also apply to the activation tensors of a model at runtime. However, as visualized in Figure <ref type="figure" target="#fig_3">2</ref> (ignore the dotted line for now), the intermediate memory is dominated by the output of popcount (2NHWC bytes) rather than the more efficient bitpacked tensor ( NHWC 8 bytes). This is because each layer in Figure <ref type="figure" target="#fig_3">2</ref> is executed sequentially from top to bottom in a typical system. Not only does this increase the amount of memory shuffling required at inference time, but it also could prove to be a major challenge to running large models on resource constrained systems.</p><p>Even with all the barriers above resolved, a binary model is likely to be dramatically slower than its floating point variant. Floating point convolutions and dense layers use highly optimized kernels such as those found in OpenBLAS <ref type="bibr" target="#b21">(Xianyi et al., 2014)</ref>. By leveraging scheduling primitives such as tiling, vectorization, and parallelization, an optimized kernel can run orders of magnitude faster than a naive implementation. Unfortunately, no comparable hand optimized libraries exist for bitserial operations and developing one from scratch would be a challenging engineering effort that is outside the scope of most research projects. Recently, projects such as Halide <ref type="bibr" target="#b18">(Ragan-Kelley et al., 2013)</ref> and TVM <ref type="bibr" target="#b2">(Chen et al., 2018a)</ref> have arisen that attempt to simplify the process of creating optimized schedules by separating the definition of compute from the schedule itself, and in some cases supporting automated hyperparameter search to produce good schedules <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref>. In Section 4.3, we describe how we extend TVM to support bitserial operations and produce machine code that allows significant speedups even when compared against highly optimized floating point libraries.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">SYSTEM DESIGN</head><p>In this section we discuss the methods Riptide uses to overcome the challenges raised in Section 3, allowing it to generate fast end-to-end binary models. All the following described innovations are implemented and supported Algorithm 3 Riptide inference with N -bit activations.</p><p>1: Input: Input tensor X, binary layers L, weight scaling bits wb, shiftnorm scaling bits sb, and combined centering term cb. 2: c 0 = NormalConv(X) {Full precision first block.} 3: b 0 = BatchNorm(c 0 ) 4: q 0 = LinearQuantize(b 0 ) 5: a 0 = BitPack(q 0 ) 6: for k = 1 to L do 7:</p><formula xml:id="formula_5">c k = BinaryConv(a k−1 ) { N KKF HW C 42 ops.} 8: q k = (c k + cb) (wb + sb) {2HWF ops.} 9: l k = clip(q k , 0, 2 N − 1) {HWF ops.} 10: p k = Pooling(l k ) {HWF ops.} 11: a k = BitPack(p k ) {At least 3HW F ops.} 12: end for 13: Y = BinaryDense(a L )</formula><p>in both TensorFlow <ref type="bibr" target="#b0">(Abadi et al., 2016)</ref> and TVM <ref type="bibr" target="#b2">(Chen et al., 2018a)</ref>. We use TensorFlow for training binary networks and TVM for compiling efficient machine code. The combination of these two halves makes Riptide an effective one-stop solution to training and deploying binary networks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Quantization Technique and Polarity</head><p>As discussed, quantization methods that are not bitconsistent have fundamental issues being implemented in a bitserial way. As bitserial computation is essential to realizing speedups, we are forced to use one of the bitconsistent techniques. It remains an open question whether bit-inconsistent binarization can be implemented efficiently. We choose to use linear quantization in the style of Equation 2 as it does not require any floating point multiplication in its inner loop and has been shown to yield high accuracy models. However, there remain major barriers to supporting both it's bipolar and unipolar variants. To provide a deeper understanding of the impact of polarity, and offer as fine a granularity as possible in the trade-off between speed and accuracy, Riptide supports both unipolar and bipolar activation quantization.</p><p>Supporting unipolar activation quantization requires solving the polarity mismatch described in Section 3.1. There are a few possible solutions to this dilemma. Perhaps the most direct solution would be to get rid of the polarity mismatch by quantizing both activations and the weights unipolarly. Although this would allow a fast implementation by replacing bitwise-xnor with bitwise-and, it would also require that weight values be strictly positive. Because weights represent correlation with specific patterns, removing negative weights is similar to preventing a network from representing inverse correlation, which is highly destructive to accuracy.</p><p>Instead, we can treat the weight values as if they're unipolar.</p><p>Then, the bitwise-and operation between activations and weights is correct except when the activation bit is 1 and weight bit is 0. In this case, the product should have been -1 but is instead 0. To handle these cases, we count them and subtract it from the accumulation. This solution is given in Equation <ref type="formula">3</ref>a</p><formula xml:id="formula_6">• w = N −1 n=0 2 N (popc(a n ∧ w) − popc(a n ∧!w)) (3)</formula><p>Here, we use two popcounts and bitwise-and operations and a bitwise invert (!) instead of the single popcount-xnor used in bipolar quantization. While the unipolar representation requires double the compute of the bipolar representation, the number of memory operations is the same.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Fused Binary Glue</head><p>Figure <ref type="figure" target="#fig_2">1</ref> demonstrates that the significant speedups (up to 43×) offered by binary layers pushes the cost of convolution and dense layers so low that it causes glue layers (lines marked with in Algorithms 1 and 2) to become a major bottleneck at inference time. We seek to replace each such glue layer with bitserial operations. To this end, we introduce a novel operator that completely replaces all floating point glue layers while requiring only efficient bitserial addition and shifting. This new Fused Glue operator allows Riptide to simplify the forward pass of a binary model to the definition in Algorithm 3, where line 8 is our fused glue operation. Here we introduce the fused glue layer and explain how it works.</p><p>The glue layers in a traditional binary network perform three key functions: the WeightScale operation in line 6 of Algorithm 2 propagates the magnitude of weights into the activation tensor while the BatchNorm layer in line 8 of Algorithm 1 normalizes and centers the activations. Because these operations require floating point arithmetic, the remaining glue layers exist to cast and convert activations from integer to float and back again. If we could simply remove weight scaling, activation normalization, and activation centering, the rest of the glue layers wouldn't be required. Unfortunately, all three functions are essential to generating high quality quantizations. Instead, we seek to replace these floating point operations with efficient integer versions. Indeed, the three constants wb, sb, and cb in Algorithm 3 represent weight scaling, normalization, and centering terms respectively.</p><p>Weight Scaling: Multiplying the output of a bitserial operation by the scale term a k = mean(|W k |) where k is the number of filters or units in weight tensor W has been a staple of BNNs since it was introduced in XNOR-Nets. This simple modification allows the relative magnitude of weight tensors to be preserved through quantization and gives a dramatic boost to accuracy while adding few operations. To maintain this functionality and preserve the integer domain, we replace weight scaling with an approximate power of two (AP2) bitwise shift. AP2 and its gradient g x is defined in Equation <ref type="formula" target="#formula_7">4</ref>.</p><formula xml:id="formula_7">AP 2(x) = 2 round(log2(|x|)) g x = g AP 2(x)<label>(4)</label></formula><p>This allows us to approximate the multiplying of tensor A with weight scale α as</p><formula xml:id="formula_8">A • α k ≈ A −log 2 (AP 2(α k ))</formula><p>where is a bitwise right shift. Note that the term −log 2 (AP 2(α k ) is constant at inference time, so this scaling requires only a single shift operation, which is much more efficient than a floating point multiply on most hardware. However, right shifting is equivalent to a floor division when we'd really like a rounding division to preserve optimal quantization bins. Fortunately, round(x) = floor(x+0.5) so we need only add the integer domain equivalent of 0.5 to a k before shifting. Thus, Riptide's full weight scaling operation is defined in Equation <ref type="formula">5</ref>.</p><formula xml:id="formula_9">wb = −log 2 (AP 2(α k )) q(a) = (a + (1 (wb − 1))) wb (5)</formula><p>Although the addition of the term (1 (wb − 1)) increases the amount of compute used, we will soon show that it can be fused with a centering constant without requiring any extra operations.</p><p>Normalization: We can extend Equation 5 to support activation normalization by approximating the variance of the activation tensor using AP2. Then, instead of dividing activation tensor A by its filter-wise variance σ k , we can perform a right shift by sb bits, where sb is defined in Equation <ref type="formula" target="#formula_10">6</ref>. Thus, we can perform a single right shift by wb + sb bits to both propagate the magnitude of weights, and normalize activations. Equation 5 thus becomes Equation <ref type="formula" target="#formula_10">6</ref>.</p><formula xml:id="formula_10">sb = log 2 (AP 2( σ 2 k + )) q(a) = (a + (1 (wb − 1))) (wb + sb)<label>(6)</label></formula><p>We keep track of the running average of variance during train time so that the term wb + sb is a constant during inference.</p><p>Centering: Finally we extend Equation <ref type="formula" target="#formula_10">6</ref>to center the mean of activations around zero. The simplest way of centering a tensor is by subtracting it's mean. Because this is a subtraction rather than a division or multiplication, we can not simply add more shift bits. Instead, we must quantize the mean of activation tensor A in an equivalent integer format so that it can be subtracted from the quantized activations.</p><p>To this end, we use fixed point quantization (FPQ) as defined in Algorithm 4. The number of relevant bits in the output of an N-bit bitserial layer is N + wb, where the top N bits form the quantized input to the next layer and the remaining wb bits are effectively fractional values. Thus we set B = N + wb in Algorithm 4. Next we must determine the proper range, or scale, term to use in the quantization. This value should be equal to the floating point value that setting all N + wb bits represents. By linear quantization's construction, setting the top N bits represents a value of 1 and the least significant of those N bits represents the value 1 2 N −1 . The value of setting all remaining wb bits is the geometric sum wb i=1</p><formula xml:id="formula_11">1 2 N −1 ( 1 2 ) i which simplifies to 1 2 N −1 (1 − 1 2 wb ).</formula><p>Thus, setting all N + wb bits is equivalent to the floating point value</p><formula xml:id="formula_12">S = 1 + 1 2 N −1 (1 − 1 2 wb ).</formula><p>Algorithm 4 Fixed point quantization (FPQ) function.</p><p>1: Input: a tensor X to quantize to B bits with scale S.</p><p>2: X = clip(X, −S, S)</p><formula xml:id="formula_13">3: g = S 2 B −1 {Compute granularity.} 4: Y = round( X g )</formula><p>With S and B properly defined, we can compute a quantized mean μ from a floating point mean µ as μ = F P Q(µ, B, S) and directly subtract the result from binary activations. Conveniently, μ can be subtracted from (1 (wb−1)) to create a new centering constant. Equation 7 is thus the final form of Equation <ref type="formula" target="#formula_10">6</ref>and allows weight scaling, normalization, and centering in just two integer operations.</p><formula xml:id="formula_14">cb = (1 (wb − 1)) − μ q(a) = (a + cb) (wb + sb) (7)</formula><p>As in the case of variance, we keep track of the running mean of activations during train time so that during inference cb is a constant.</p><p>We thus have fully derived the fused glue operation used in Algorithm 3. The only other point worth noting is that we use clip(q k , 0, 2 N − 1) as the activation for our network. This has a similar effect as a saturating ReLU that bunches large activations into the highest quantization bin. We demonstrate in Section 5 that Riptide's fused glue layers not only are dramatically faster than floating point glue, but also do not negatively impact a binarized model's accuracy.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Generating Efficient Code</head><p>To compile our described algorithms to efficient machine code, we extend TVM <ref type="bibr" target="#b2">(Chen et al., 2018a)</ref> to support bitserial operations. This allows Riptide to directly convert its TensorFlow training graph to a TVM based representation that can leverage LLVM to compile to multiple backends. Additionally, supporting bitserial operations in TVM allows Riptide to apply TVM's scheduling primitives to bitserial operations. These scheduling primitives include:</p><p>• Tiling, which splits loops over a tensor into small regions that can better fit into the cache, thereby reducing memory traffic and increasing compute intensity.</p><p>• Vectorization, which enables the use of hardware SIMD instructions to operate on multiple tensor elements simultaneously.</p><p>• Parallelization, which allows loops to be executed on multiple cores via threading.</p><p>Although these primitives require well chosen hyperparameters to maximize performance, we leverage AutoTVM <ref type="bibr" target="#b3">(Chen et al., 2018b)</ref> to automatically search and find high quality settings. In addition to TVM scheduling primitives, we replace the default LLVM ARM popcount kernel with a more efficient Fast Popcount following the recommendations of <ref type="bibr" target="#b7">Cowan et al. (2018)</ref>.</p><p>To address the memory bottleneck shown in Figure <ref type="figure" target="#fig_3">2</ref>, we introduce an optimization we call Bitpack Fusion, visualized by the dotted red line. By folding our fused glue operation and bitpacking into an outer loop of the preceding bitserial convolution, we need only store a few instances of the integer output before bitpacking back into a more compact representation. By storing only a small number of integer outputs at a time, we can reduce the total amount of memory used to store activations by a factor of 16×. This memory reduction is not only potentially essential to running models on resource constrained platforms, but also increases execution speed by reducing the time spent on memory operations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">EVALUATION</head><p>In our evaluation of Riptide, we consider two primary objectives.</p><p>1. Demonstrate that Riptide's optimizations do not cause accuracy loss relative to state-of-the-art binarization results.</p><p>2. Show that Riptide can produce high speed binary models and explore the impact of its various optimizations.</p><p>Most previous work in binarization has been evaluated on AlexNet <ref type="bibr" target="#b15">(Krizhevsky et al., 2012)</ref>, VGGNet <ref type="bibr" target="#b10">(He et al., 2015)</ref>, and Resnets <ref type="bibr" target="#b11">(He et al., 2016)</ref>. To directly compare against these results, we train these three models with multiple bitwidth and polarity configurations. In these comparisons, we consider HWGQ <ref type="bibr" target="#b1">(Cai et al., 2017)</ref> the current state-of-the-art for high accuracy binary AlexNets and VG-GNets and PACT-SAWB <ref type="bibr" target="#b4">(Choi et al., 2019)</ref> the state-ofthe-art for binarizing Resnets. For all models (including SqueezeNet), we binarize all layers except the input layer as is common practice in the literature. Notably, however, we find that binarizing the output dense layer does not negatively impact the accuracy of Riptide models.</p><p>Binarized models are most attractive in resource constrained environments where full precision models are too slow and memory hungry. To this end, all time measurements are made on a Raspberry Pi 3B (RPi) <ref type="bibr" target="#b17">(Pi, 2015)</ref>. The RPi has an ARM Cortex-A53 CPU with 4 cores clocked at 1.2 GHz. This processor (and RPi's other hardware) is similar to many embedded systems, and results measured here are likely to be representative of other platforms. Due to the precedent of previous binarization, all Riptide accuracy measurements are made using AlexNet, VGGNet, and Resnet. However in practice, these architectures are bulky enough that they would not be deployed to an RPi class device. In our detailed runtime analysis, we instead examine quantized versions of SqueezeNet <ref type="bibr" target="#b13">(Iandola et al., 2016)</ref>, a highly parameter and runtime efficient model that is commonly used in embedded applications. Although we do not provide extensive accuracy validations of SqueezeNet, we have confirmed that training SqueezeNet with Riptide's optimizations achieves a top-1 accuracy within 1% of SqueezeNet trained with other state-of-the-art approaches. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Squeezenet</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">End-to-End Results</head><p>The results of our training experiments and the accuracy reported by previous binarization works are reported in Table 1. Models are binarized using all Riptide optimizations and trained on the ImageNet dataset for 100 epochs using SGD with an initial learning rate of 0.1 that is decreased by 10× every 30 epochs. We train variants of AlexNet and VGGNet with 1-bit, 2-bit, and 3-bit activations, in all cases weights are quantized bipolarly with 1-bit except Resnets which use 2 bits. For baselines we train full precision versions of Alexnet, VGGNet, and Resnet using the same settings as above. We report the runtime of these baseline models when optimized using TVM. The speedup results for each model and bitwidth is visualized in Figure <ref type="figure" target="#fig_4">3</ref>.</p><p>Although the author's of PACT-SAWB reported impressive accuracies of 67.0% and 72.2% for 2-bit Resnet18 and 2-bit Resnet50, we were unable to replicate these results. In our implementation, we instead reached the top-1 accuracies reported in Table <ref type="table" target="#tab_2">1</ref>, which are only marginally higher than those reported in DoReFaNet. Although it is possible that the lower accuracy is due to an implementation mistake, it is difficult to verify as there is no open source PACT-SAWB implementation. However, it is worth noting that the techniques used in PACT-SAWB are entirely compatible with those used in Riptide, so it may be possible to improve Resnet accuracies by combining the two works.</p><p>There are three key takeaways from these results:</p><p>• Riptide is able to generate the first ever reported end-toend speedups of a binary model and achieves accuracy comparable to the state-of-the-art across all configurations, confirming that Riptide's optimizations do not cause a drop in accuracy.</p><p>• We observe end-to-end speedups across all models and bitwidths and have a wide range of points in terms of the speed to accuracy trade-off; ranging from high accuracy 3-bit unipolar models with 4× speedup to high speed bipolar models with 12× speedup.</p><p>• Although unipolar models yield higher accuracy and slower runtimes than bipolar models as expected, they are only about 25% slower despite having twice the number of operations. This suggests our mixed polarity implementation (Equation <ref type="formula">3</ref>) is quite efficient.</p><p>Taking these points together, we are confident that Riptide provides a high quality implementation of bitserial networks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Layerwise Analysis</head><p>We measure the per-layer runtime of SqueezeNet unipolarly quantized at each bitwidth and visualize the results in runtime over the layers. There are a few interesting takeaways from this measurement. We see that not all layers benefit equally from quantization; those towards the end of the model have speedup of up to 20× compared to early layers' 3×. Early layers tend to be spatially larger but have fewer channels than later layers, suggesting that binarization scales better with the number of channel than it does spatially. Leveraging this knowledge, it may be possible to design architectures that are able to achieve higher speedups when binarized even if they are less efficient in full precision. We also note that the output dense layer achieves speedups inline with convolutional layers, suggesting our techniques apply well to both types of layer. Although we leave the input layer in full precision, we see that it takes a relatively small amount of the total runtime, suggesting that this is not a significant bottleneck.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Optimization Ablation</head><p>We perform a one-off ablation study of each of Riptide's optimizations. The results of this study are shown in Figure <ref type="figure">5</ref>. Although not all optimizations contribute equally, its clear that they are all essential to our final highly performant model, with the smallest reduction lowering the end-to-end speedup from 10.6× to 8.4× and the largest reduction lowering speedups to only 2.9×. In the subsequent sections we drill down further into these optimizations to better understand their impact.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Polarity</head><p>To better examine the impact of polarity, we consider the runtime of the first layer of SqueezeNet for a baseline FP32 model, a unipolar model, and a bipolar model with the latter two being quantized unipolarly with 1-bit in Figure <ref type="figure">6</ref>. Here, we have added a yellow line to indicate the runtime if the layer were entirely compute bound (calculated by dividing the number of operations by the RPi's frequency × core count). We see that the baseline model is extremely close to its hypothetical ceiling, suggesting it is in fact quite compute bound. The binarized models on the other hand are far from compute bound. Because Riptide's unipolar quantization requires no more memory operations than bipolar, it is only marginally slower. Thus in general, unipolar quantization tends to give better accuracy to speedup trade-offs. However, in situations where speed is more important than accuracy, bipolar models may be more attractive.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.5">Scheduling</head><p>To demonstrate the impact of proper machine code generation, we take a SqueezeNet binarized unipolarly with 1-bit and compile it with no optimizations then measure its endto-end runtime. From that unoptimized starting point, we incrementally apply the optimizations discussed in Section 4.3 and measure the resulting runtimes. The speedups of these measurements are shown in Figure <ref type="figure">8</ref>. We note that an unoptimized binary model is actually about 7× slower than the full precision baseline. We can see that each optimization contributes significantly to generating performant machine code. Notably, we find that bitpack fusion gives a speed boost of about 30%, all of which comes from the reduction to memory operations that it contributes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.6">Glue Layers</head><p>To understand the impact of our fused glue operation, we examine the runtime of SqueezeNet when all optimizations except fused glue are applied. We first measure the runtime of each bitserial layer and its corresponding glue and visualize the results in Figure <ref type="figure" target="#fig_7">7</ref>. We find that glue layers make up a considerable portion of each layer and cumulatively contribute 44% of the total inference time. This confirms that glue layers are a major bottleneck at all points in the model. Next, we examine each individual operation in the first quantized layer of SqueezeNet and visualize the runtimes in Figure <ref type="figure">9</ref>. Here we find that although the Quantize operation is the largest of the glue operations, all contribute non-trivially. This leads us to conclude that optimizing only a portion of the glue layers would be insufficient and give us confidence that our fused glue operation is essential and highly performant.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">CONCLUSION</head><p>In this paper we introduce Riptide, an end-to-end system for training and deploying high speed binarized networks.</p><p>In our development of Riptide, we encounter and address numerous design flaws in existing binary networks. We propose a solution to unipolar quantization implementability, derive a novel "Fused Glue" interlayer operation that completely removes floating point arithmetic from binary networks, and demonstrate how to generate efficient bitserial machine code. We show that Riptide's optimization techniques lead to order of magnitude speedups and do not sacrifice accuracy relative to state-of-the-art approaches.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head></head><label></label><figDesc>shape(a k−1 ) and KKF C = shape(L k ) 6: c k = Conv(a k−1 ) {KKF HW C ops.} 7: p k = Pooling(c k ) {HWF ops.} 8: b k = BatchNorm(p k ) {4HW F ops.} 9: a k = Activate(b k ) {HW F ops.} 10: end for 11: Y = Dense(a L ) 12: Def. of Conv, input A with F filters W , size KKC. 13: for i = 0 to K, j = 0 to K do 14: for c = 0 to C do 15:</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head></head><label></label><figDesc>} 4: c = BitserialConv(b) { N KKF HW C 43 ops.} 5: f = Dequantize(c) {4HWF ops.} 6: y = WeightScale(f ) {HWF ops.} 7: Definition of BitserialConv with F size K kernels on input Q, a set of N int64 bit packed tensors with original size HW C. 8: for n = 0 to N , i = 0 to K, j = 0 to K do 9:</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 1 .</head><label>1</label><figDesc>Figure 1. End-to-end speedup of SqueezeNet with fixed glue layer costs and theoretical speedups of convolution layers.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. Scheduling of N -bit binary layer demonstrating intermediate memory used. By fusing computation within tiles, such as the region highlighted red, memory use can be reduced.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Visualization of end to end speedups of all explored models and bitwidths compared to floating point baselines.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 4 .Figure 5 .</head><label>45</label><figDesc>Figure 4. Layerwise speedup of SqueezeNet quantized with varying bitwidth versus the floating point baseline model.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 4 .Figure 6 .</head><label>46</label><figDesc>Figure 6. Effect of quantization polarity on the runtime of the first fire layer in SqueezeNet. The horizontal yellow line indicates the runtime of the layer if it were run with perfect efficiency.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 7 .</head><label>7</label><figDesc>Figure 7. Layerwise runtime breakdown of SqueezeNet quantized with 1-bit weights and activations.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 8 .Figure 9 .</head><label>89</label><figDesc>Figure 8. End-to-end speedup of quantized SqueezeNet versus the baseline floating point model when scheduling optimizations are incrementally applied.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>𝑥 0 𝑥 1 𝑥 2 𝑥 3 𝑥 4 𝑥 5 𝑥 6 𝑥 7 𝑥 8 𝑥 9 𝑥 𝑁 . . .</figDesc><table><row><cell></cell><cell></cell><cell cols="2">Int-8</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Int-N Bit Packed Activations</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>𝑁𝐻𝑊𝐶 8</cell><cell>Bytes</cell></row><row><cell></cell><cell>Int-16</cell><cell></cell><cell></cell><cell></cell><cell cols="2">BinaryConv</cell><cell></cell></row><row><cell>Int-16 Popcount Accumulation</cell><cell>𝑐 0</cell><cell cols="2">𝑐 1</cell><cell>𝑐 2</cell><cell>𝑐 3</cell><cell>.</cell><cell>𝑐 𝑁</cell><cell>2𝑁𝐻𝑊𝐶 Bytes</cell></row><row><cell></cell><cell>Int-16</cell><cell>Unused</cell><cell>Int-N</cell><cell></cell><cell cols="2">Fused Shift/Scale</cell><cell></cell></row><row><cell>Int-16 Quantized Prepacked Bits</cell><cell>𝑞 0</cell><cell cols="2">𝑞 1</cell><cell>𝑞 2</cell><cell>𝑞 3</cell><cell>.</cell><cell>𝑞 𝑁</cell><cell>2𝑁𝐻𝑊𝐶 Bytes</cell></row><row><cell></cell><cell></cell><cell></cell><cell>Int-8</cell><cell></cell><cell>Bit Pack</cell><cell></cell><cell></cell></row><row><cell>Int-N Bit Packed Outputs</cell><cell cols="5">𝑦 0 𝑦 1 𝑦 2 𝑦 3 𝑦 4 𝑦 5 𝑦 6 𝑦 7 𝑦 8 𝑦 9</cell><cell>. . .</cell><cell>𝑦 𝑁</cell><cell>𝑁𝐻𝑊𝐶 8</cell><cell>Bytes</cell></row><row><cell cols="2">Bitpack Fusion</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 1 .</head><label>1</label><figDesc>Accuracy and speed of related binarization work and our results</figDesc><table><row><cell></cell><cell>Model</cell><cell>Name</cell><cell>1-bit</cell><cell>2-bit</cell><cell>3-bit</cell><cell>full precision</cell></row><row><cell></cell><cell></cell><cell cols="3">ImageNet top-1 accuracy / Runtime (ms)</cell><cell></cell><cell></cell></row><row><cell>1</cell><cell>AlexNet</cell><cell cols="2">Xnor-Net (Rastegari et al., 2016) 44.2% / -</cell><cell>-/ -</cell><cell>-/ -</cell><cell>56.6% / -</cell></row><row><cell>2</cell><cell>AlexNet</cell><cell>BNN (Courbariaux et al., 2015)</cell><cell>27.9% / -</cell><cell>-/ -</cell><cell>-/ -</cell><cell>-/ -</cell></row><row><cell>3</cell><cell>AlexNet</cell><cell>DoReFaNet (Zhou et al., 2016)</cell><cell>43.6% / -</cell><cell>49.8% / -</cell><cell>48.4% / -</cell><cell>55.9% / -</cell></row><row><cell>4</cell><cell>AlexNet</cell><cell>QNN (Hubara et al., 2016)</cell><cell>43.3% / -</cell><cell>51.0% / -</cell><cell>-/ -</cell><cell>56.6% / -</cell></row><row><cell>5</cell><cell>AlexNet</cell><cell>HWGQ (Cai et al., 2017)</cell><cell>-/ -</cell><cell>52.7% / -</cell><cell>-/ -</cell><cell>58.5% / -</cell></row><row><cell>6</cell><cell cols="2">VGGNet HWGQ (Cai et al., 2017)</cell><cell>-/ -</cell><cell>64.1% / -</cell><cell>-/ -</cell><cell>69.8% / -</cell></row><row><cell>7</cell><cell cols="3">Resnet18 PACT-SAWB (Choi et al., 2019) -/ -</cell><cell>62.8% / -</cell><cell>-/ -</cell><cell>70.4% / -</cell></row><row><cell>8</cell><cell cols="3">Resnet50 PACT-SAWB (Choi et al., 2019) -/ -</cell><cell>67.4% / -</cell><cell>-/ -</cell><cell>76.9% / -</cell></row><row><cell>9</cell><cell>AlexNet</cell><cell>Riptide-unipolar (ours)</cell><cell cols="4">44.5% / 150.4 52.5% / 196.8 53.6% / 282.8 56.5% / 1260.0</cell></row><row><cell cols="2">10 AlexNet</cell><cell>Riptide-bipolar (ours)</cell><cell cols="4">42.8% / 122.7 50.4% / 154.6 52.4% / 207.0 56.5% / 1260.0</cell></row><row><cell cols="3">11 VGGNet Riptide-unipolar (ours)</cell><cell cols="4">56.8% / 243.8 64.2% / 387.2 67.1% / 610.0 72.7% / 2420.0</cell></row><row><cell cols="3">12 VGGNet Riptide-bipolar (ours)</cell><cell cols="4">54.4% / 184.1 61.5% / 271.4 65.2% / 423.5 72.7% / 2420.0</cell></row><row><cell cols="3">13 Resnet18 Riptide-unipolar (ours)</cell><cell>54.9% / 82.0</cell><cell cols="2">62.2% / 177.2 -/ -</cell><cell>70.4% / 385.5</cell></row><row><cell cols="3">14 Resnet50 Riptide-unipolar (ours)</cell><cell cols="3">59.1% / 171.9 66.9% / 340.3 -/ -</cell><cell>76.9% / 771.8</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">Department of Computer Science and Engineering, University of Washington, Seattle, USA</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">OctoML, Seattle, Washington, USA</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">Microsoft Research, Redmond, Washington, USA. Correspondence to: Josh Fromm &lt;jwfromm@octoml.ai&gt;, Matthai Philipose &lt;matthaip@microsoft.com&gt;.</note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Tensorflow: a system for large-scale machine learning</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">OSDI</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">16</biblScope>
+			<biblScope unit="page" from="265" to="283" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Deep learning with low precision by half-wave gaussian quantization</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vasconcelos</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1702.00953</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Guestrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1802.04799</idno>
+		<title level="m">Tvm: End-to-end optimization stack for deep learning</title>
+				<imprint>
+			<date type="published" when="2018">2018a</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Guestrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.08166</idno>
+		<title level="m">Learning to optimize tensor programs</title>
+				<imprint>
+			<date type="published" when="2018">2018b</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">Bridging the accuracy gap for 2-bit quantized neural networks (qnn)</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">I</forename><surname>Chuang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">.-J</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Venkataramani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Gopalakrishnan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<publisher>SysML</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Binaryconnect: Training deep neural networks with binary weights during propagations</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Courbariaux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-P</forename><surname>David</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="3123" to="3131" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<author>
+			<persName><forename type="first">M</forename><surname>Courbariaux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Hubara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Soudry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>El-Yaniv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1602.02830</idno>
+		<title level="m">Binarized neural networks: Training deep neural networks with weights and activations constrained to+ 1 or-1</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Automating generation of low precision deep learning operators</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Cowan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1810.11066</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Su</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1708.01001</idno>
+		<title level="m">Learning accurate low-bit deep neural networks with stochastic quantization</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fromm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Patel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Philipose</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.10368</idno>
+		<title level="m">Heterogeneous bitwidth binarization in convolutional neural networks</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Delving deep into rectifiers: Surpassing human-level performance on imagenet classification</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE international conference on computer vision</title>
+				<meeting>the IEEE international conference on computer vision</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1026" to="1034" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Deep residual learning for image recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE conference on computer vision and pattern recognition</title>
+				<meeting>the IEEE conference on computer vision and pattern recognition</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="770" to="778" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<author>
+			<persName><forename type="first">I</forename><surname>Hubara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Courbariaux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Soudry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>El-Yaniv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1609.07061</idno>
+		<title level="m">Quantized neural networks: Training neural networks with low precision weights and activations</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<author>
+			<persName><forename type="first">F</forename><forename type="middle">N</forename><surname>Iandola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">W</forename><surname>Moskewicz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ashraf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Keutzer</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Squeezenet</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1602.07360</idno>
+		<title level="m">Alexnet-level accuracy with 50x fewer parameters and¡ 0.5 mb model size</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Batch normalization: Accelerating deep network training by reducing internal covariate shift</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ioffe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Szegedy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Machine Learning</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="448" to="456" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Imagenet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="1097" to="1105" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<author>
+			<persName><forename type="first">F</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Liu</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1605.04711</idno>
+		<title level="m">Ternary weight networks</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Raspberry pi model b</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pi</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Halide: a language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ragan-Kelley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Barnes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Paris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Durand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">48</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="519" to="530" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Xnor-net: Imagenet classification using binary convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Rastegari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Ordonez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Redmon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Farhadi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Conference on Computer Vision</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="525" to="542" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">How to train a compact binary neural network with high accuracy</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hua</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">AAAI</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="2625" to="2631" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Xianyi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chothia</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Openblas</surname></persName>
+		</author>
+		<ptr target="http://xianyi.github.io/OpenBLAS" />
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Ni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Wen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zou</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1606.06160</idno>
+		<title level="m">Dorefa-net: Training low bitwidth convolutional neural networks with low bitwidth gradients</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

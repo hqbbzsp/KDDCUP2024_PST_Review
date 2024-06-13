@@ -1,0 +1,1881 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Translation-optimized Memory Compression for Capacity</title>
+				<funder>
+					<orgName type="full">National Science Foundation</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Gagandeep</forename><surname>Panwar</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Muhammad</forename><surname>Laghari</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">David</forename><surname>Bears</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Yuqing</forename><surname>Liu</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Chandler</forename><surname>Jearls</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Esha</forename><surname>Choukse</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Kirk</forename><forename type="middle">W</forename><surname>Cameron</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ali</forename><forename type="middle">R</forename><surname>Butt</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Xun</forename><surname>Jian</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Virginia</forename><surname>Tech</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">?</forename><surname>Apple</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Microsoft</forename><surname>Research</surname></persName>
+						</author>
+						<title level="a" type="main">Translation-optimized Memory Compression for Capacity</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1109/MICRO56248.2022.00073</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:47+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>memory</term>
+					<term>hardware memory compression</term>
+					<term>address translation</term>
+					<term>memory subsystem</term>
+					<term>compression ASIC</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>The demand for memory is ever increasing. Many prior works have explored hardware memory compression to increase effective memory capacity. However, prior works compress and pack/migrate data at a small -memory blocklevel -granularity; this introduces an additional block-level translation after the page-level virtual address translation. In general, the smaller the granularity of address translation, the higher the translation overhead. As such, this additional block-level translation exacerbates the well-known address translation problem for large and/or irregular workloads.</p><p>A promising solution is to only save memory from cold (i.e., less recently accessed) pages without saving memory from hot (i.e., more recently accessed) pages (e.g., keep the hot pages uncompressed); this avoids block-level translation overhead for hot pages. However, it still faces two challenges. First, after a compressed cold page becomes hot again, migrating the page to a full 4KB DRAM location still adds another level (albeit page-level, instead of block-level) of translation on top of existing virtual address translation. Second, only compressing cold data require compressing them very aggressively to achieve high overall memory savings; decompressing very aggressively compressed data is very slow (e.g., &gt; 800ns assuming the latest Deflate ASIC in industry).</p><p>This paper presents Translation-optimized Memory Compression for Capacity (TMCC) to tackle the two challenges above. To address the first challenge, we propose compressing page table blocks in hardware to opportunistically embed compression translations into them in a software-transparent manner to effectively prefetch compression translations during a page walk, instead of serially fetching them after the walk. To address the second challenge, we perform a large design space exploration across many hardware configurations and diverse workloads to derive and implement in HDL an ASIC Deflate that is specialized for memory; for memory pages, it is 4X as fast as the state-of-the art ASIC Deflate, with little to no sacrifice in compression ratio.</p><p>Our evaluations show that for large and/or irregular workloads, TMCC can either improve performance by 14% without sacrificing effective capacity or provide 2.2x the effective capacity without sacrificing performance compared to a stateof-the-art hardware memory compression for capacity.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>I. INTRODUCTION</head><p>Memory is a costly resource in computing. For example, under many VM instances in AWS (e.g., t2, t3, t3a, t4g), doubling a VM's memory size while keeping the number of vCPUs the same doubles the total hourly cost of the VM (e.g., going from a 0.5GB VM with 1 vCPU to a 1GB VM with 1 vCPU doubles the total hourly cost of the VM). Other large-scale data center operators (e.g., Facebook <ref type="bibr" target="#b0">[1]</ref>, Microsoft <ref type="bibr" target="#b1">[2]</ref>, Google <ref type="bibr" target="#b2">[3]</ref>) also report that memory makes up a large and rising fraction of total infrastructure cost.</p><p>To increase effective memory capacity without increasing actual DRAM cost, many prior works <ref type="bibr" target="#b3">[4]</ref>, <ref type="bibr" target="#b4">[5]</ref>, <ref type="bibr" target="#b5">[6]</ref>, <ref type="bibr" target="#b6">[7]</ref>, <ref type="bibr" target="#b7">[8]</ref>, <ref type="bibr" target="#b8">[9]</ref>, <ref type="bibr" target="#b9">[10]</ref> have explored hardware memory compression. Hardware transparently compresses DRAM content on-thefly with the memory controller evicting/writing back memory blocks to DRAM. To increase effective memory capacity (i.e., to store more values in memory), the memory controller also transparently migrates compressed data closer together to free up space in DRAM for future data. To migrate data, the memory controller takes on several OS features; specifically, memory controller maintains a dynamic, pagetable-like, fully-associative, physical address to DRAM address translation table that can map any physical address to any DRAM address; we refer to these new hardwaremanaged translation entries as Compression Translation Entries (CTEs), as they are similar to OS page table entries (PTEs). Prior works cache CTEs in the memory controller via a dedicated CTE cache, similar to the TLBs dedicated to caching PTEs.</p><p>This new dynamic physical-to-DRAM address translation increases the end-to-end latency of memory accesses, however. This translation takes place serially after the existing virtual-to-physical translation produces a physical address; if that physical address incurs an LLC miss and the LLC miss suffers from a CTE miss in the CTE cache, memory controller has to wait for the missing CTE to arrive from DRAM before knowing where in DRAM to fetch the missing data block.</p><p>This paper explores and addresses the problem of high address translation overheads that large and/or irregular workloads suffer under hardware memory compression. We note that just like how these workloads suffer from high PTE miss rates, they also suffer from high CTE miss rates. To make the matter worse, prior works migrate memory content at memory block granularity; this requires much more fine-grained address translation than existing virtualto-physical translation, which typically operates at 4KB page granularity. In general, the finer the coverage of translations, the less cacheable the translations become, and higher the translation miss rate.</p><p>A promising solution to tackle the new address translation overhead is to let hardware take on an OS-inspired approach: only save memory from cold (i.e., less recently accessed) pages without saving memory from hot (i.e., recently accessed) pages (e.g., keep the hot pages uncompressed), like OS memory compression. Saving memory only from cold, but not hot, pages can mitigate the block-level translation overhead due to saving memory from hot pages in hardware. Such an OS-inspired hardware memory compression faces two challenges, however. A) After a compressed cold page becomes hot again, migrating the page to a full 4KB DRAM location still adds another level (albeit page-level, instead of block-level) of translation for future accesses to the newly hot page. B) Only compressing cold pages requires very aggressively compressing cold pages to achieve the same total memory savings as prior works' approach of saving memory from all (both cold and hot) pages; decompressing aggressively compressed pages incurs high latency overhead (e.g., &gt; 800ns in IBM's state-of-the-art ASIC Deflate <ref type="bibr" target="#b10">[11]</ref>).</p><p>This paper presents Translation-optimized Memory Compression for Capacity (TMCC) to enable high performance hardware memory compression for large and/or irregular workloads. TMCC builds on the OS-inspired approach above, but addresses its two key challenges.</p><p>To address Challenge A), we make two observations. First, CTE misses typically occur after PTE misses in TLB because CTEs, especially the page-level CTEs under an OS-inspired approach, have similar translation reach as PTEs. Second, we observe page table blocks (PTBs) are highly compressible because adjacent virtual pages often have identical status bits and the most significant bits in physical page numbers are unused. As such, to hide the latency of CTE misses, TMCC transparently compresses each PTB in hardware to free up space in the PTB to embed the CTEs of the 4KB pages (i.e., either data pages or page table pages) that the PTB points to; this enables each page walk to also prefetch the matching CTE required for fetching from DRAM either the end data or the next PTB.</p><p>To address Challenge B), we take IBM's state-of-the-art ASIC Deflate design <ref type="bibr" target="#b10">[11]</ref>, which was designed for both storage and memory, and specialize it for memory. Specifically, we perform a large design space exploration across many dimensions of hardware configurations available under Deflate and across diverse workloads; the end product is an ASIC Deflate specialized for memory that is 4X as fast as the state-of-the-art Deflate when it comes to memory pages.</p><p>The contributions of this paper are as follows:</p><p>1) We are the first to tackle the address translation problem faced by large and/or irregular workloads when using hardware memory compression to improve effective memory capacity. 2) We identify CTE cache misses mostly follow TLB misses (e.g., for 89% of the time, on average). As such, we propose embedding CTEs into PTBs to enable accurate prefetch of CTEs during the normal page walks after TLB misses. 3) We are the first to specialize ASIC Deflate for memory. Our ASIC Deflate decompresses 4KB memory pages 4X as fast as the best general-purpose Deflate. We publicly release our HDL at https:// github.com/ HEAP-Lab-VT/ ASIC-DEFLATE-for-memory. 4) We compare against Compresso <ref type="bibr" target="#b5">[6]</ref>, a state-of-theart prior work on hardware memory compression; our evaluations show that for large and/or irregular workloads, TMCC can either improve performance by 14% without sacrificing effective capacity or provide 2.2x the effective capacity without sacrificing performance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>II. BACKGROUND</head><p>Conventional Address Translation: OS typically maps virtual addresses to physical addresses at 4 KB page granularity. OS maintains a page table for each program to map virtual pages to physical pages. CPUs incorporate a per-core translation lookaside buffer (TLB) to cache recently used page table entries (PTEs). A TLB has a limited size (e.g., 2048 entries). A TLB miss triggers the page walk. The page walk performs a sequence of memory accesses to traverse the page table. Each step in a page walk fetches a 64B block of eight PTEs; we call this block a page table block (PTB).</p><p>Hardware memory compression: Many prior works <ref type="bibr" target="#b3">[4]</ref>, <ref type="bibr" target="#b4">[5]</ref>, <ref type="bibr" target="#b5">[6]</ref>, <ref type="bibr" target="#b6">[7]</ref>, <ref type="bibr" target="#b7">[8]</ref>, <ref type="bibr" target="#b8">[9]</ref>, <ref type="bibr" target="#b9">[10]</ref>, <ref type="bibr" target="#b11">[12]</ref>, <ref type="bibr" target="#b12">[13]</ref> have explored hardware memory compression; memory controller (MC) transparently compresses content on-the-fly with evicting/writing back memory blocks to DRAM and transparently decompresses DRAM content on-the-fly for every LLC miss.</p><p>Broadly, prior works on hardware memory compression falls under two broad categories. One body of works compress memory values to increase effective memory bandwidth <ref type="bibr" target="#b12">[13]</ref>, <ref type="bibr" target="#b13">[14]</ref>, <ref type="bibr" target="#b14">[15]</ref>, <ref type="bibr" target="#b15">[16]</ref>, <ref type="bibr" target="#b16">[17]</ref>, <ref type="bibr" target="#b17">[18]</ref>, <ref type="bibr" target="#b18">[19]</ref>, <ref type="bibr" target="#b19">[20]</ref>. Compressing memory blocks reduces the number of memory bus cycles required to transfer data to and from memory. Another body of works use compression to increase effective memory capacity by migrating compressed blocks closer to free up a large contiguous space in DRAM for future use.</p><p>Intuitively, increasing effective capacity requires more aggressive data migration than compressing memory to increase effective bandwidth. The former carries out fullyassociative data migration in DRAM. In comparison, the latter either keeps memory blocks in place after compression <ref type="bibr" target="#b12">[13]</ref>, <ref type="bibr" target="#b16">[17]</ref>, <ref type="bibr" target="#b19">[20]</ref> or migrates compressed memory blocks to a neighboring location in DRAM <ref type="bibr" target="#b18">[19]</ref>.</p><p>To migrate data transparently in hardware, prior works on increasing effective capacity borrow two OS memory management features and implement them in hardware.</p><p>First, prior works borrow from OS' free list; MC maintains a linked-list-based Free List <ref type="bibr" target="#b3">[4]</ref>, <ref type="bibr" target="#b5">[6]</ref> to track free space in DRAM at a coarse (e.g., 256B <ref type="bibr" target="#b3">[4]</ref> or 512B <ref type="bibr" target="#b5">[6]</ref>) granularity called chunks. When detecting that sufficient slack currently exists within the space taken up by a page, prior works repack the page's content closer together to free up chunk(s) to push to (i.e., track at the top of) the Free List. When a page becomes less compressible and cannot fit in its currently allocated chunks, prior works pop a chunk from (i.e., stop tracking it in) Free List to allocate the chunk to the page.</p><p>Second, prior works borrow from OS page tables; MC maintains a dynamic, page-table-like, fully-associative, physical address to DRAM address translation table that can map any physical address to any DRAM address. We refer to these new hardware-managed translation entries as Compression Translation Entries (CTEs), as they are similar to OS page table entries (PTEs). MC stores the CTEs in DRAM as a linear 1-level table. Each CTE (a.k.a, metadata block <ref type="bibr" target="#b5">[6]</ref>, <ref type="bibr" target="#b3">[4]</ref>, <ref type="bibr" target="#b7">[8]</ref> in prior works) contains individual fields to track the DRAM address of individual 64B blocks within a group of blocks. This is because compression ratio varies across blocks; as such, after saving memory through repacking, different blocks start at irregular-spaced DRAM addresses, instead of regular-spaced DRAM addresses like current systems without hardware compression. Prior works cache these CTEs in a dedicated CTE cache, similar to TLBs dedicated to caching PTEs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>III. PROBLEM</head><p>Large workloads (i.e., ones with large memory footprint) are ubiquitous in today's computing landscape <ref type="bibr" target="#b20">[21]</ref>; examples include graph analytics, machine learning, and inmemory databases <ref type="bibr" target="#b21">[22]</ref>. However, large workloads suffer from high address translation overhead because their PTEs are too numerous to fit in TLBs. Similarly, the PTEs of workloads with irregular access patterns also cache poorly in TLBs. As such, many works <ref type="bibr" target="#b22">[23]</ref>, <ref type="bibr" target="#b23">[24]</ref>, <ref type="bibr" target="#b24">[25]</ref>, <ref type="bibr" target="#b25">[26]</ref>, <ref type="bibr" target="#b26">[27]</ref>, <ref type="bibr" target="#b27">[28]</ref> have explored how to improve address translation for large and/or irregular workloads in the context of conventional systems without hardware memory compression.</p><p>This paper explores the problem of high address translation overheads that large and/or irregular workloads suffer under hardware memory compression for capacity. We note that just like how they suffer from high PTE miss rates in TLBs, they also suffer from high CTE miss rates under hardware memory compression. Making the matter worse, prior works on hardware memory compression translate from physical to DRAM addresses at memory block granularity, instead of page granularity. It is well-known that the finer the translations, the higher the translation miss rate.</p><p>Take for example Compresso <ref type="bibr" target="#b5">[6]</ref>, the state-of-the-art hardware memory compression for capacity. To perform physical-to-DRAM address translation for a 4KB range of physical addresses, Compresso requires a 64B CTE; each CTE records per-block metadata to translate individual blocks within the 4KB range. Overall, each CTE in Compresso costs 8X as much space as a PTE, which is only 8B. Compresso caches CTEs in a 64KB CTE cache in MC; as such, the CTE cache reaches only 64KB/64B = 1K pages. Because TLBs typically have a similar (e.g., 1.5K) number of entries, we expect CTE misses to be similarly frequent as TLB misses.</p><p>Figure <ref type="figure">1</ref> shows total TLB misses and CTE misses normalized to the number of last-level cache (LLC) misses; we show TLB misses normalized to LLC misses, instead of 1000 instructions, to more closely compare with CTE misses. Figure <ref type="figure">1</ref> includes all workloads used by recent prior works <ref type="bibr" target="#b22">[23]</ref>, <ref type="bibr" target="#b23">[24]</ref> on improving address translation that we know how to run in Gem5 <ref type="bibr" target="#b28">[29]</ref>. When evaluating IBM's GraphBIG <ref type="bibr" target="#b29">[30]</ref>, we use a Facebook-like social media graph dataset (see datagen-8 5-fb <ref type="bibr" target="#b30">[31]</ref>) and multi-threading. On average across all workloads, CTE miss rate is higher than TLB miss rate (i.e., 34% vs 30%). We were initially surprised by this finding because the CTE misses in Figure <ref type="figure">1</ref> only include CTE misses for fulfilling LLC misses. By closer inspection, we find CTEs miss more often because all regular memory requests, including requests for PTBs themselves from the page walker, require accessing CTEs; TLB misses, however, only occur for data (and instruction).</p><p>To reduce CTE miss rate, one possible solution is to make the CTE cache bigger. We evaluate CTE hit rate using a 256KB metadata cache. Figure <ref type="figure">2</ref> shows an average hit rate of 70.5% for a 256KB metadata cache; this means it still misses 1 -70.5% = 29.5% of the time. As such, making CTE cache bigger does not effectively reduce CTE miss rate.</p><p>Another possible solution is to use LLC as a victim cache for CTEs evicted from the CTE cache. Figure <ref type="figure">2</ref> shows that even when caching in LLC, a high 21% of </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>IV. A PROMISING SOLUTION: TAKING AN OS-INSPIRED APPROACH TO HARDWARE</head><p>A promising solution to tackle the address translation overhead under hardware memory compression is to let hardware take on yet another OS feature: only save memory from cold (i.e., less recently accessed) pages without saving memory from hot (i.e., recently accessed) pages (e.g., keep the hot pages uncompressed), like OS memory compression. When hardware does not save memory from hot pages, hardware can lay out hot pages' memory blocks regularly either like uncompressed memory or like compressing memory for expanding effective bandwidth (see Section II). For hot pages, which are most critical to performance, doing so helps to avoid the overhead of fine-grained block-level translation.</p><p>Specifically, avoiding block-level translation can significantly increase the translation reach of each CTE and, therefore, significantly reduce CTE cache miss rate. Consider for example Compresso; each 64B CTE cacheline only translates for one 4KB physical page due to storing a translation for every block in the page. After switching over to page-level translation like OS, each 64B CTE cacheline can translate for eight pages, like how a PTB translates for eight virtual pages. For the workloads in Figure <ref type="figure">1</ref>, we find switching from block-level translation to pagelevel translation eliminates 40% of CTE misses, on average, while simply quadrupling the size of the CTE cache only reduces CTE miss rate by 13% (from 34% down to 29.5%, see Section III). Page-level translation is so effective due to increasing effective CTE cache size by 8X and better exploiting spatial locality (i.e., fetching from DRAM a CTE block that translates at page level equates to fetching eight adjacent CTE blocks that translate at block level).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Background on OS Compression</head><p>OSes also compress memory <ref type="bibr" target="#b33">[34]</ref>, <ref type="bibr" target="#b34">[35]</ref>, <ref type="bibr" target="#b35">[36]</ref>, [37], <ref type="bibr" target="#b36">[38]</ref>. OS does so in many data centers (e.g., Google Cloud <ref type="bibr" target="#b2">[3]</ref>, IBM Cloud <ref type="bibr" target="#b37">[39]</ref>, Facebook <ref type="bibr" target="#b0">[1]</ref>).</p><p>In the eyes of an architect, OS memory compression manages memory as a 2-level exclusive hierarchy: (i) Memory Level 1 (ML1) stores everything uncompressed, (ii) Memory Level 2 (ML2) stores everything compressed. Accesses to ML1 are overhead-free (e.g., incurs no translation overhead). Accesses to a compressed virtual page in ML2 incurs a page fault to wake up OS to pop a free physical page from ML1's free list and migrate the virtual page to the page.</p><p>Because ML1 provides no gain in effective capacity, providing significant gain in overall effective capacity requires ML2 to aggressively save memory from the pages ML2 is storing. As such, ML2 uses aggressive page-granularity compression algorithms, such as Deflate <ref type="bibr" target="#b10">[11]</ref>. ML2 also keeps many free lists, each tracking sub-physical pages of a different size, to store any compressed virtual page in a practically ideal matching sub-physical page <ref type="bibr" target="#b38">[40]</ref>, <ref type="bibr" target="#b39">[41]</ref>.</p><p>ML2 gracefully grows and shrinks relative to ML1 with increasing and decreasing memory usage. When everything can fit in memory uncompressed, ML2 shrinks to zero bytes in physical size so ML1 can have every physical page. Specifically, when ML2's free list(s) get large (e.g., due to reducing memory usage), ML2 donates free physical pages from its free list(s) to ML1. OS also grows ML1 free list, when it gets small, by migrating cold virtual pages to ML2. Migrating a virtual page to ML2 shrinks one of ML2's free lists. If a ML2 free list gets empty, ML1 gives cold victim physical pages to ML2 (i.e., track them in ML2 instead of ML1), so that ML2 can compress the virtual pages currently in the victim pages to free space in the victims to grow ML2's free list(s).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Taking the OS Approach to Hardware</head><p>Hardware memory compression can also be enhanced to manage DRAM as ML1 and ML2 like OS memory compression, with simple adaptations.</p><p>One adaption is to simplify CTEs: instead of finely tracking individual memory blocks, track a single 4KB page worth of content collectively at coarse granularity, just like a PTE. Specifically, each CTE now only records the starting DRAM address of an entire page, without recording any individualized tracking for every block in the page.</p><p>Another adaptation is to extend prior works' Free Lists to ML1 and ML2. Figure <ref type="figure" target="#fig_0">3a</ref> shows a Free List in prior work <ref type="bibr" target="#b5">[6]</ref>, <ref type="bibr" target="#b3">[4]</ref>. Making it work for ML1 involves increasing chunk size to 4KB (see Figure <ref type="figure" target="#fig_0">3b</ref>). ML2 requires multiple Free Lists, each tracking free equally-sized subchunks. The purpose of each sub-chunk is to store an entire compressed page. Equally-sized sub-chunks can be created fragmentation-free by evenly dividing a group of M interlinked chunks, which we call a super-chunk, into N sub-  <ref type="bibr" target="#b3">[4]</ref>; it stores a pair of pointers in free chunks 'for free' to implement a doubly linked list to track free 256B chunks. (b) ML1 Free List, which tracks free 4KB chunks. (c) An ML2 Free List that tracks 1.5KB free sub-chunks; it tracks all super-chunks containing at least one free 1.5KB sub-chunk. chunks, where N &gt; M and N ,M are chosen to minimize (4KB ? M )modN . Figure <ref type="figure" target="#fig_0">3c</ref> shows an example ML2 Free List for tracking 1.5KB sub-chunks. When all sub-chunks in a super-chunk becomes free (e.g., the compressed pages they store have all migrated to ML1 over time), the chunks in the super-chunk are returned to ML1's Free List. The superchunks towards the bottom of an ML2 Free list naturally tend to be emptier than super-chunks towards the top. This is because A) ML2 always allocates sub-chunks from the top of ML2 Free List(s) to handle migration to ML2 and B) ML2 tracks at the top of ML2 Free List(s) super-chunks that transition from having no free sub-chunk to having one free sub-chunk (e.g., after a page migrates to ML1).</p><p>Beside adapting prior works' CTEs and Free Lists, a new necessary component is a new doubly linked list to track the recency of pages stored in ML1; we call them the Recency List. Besides the list pointers, each Recency List element tracks a page in ML1 by recording the page's PPN (i.e., physical page number). The head and tail of Recency List track the hottest and coldest pages in ML1, respectively. ML1 updates the Recency List for a small (i.e., 1% of) fraction of randomly chosen accesses to ML1; when updating the Recency List for an access to ML1, ML1 moves the accessed page's list element to the hot end of the list. ML1 evicts victims from the cold end of Recency List. In the uncommon case that the victim turns out to be incompressible, ML1 retains the page in ML1; ML1 simply removes the page from the Recency List to avoid uselessly compressing it again. As subsequent writebacks may increase a page's compression ratio, ML1 adds an incompressible page back to the Recency List at 1% probability after a writeback to an incompressible page. ML1 can record whether a page is incompressible via an 'isIncompressible' bit in each CTE.</p><p>While ML1 is uncompressed in OS, in hardware, ML1 can also be compressed to increase effective memory bandwidth. One of the many prior memory compression techniques for improving bandwidth (e.g., TMC <ref type="bibr" target="#b18">[19]</ref>) can be readily applied to ML1.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>C. Challenges of the OS-inspired Approach</head><p>Such an OS-inspired hardware compression faces two challenges, however. A) After compressed cold pages are accessed again, migrating them from ML2 to ML1 still adds another level (albeit page-level, instead of block-level) of translation for future accesses to all pages in ML1. B) Only compressing cold pages require very aggressively compressing cold pages to achieve high overall memory saving; decompressing aggressively compressed pages for every access to ML2 is slow. We describe these challenges in detail below.</p><p>Performance Challenge under ML1: In OS memory compression, accesses to ML1 incur no overhead. When OS migrates a virtual page from ML2 to a free physical page in ML1, OS directly records the new physical page's PPN in the virtual page's PTE. As such, future accesses to the virtual page in ML1 requires the same amount of translation as a system that turns off memory compression.</p><p>However, when hardware memory compression migrates a page from ML2 to ML1 after a program accesses the page, hardware cannot directly update the program's PTE because PTEs are OS-managed. Raising an interrupt to ask OS to update the PTE for hardware would defeat the main purpose of hardware memory compression -avoid the costly page faults under OS memory compression. Instead, hardware tracks the page's new DRAM location through a new layer of translation (i.e., through CTEs). As such, hardware has to use the PPN recorded in the page's PTE to indirectly access a CTE to obtain the data's DRAM address; this requires a new level of serial page-level translation (see Figure <ref type="figure">4b</ref>), unlike ML1 accesses under OS compression (see Figure <ref type="figure">4a</ref>). For the workloads in Figure <ref type="figure">1</ref>, this added page-level translation still causes 20% of LLC misses to suffer from CTE misses.</p><p>As such, how to address the latency overhead due to the page-level translation for ML1 in hardware is a challenge. Performance Challenge under ML2: The key latency bottleneck for ML2 is decompressing aggressivelycompressed pages when they are accessed in ML2. OS typically use aggressive page-granularity compression, such as Deflate, to save memory in ML2. For decades, Deflate has been used across many application scenarios (e.g., file systems, network, memory). Due to Deflate's high and robust compression ratio, IBM integrates ASIC Deflate into Power9 and z15 CPUs <ref type="bibr" target="#b10">[11]</ref>. This state-of-the-art ASIC Deflate achieves a peak throughput of 15 GB/s for large streams of data <ref type="bibr" target="#b10">[11]</ref>. However, it has a setup time (T 0 <ref type="bibr" target="#b10">[11]</ref>) of 650-780ns for each new independent input (e.g., a new independent page). This delay can be crippling for small inputs, such as 4KB memory pages. This long delay also limits the bandwidth for reading and writing 4KB compressed pages to only 4 GB/s and 2 GB/s per module, respectively. This amounts to a mere 16% and 8% bandwidth of a DDR4-3200 memory channel. While long latency and low bandwidth is okay for ML2 accesses under OS compression, where overall performance is limited by software overheads, they are inadequate for hardware memory compression.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Memory Controller</head><note type="other">PTE Data Page</note><p>As such, how to address the high decompression overhead for ML2 accesses in hardware, without significantly sacrificing ML2's compression ratio, is a challenge.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>V. TRANSLATION-OPTIMIZED MEMORY COMPRESSION</head><p>We propose Translation-optimized Memory Compression for Capacity (TMCC) to enable fast hardware memory compression for large and/or irregular workloads. TMCC builds on the OS-inspired approach in Section IV, but effectively addresses the latency overheads for both ML1 and ML2.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Addressing the Translation Overhead Under ML1</head><p>To effectively address the problem of long-latency serial translation for accesses to ML1 during CTE misses, TMCC parallelizes the data access with the corresponding CTE access; instead of the conventional approach of waiting for the missing CTE to arrive from DRAM and then use it to  calculate the DRAM address to serve the L3 miss, TMCC carries out both DRAM accesses in parallel. This effectively hides the CTE miss latency from the total DRAM access latency for serving an L3 miss request.</p><p>To parallelize DRAM accesses for CTE and for the actual L3 miss, we make two enabling observations. 1) Observations: First, we observe CTE misses typically occur immediately after PTE misses. This is also true for the OS-inspired approach to hardware memory compression in Section IV, where each 8B CTE translates for a 4KB page. Similarly, each level N+1 PTE (e.g., L2 PTE) tracks 4KB worth of level N PTEs, while each L1 PTE tracks 4KB of data (or instructions). Due to CTEs and PTEs providing the same translation reach, accesses that cause PTE misses in TLB will likely also cause CTE misses in CTE cache. Figure <ref type="figure" target="#fig_3">5</ref> shows that 89% of all CTE misses for LLC miss requests are due to LLC misses related to a TLB miss (i.e., page walker misses in LLC and/or the subsequent data/instruction miss in LLC).</p><p>Second, we observe each page table block or PTB (i.e., a 64B worth of PTEs) is highly compressible because, intuitively, adjacent virtual address ranges often have identical status bits; moreover, many bits in PPN are also identical.</p><p>For example, each 8B PTE in x86 consists of 24 status bits that record various permissions and a 40-bit PPN <ref type="bibr" target="#b40">[42]</ref>. Figure <ref type="figure" target="#fig_4">6</ref> shows the fraction of L1 page table blocks (i.e., storing L1 PTEs) and L2 page table blocks (i.e., storing L2 PTEs) that have identical status bits across all PTEs within the same PTB; it is 99.94% and 99.3%, on average, for L1 and L2 page table blocks. Meanwhile, many of the most significant bits in the PPN are identical, depending on the actual amount of DRAM currently installed in the system.    For example, in a machine with 4TB of OS physical pages, the most significant 10 bits of the PPN are almost always identical (e.g., all zeroes or reused as identical extended permission bits by Intel MKTME <ref type="bibr" target="#b41">[43]</ref>).</p><p>2) Key Idea: Based on our observations, we propose transparently compressing each PTB in hardware to free up space in the PTB to embed the CTEs of the 4KB pages (i.e., either data pages or page table pages) that the PTB points to; this enables each page walk access to also prefetch the matching CTE required either for the next page walk access (i.e., to the next PTB) or for the actual data (or instruction) access after the walk.</p><p>Figure <ref type="figure">7c</ref> shows a compressed PTB. For each PTE in the PTB, TMCC opportunistically stores in the compressed PTB a CTE responsible for translating the PPN that the PTE contains into a DRAM address. As such, as a page walker fetches a PTB, the CTE for the next access (i.e., either the next page walker access or the end data access) becomes available at the same time as the PPN for the next access. Directly having in the PTB the CTE needed for the next access eliminates the need to serially fetch and wait for CTE to arrive from DRAM before knowing the next DRAM address to access.</p><p>A practical challenge is that after migrating a page (e.g., from ML1 to ML2 after the page becomes cold), the corresponding CTE embedded in the page's PTB should be updated. However, hardware has no easy way to use the PPN of the migrating page to find/access the page's PTB(s). TMCC addresses this challenge by lazily updating the CTE in the PTB later around when the PTB is naturally accessed by the page walker, instead of updating it at the time of migrating the page. However, this means that for the first page walker access to the PTB after migrating one of the pages that the PTB points to, the corresponding CTE is out-of-date. To ensure correctness, TMCC also accesses the correct CTE in DRAM (or in CTE cache) in parallel to verify the correctness of the DRAM access. Figure <ref type="figure" target="#fig_7">8</ref> compares and contrasts how TMCC serves an LLC miss that also misses in CTE cache with the baseline approach. Figure <ref type="figure" target="#fig_8">9</ref> provides an architectural overview of TMCC.  3) Detailed Actions Following a TLB Miss: After a TLB miss for instruction X, if the page walker accesses L2, L2 buffers into a temporary buffer every CTE within the accessed PTB. We call this temporary buffer the CTE Buffer. CTE Buffer inserts each CTE as a new key value pair. The key is the PPN that the PTE records; the value consists of the embedded CTE for the PPN and the physical address of the PTB holding the PTE (See Figure <ref type="figure">10</ref>).</p><p>When L2 receives another page walker access or the end data (or instruction) access for instruction X (L2 need not know the access is actually for instruction X), L2 extracts the PPN from the received request to lookup the CTE Buffer to obtain the CTE for MC to translate the PPN. If the request misses in L2, L2 forwards the request to LLC, as usual, and piggybacks the CTE in the request. If LLC also misses, LLC The uncommon case is that the request has no embedded CTE; as such, MC takes the same actions as prior hardware memory compression designs -access CTE in DRAM and then serially access DRAM to service the LLC miss.</p><p>The common case is that the request has an embedded CTE; MC uses the CTE to speculatively translate the LLC's request to DRAM address to access DRAM in parallel with accessing the actual CTE in DRAM. Figure <ref type="figure">11</ref> shows this common case. When both DRAM accesses complete, MC checks whether the correct CTE from DRAM matches the embedded CTE. In the common case that they match, MC can directly respond to LLC. In the uncommon case that they mismatch, MC uses the correct CTE to translate the LLC request and re-access DRAM (see Figure <ref type="figure" target="#fig_7">8c</ref>).   Also in both cases, MC piggybacks the correct CTE in the response back to LLC and L2. When receiving a response, L2 extracts the PPN from the response to look up CTE Buffer. On CTE Buffer hit, if the CTE Buffer entry has a mismatching CTE or has no CTE, L2 stores the correct CTE into the entry and uses the PTB physical address that the element records to fetch and update the PTB with the incoming CTE.</p><p>Embedding CTEs in PTBs not only reduces the latency to fetch data/instruction from memory at the end of a page walk, but can also reduce the latency to fetch PTB blocks from memory. In other words, embedding CTEs in PTBs can benefit the entire page walk (see (iii) in Figure <ref type="figure" target="#fig_10">12a</ref>).</p><p>Embedding CTEs in PTBs also benefits 2D page walks for VMs. Each 2D page walk (see Figure <ref type="figure" target="#fig_10">12b</ref>) requires multiple regular page walks that only use host PTBs, just like a page walk for a native application. As such, TMCC carries out the same actions during each page walk within a 2D page walk as a regular page walk.</p><p>4) Details on Tracking Compressed PTBs: To track which blocks in DRAM are encoded via the compressed PTB encoding (see Figure <ref type="figure">7c</ref>), each CTE contains a bit vector of 32 bits; each bit tracks whether two adjacent blocks in a page are both currently using the compressed PTB encoding. When one block in a pair of adjacent blocks undergoes an encoding change (i.e., from uncompressed to compressed or vice versa), the MC enacts the same encoding change for the other block when it writes to memory the original block with changed encoding. Figure <ref type="figure" target="#fig_11">13</ref> shows the internal layout of a CTE.</p><p>To clarify, compressing memory blocks using our PTB encoding only affects the encoding of individual memory blocks in a page in ML1, without affecting their DRAM location; the 32-bit vector only serves to record the format of the blocks in each page in ML1, and not to migrate the blocks. TMCC does not perform any block-level translation, even for compressed PTBs. After fetching from DRAM a memory block encoded in compressed PTB format, MC replies the block back to LLC in compressed format. Under TMCC, the only compressed content on-chip are PTBs (i.e., cachelines accessed by the page walker). Every L2 and L3 cacheline has a new data bit to record whether the cacheline is compressed. Conversely, when L3 writes back a dirty cacheline to MC, MC checks the new data bit to set the CTE's bit vector accordingly.</p><p>Apart from MC, L2 also contains PTB decompressor and compressor. When an L1 cache or a page walker requests a block from L2 and the L2 copy is compressed (i.e., the new data bit -see paragraph above -in the copy is set), L2 replies with a decompressed copy; because all softwareinitiated memory accesses pass through L1 cache, always replying decompressed copy to L1 ensures CTEs embedded in PTBs are invisible to software, such as OS. When L2 receives from L1 a dirty eviction, L2 checks whether the dirty block's value is compressible under the compressed PTB format; if so and if the L2 copy is currently compressed, L2 copies into the incoming dirty block any embedded CTEs held in the stale L2 copy (note that L2 is inclusive of L1) to seek to preserve the embedded CTEs when OS modifies a PTB (e.g., to remap a virtual page elsewhere). Lastly, when receiving an uncompressed block from L3, if the requester is the page walker, L2 compresses the block before caching it; this is how TMCC initially compresses PTBs in a PTB page when OS creates the PTB page or migrates the PTB page to a new address.</p><p>5) When TMCC Cannot Embed in PTBs: Compression can only free up limited space in each PTB. As such, TMCC only embeds into PTBs truncated CTEs, with only enough bits to identify a 4KB DRAM address range within an MC's DRAM. Assuming each MC manages up to 1TB of DRAM, each truncated CTE is only log 2 (1T B/4KB) = 28 bits. Assuming the TMCC enables up to 4X physical pages in the OS, TMCC can embed 8 CTEs in the PTB under this configuration (i.e., for all 8 PTEs).</p><p>In bigger machines with bigger PPNs, however, each compressed PTB cannot fit eight CTEs. We calculate that for systems with 4TB and 16TB of DRAM, each compressed PTB can only fit seven and six CTEs respectively.</p><p>6) Overheads: Decompressing PTBs take ? 1 cycle; it only needs wiring to concatenate plaintext (see Figure <ref type="figure">7</ref>). Each CTE Buffer has 64 entries; it requires a total of ?1KB.</p><p>By always migrating memory content at page granularity, instead of block granularity, TMCC reduces the size of each page's CTE from 64B to 8B. Assuming an OS that boots up with 4X OS physical memory as DRAM size, total size of all CTEs in DRAM reduces from 6.25% to only 0.78%.</p><p>By taking on an OS-inspired approach, TMCC requires a Recency List in ML1 (see Section IV-B). Unlike Free Lists, which can store linked list pointers for free in free chunks and sub-chunks, storing ML1's Recency List's pointers takes up memory. Recency List uses 0.4% of DRAM. An OS-inspired approach also requires tracking incompressible pages in ML1 to prevent ML1 from repeatedly trying to evict the same incompressible pages to ML2.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Addressing Long Decompression Latency for ML2</head><p>While Deflate is effective and robust, it is slow. The stateof-the-art ASIC Deflate from IBM <ref type="bibr" target="#b10">[11]</ref> takes 1100ns to decompress a 4KB page. Deflate is slow because it serially combines two aggressive algorithms -LZ and Huffman.</p><p>We note the state-of-the-art ASIC Deflate from IBM is a general-purpose design targeting both storage and memory. Intuitively, there can be much room for improvement when specializing Deflate just for memory. In addition, while a general-purpose ASIC Deflate designed also for storage has to strictly abide by the Deflate standard to provide compatibility across systems, an ASIC Deflate specialized for memory does not; memory values are locally produced and consumed. Unshackling from the constraints of the standard allows more room for specialization and optimization.</p><p>To specialize ASIC Deflate for memory, we first implement Deflate in HDL to identify performance bottlenecks. We then perform large design space exploration in HDL to address the bottlenecks. To explore the large design space, we make our HDL highly parameterizable by using the Chisel design language; the tunable parameters include how many characters to encode and decode per cycle, LZ sliding window size (i.e., CAM size), the number of characters in the Huffman tree, the maximum depth of the tree, sample size for frequency counting, etc. We also use a wide range of diverse workloads spanning three C/C++ benchmark suites and three Java benchmark suites to evaluate the impact on compression ratio due to the hardware design choices.</p><p>Our ASIC Deflate specialized for memory decompresses each 4KB page in ?1/4 th the time as the state-of-the-art ASIC Deflate from IBM <ref type="bibr" target="#b10">[11]</ref>, while providing similar compression ratio. We test our ASIC Deflate via RTL simulations on 50 million 4KB memory pages. We publicly release the HDL for our memory-specialized ASIC Deflate at https: //github.com/HEAP-lab-VT/ASIC-DEFLATE-for-memory.</p><p>1) Local Optimizations to Huffman: We implement Huffman in Chisel from the ground up. In the process, we identify the tree construction for compression and tree reconstruction for decompression as the key performance bottleneck for Huffman; this is especially true when using the canonical Huffman tree format, which compresses the tree itself. Making matters worse, the Deflate standard (RFC 1951) specifies building two canonical Huffman trees from LZ output (i.e., one for literals and one for LZ match offsets), performing runlength encoding on the two trees, and compressing the two with a third and final Huffman tree. We also confirm through the IBM authors that the high setup time of IBM's ASIC Deflate is primarily due to building and restoring the Huffman trees.</p><p>To avoid this high latency, our solution is two-fold: use a reduced Huffman tree and store it uncompressed.</p><p>Our reduced Huffman tree reduces the latency and area required to build and traverse the tree by only compressing the most common input characters and leaving the remaining input characters uncompressed. We find that for non-zero memory pages, the tree can be reduced to just <ref type="bibr" target="#b15">16</ref>  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Decompressor</head><p>Figure <ref type="figure">14</ref>: High-level architecture of our Deflate compressor and decompressor. Modules highlighted in green are substantially modified or new compared to IBM's design. Each vertical dashed line separates two stages that are pipelined w.r.t one another; each vertical solid line separates two modules that run serially one after the other (i.e., the earlier module generates and buffers all of its outputs before passing them to the next module). cost of only sacrificing 1% compression ratio, on average. 15 out of the 16 codes are for the 15 hottest characters (i.e., byte-sized values) in each 4KB page going into the Huffman compressor; the one remaining code in the reduced tree is for an escape character to encode the other 200+ characters missing in the tree. Our Huffman encodes each character missing in the tree as the escape code (i.e., the Huffman code for our escape character) plus the missing character.</p><p>We further reduce decompression latency by storing the Huffman tree uncompressed. Due to having only 16 codes, our reduced tree is much smaller than the tree under the standard Deflate; this eliminates the need to aggressively compress the tree like the standard Deflate. As such, our compressor outputs the tree in a plain format, instead of the canonical Huffman tree format or any other compressed format, so that when a compressed page is accessed later, the Huffman decompressor can directly use the tree without having to first slowly decompress the tree.</p><p>However, prefixing each character not in the reduced tree with an escape code can sometimes make Huffman output bigger than the input (e.g., when most bytes in an input page are characters missing in the tree). This problem can be addressed by dynamically skipping our Huffman for pages that would become bigger after going through our Huffman. Empirically, we find that dynamically skipping our Huffman can improve compression ratio by 5%, on geometric mean. We are implementing this dynamic feature in hardware at the time of this writing.</p><p>2) Local Optimizations to LZ: One issue with specializing Deflate ASIC for memory is that the ASIC cannot be used for anything else (e.g., storage, network), unlike a general-purpose Deflate ASIC. As such, the specialized ASIC should use as little area as possible. We find that LZ takes up most of the area in our ASIC Deflate. When we implement IBM's Deflate LZ and reduces LZ's CAM size from 32KB to 4KB to match memory page size, LZ still takes up 0.24 mm 2 for the compressor and 0.09 mm 2 for the decompressor under the 7nm technology node.</p><p>We identify that the CAM for performing sliding-window pattern match as the main contributor to this area. As such, we explore the area and compression ratio of the LZ module under different CAM sizes ranging from 256B to 4KB. We find using a 1KB CAM reduces the LZ compressor to 0.060 mm 2 and the LZ decompressor to 0.022 mm 2 , while reducing the compression ratio of non-zero memory pages by only 1.6%. However, smaller (e.g., 512B, 256B) CAMs degrade the compression ratio much more severely.</p><p>RFC 1951 specifies a 286-character alphabet for LZ outputs. Since 286 is not a power of two, such an alphabet is not space-efficient; as a result, LZ outputs 9-bit characters for 8-bit character inputs. This poses no problem for standard Deflate because this inefficient alphabet is only used internally; LZ outputs are re-encoded using full Huffman trees and, therefore, do not appear at the final Deflate output and do not compromise the final compression ratio. Due to using a reduced Huffman tree, however, our Deflate can directly output LZ's outputs (e.g., after prefixing them with our escape code). As such, our LZ outputs use a spaceefficient 2 8 = 256-symbol alphabet, like how LZ is used today when it is standalone (i.e., outside of Deflate).</p><p>3) Across-Deflate Optimization: Huffman must count the frequencies of the characters in an LZ-compressed page to generate a Huffman tree before using the tree to compress the individual characters in the LZ-compressed page. Precisely counting the frequencies of the characters in an LZ-compressed page requires analyzing the entire page; as such, Huffman compression can only begin after LZ has compressed the entire page, instead of working concurrently with LZ. Having only LZ or Huffman busy, but not both at the same time, can significantly hurt throughput.</p><p>To increase throughput, IBM's design resorts to approximate frequency counting (a.k.a 1.1 Pass in <ref type="bibr" target="#b10">[11]</ref>) by only analyzing a small portion of LZ output (i.e., a 32KB segment) at the start of a much bigger LZ output (i.e., a 256KB output). This allows Huffman to operate mostly concurrently with LZ, except for just when LZ is outputting the first 32KB out of the 256KB. Meanwhile, the 32KB of LZ output is still big enough to accurately represent the frequency distributions of the overall 256KB of LZ output.</p><p>To maximize throughput without reducing compression ratio, our Deflate operates both LZ and Huffman concurrently by using them to process two independent memory pages (see "Page 1" and "Page 2" in Figure <ref type="figure">14</ref>). This requires adding a buffer (see "Accumulate" in Figure <ref type="figure">14</ref>) to buffer the entire LZ output; in comparison, IBM's 1.1 Pass only buffers a small fraction of LZ output (e.g., the first 32KB of the 256KB LZ output). However, as memory pages are smaller than files, our buffering overhead is also small. We note that 1.1 Pass is still better along some dimensions (e.g., area); as such, the HDL we release also supports it as a tunable parameter. But we disable it by default as it significantly reduces compression ratio for 4KB pages.</p><p>4) Additional Details per Module: This section presents more details for each module in our ASIC Deflate, in the order that they appear in Figure <ref type="figure">14</ref>.</p><p>The first three pipeline stages in the compressor perform LZ compression. The first stage, 1KB CAM, identifies matches between the most recent 1KB of history and the input characters to LZ in the current cycle. This matching relies on a sliding-window CAM based on IBM's nearhistory CAM <ref type="bibr" target="#b10">[11]</ref>. The match result passes on to the Select Match stage; to simplify hardware design, our Select Match uses a greedy algorithm to select matches to encode, instead of the "lazy matching" described in RFC 1951. The third stage -LZ 8-bit Encode -encodes the matches and literals using an alphabet with 256 characters.</p><p>In our current design, the three stages above can sometimes stall due to pipeline hazards, depending on the length of the matched sequences. As a result, our Deflate only takes in 8 characters/bytes per cycle, just like the IBM design. Taking in more characters per cycle worsens the pipeline hazards and yields diminishing return in performance.</p><p>Huffman compression starts with Frequency Count; this pipeline stage reads LZ output to calculate the frequency of each 8-bit character in an LZ-compressed page. The next pipeline stage -Select 15 Characters -identifies the 15 hottest characters across the entire LZ-compressed page.</p><p>Accumulate and Replay work together to enable LZ and Huffman to work concurrently on separate pages. Accumulate buffers the output of Select 15 Characters and LZ 8-bit Encode and waits for the Huffman modules after Accumulate to finish processing their current page; then, Accumulate logically transfers its content to the Replay module to replay the buffered values to the later Huffman modules.</p><p>Build Reduced Tree then builds a Huffman tree with 16 leaves in the usual way -by repeatedly combining the two nodes with the lowest frequency. To limit the depth of the tree, when a pair of sibling nodes would exceed a tunable depth threshold, Build Reduced Tree discards the less-frequent sibling and promotes the other to keep the tree depth below the threshold. Build Reduced Tree never discards the escape code. Generating the tree takes up to 32 cycles. Write Reduced Tree then takes up to 16 cycles to write the tree to output using an uncompressed format (see Section V-B1). Huffman Encode then compresses the LZ-compressed bytes and outputs the Huffman codes at up to 32-bits per cycle.</p><p>Our decompressor begins with Read Reduced Tree, which takes 16 cycles to read in the Huffman tree and sets up the registers in Huffman Decompress; this is a significant improvement over IBM's design, which takes &gt; 500ns to reconstruct the tree. Next, Huffman Decompress decodes up to 8 input codes or 32 input bits per cycle, whichever is smaller, via a multi-stage pipelined decoder based on IBM's design <ref type="bibr" target="#b10">[11]</ref>  <ref type="bibr" target="#b42">[44]</ref>. The last pipeline stage, LZ Decompress, outputs up to 8B of plaintext per cycle.</p><p>5) ASIC Deflate Performance: We synthesize our memory-specialized ASIC Deflate on a 7nm ASAP technology node <ref type="bibr" target="#b43">[45]</ref> at 0.7V using Synopsys Design Compiler <ref type="bibr" target="#b44">[46]</ref>; our Deflate runs at 2.5 GHz with a total area of 0.13 mm 2 (see Table <ref type="table" target="#tab_7">I</ref>). We use Verilator <ref type="bibr" target="#b45">[47]</ref>, an industrystandard high-speed RTL simulator, to measure the full-page latency, half-page latency, and throughput; Table <ref type="table" target="#tab_8">II</ref> shows the results. The total throughput of one Deflate module (both compressor and decompressor) is 32.0 GB/s; this exceeds the channel bandwidth of DDR4-3200 (i.e., 25.6 GB/s). To compare against IBM's design, we use the formula in <ref type="bibr" target="#b10">[11]</ref> to analytically calculate the performance of IBM's design. For 4KB memory pages, our memory-specialized ASIC Deflate outperforms IBM's Deflate in every performance metric by several times. Notably, our half-page decompression latency -the average time to decompress a needed block in a page to satisfy an L3 miss -is 6X as fast.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Module</head><p>To measure the compression ratio of our design, we examine programs with &gt; 200M B memory footprint from  three C/C++ benchmark suites <ref type="bibr" target="#b29">[30]</ref>, <ref type="bibr" target="#b46">[48]</ref>, <ref type="bibr" target="#b47">[49]</ref> and three Java benchmark suites <ref type="bibr" target="#b48">[50]</ref>, <ref type="bibr" target="#b49">[51]</ref>, <ref type="bibr" target="#b50">[52]</ref>. For each program, we take 10 memory dumps equally spaced across its lifetime and deleted all all-zero pages from each dump; note that all-zero pages in a memory dump are typically untouched or deduplicable virtual pages. We calculate the compression ratio of a workload as the maximum size across its 10 uncompressed dumps divided by the maximum compressed size across its 10 dumps.</p><p>Figure <ref type="figure" target="#fig_12">15</ref> shows our measurements. Across all benchmarks, our ASIC Deflate specialized for memory achieves a geomean of 3.4x compression, which is only 12% lower than GZIP. Note IBM's ASIC Deflate also has a 11% lower compression ratio than GZIP <ref type="bibr" target="#b10">[11]</ref>. Dynamic skipping of Huffman (see Section V-B1) can increase the compression ratio to 3.6x, which is within 7% of GZIP.</p><p>As another reference for comparison, Figure <ref type="figure" target="#fig_12">15</ref> also shows the compression ratio of the memory dumps under block-level compression. We model a 64B-block-level compression that chooses the smallest output between BPC <ref type="bibr" target="#b11">[12]</ref>, BDI <ref type="bibr" target="#b51">[53]</ref>, Cpack <ref type="bibr" target="#b52">[54]</ref>, and Zero Block; across the same benchmark suites, the geomean compression is only 1.51x.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VI. SIMULATION METHODOLOGY</head><p>We evaluate TMCC's performance under cycle-accurate simulators. We use Gem5 <ref type="bibr" target="#b28">[29]</ref> and Ramulator <ref type="bibr" target="#b53">[55]</ref> to simulate CPU and DRAM, respectively. Table III lists the simulated system's parameters. We evaluate workloads used by recent prior works <ref type="bibr" target="#b22">[23]</ref>, <ref type="bibr" target="#b23">[24]</ref> on virtual address translation in conventional systems. We simulate all such workloads that we could run in Gem5. They span IBM's GraphBIG <ref type="bibr" target="#b29">[30]</ref>, SPEC CPU2017 <ref type="bibr" target="#b54">[56]</ref>, and PARSEC 3.0 <ref type="bibr" target="#b46">[48]</ref>. All workloads are multi-threaded except mcf and omnetpp which are single-threaded. For single-threaded workloads, we evaluate four instances of the same benchmark. Figure <ref type="figure" target="#fig_13">16</ref> shows the memory intensiveness of the benchmarks.</p><p>We fast forward each benchmark deep into the region of interest using Gem5's KVM mode in native execution speed; each benchmark reaches at least 95% of its maximum memory footprint. Then, we fetch all of the benchmark's memory values to place, compress, and pack them into  available memory. Next, we use at least one second of atomic simulation to warm up ML1, ML2, and embedded CTEs in compressed PTBs. Subsequently, we warm up the branch predictor and prefetchers using 10ms of detailed simulation (without any compression-related performance overheads). Finally, we use 20ms of detailed simulation to evaluate performance. We use store instructions/cycle to evaluate performance.</p><p>We simulate one-level TLBs; Gem5 lacks two-level TLB for x86. To keep TLB hit rate consistent with real systems, we increase the number of entries in L1 TLB to 2048, which is similar to the total number of TLB entries AMD's Zen 3 <ref type="bibr" target="#b56">[58]</ref>. This ensures a similar TLB hit rate between simulations and the real world; this is essential as TMCC optimizes for memory accesses following TLB misses.</p><p>Modeling Details for TMCC's Page-level Accesses: To prevent the faster block-level ML1 accesses from suffering long queuing delays due to the bandwidth-intensive pagelevel accesses to ML2, we simulate the FR-FCFS-Capped command scheduling policy; prior works use capped policies to improve fairness. TMCC also carefully issues the 64B read and/or write requests to carry out page-level accesses so that these requests only consume at most 10 slots in MC's read/write queue at a time. To prevent the many writes due to page migration from blocking reads to the channel, TMCC only targetedly puts into write mode the rank accessed by page write, without putting the entire channel into write mode; prior works (e.g., Nonblocking Writes <ref type="bibr" target="#b57">[59]</ref>) also only put individual ranks in a channel into write mode.</p><p>When reading from ML2, MC responds to LLC as soon as MC decompresses the requested block. In the background, MC migrates the decompressed page to ML1. This background migration is similar to the background repacking in prior works <ref type="bibr" target="#b5">[6]</ref>. We model a 32KB buffer (i.e., eight 4KB entries) in MC to buffer data for the transfer. Accesses to ML2 are stalled when all eight entries are full.</p><p>When ML1 Free List has &lt; 4000 chunks, ML1 grows the list by continuously evicting cold pages to ML2. The resultant ML1-to-ML2 page migrations have lower priority than LLC accesses to ML2, which trigger ML2-to-ML1 page migration; ML1 pauses eviction when LLC accesses to ML2 are outstanding or pending. But their priorities are flipped while ML1 Free List has &lt; 3000 chunks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VII. SIMULATION RESULTS</head><p>Figure <ref type="figure" target="#fig_6">17</ref> shows TMCC's performance normalized to Compresso <ref type="bibr" target="#b5">[6]</ref>, a recent prior work on hardware memory compression for capacity. In this comparison, TMCC saves the same amount of DRAM as Compresso for each workload. On average across all workloads, TMCC improves performance by 14%. The improvement is highest for shortestP ath and canneal; they have high memory access rate (see Figure <ref type="figure" target="#fig_13">16</ref>) and high CTE cache miss rate (see Figure <ref type="figure">2</ref>). The improvement is the lowest for kcore and triangleCount; they have low CTE cache miss rate (see Figure <ref type="figure">2</ref>). TMCC's performance improvement primarily comes from hiding memory latency overhead due to address translation. Figure <ref type="figure" target="#fig_15">18</ref> shows the average L3 miss latency of a system with: (i) No Compression, (ii) Compresso and (iii) TMCC at  iso-compression ratio as Compresso. For a system with no compression, L3 miss latency is 53ns; this includes all sources of L3 miss latency (e.g., NoC latency between MC and LLC tile), not just DRAM latency. Under TMCC, the average miss latency is very close to no compressiononly 56.4ns. For Compresso, the average L3 miss latency is considerably higher -73.9ns; the ?20ns longer memory access latency comes from accessing data serially after accessing CTEs for each CTE cache miss. TMCC's latency benefit over Compresso are primarily due to fetching from DRAM normal memory blocks and their CTEs in parallel. As described in Section V-A3, TMCC accesses CTE and normal blocks in DRAM in parallel to verify the normal blocks speculatively fetched using CTEs embedded in CTEs. On average, 22% of LLC misses that hit in ML1 are satisfied by fetching normal blocks and CTEs from DRAM in parallel (see Figure <ref type="figure" target="#fig_8">19</ref>). However, 22% is only a minority of LLC misses. This is because MC always caches the CTE after it arrives from DRAM. Because TMCC obtains embedded CTEs from compressed PTBs, which are only accessed during page walks, TMCC cannot use embedded CTEs to speed up address translation for LLC misses that are not preceded by page walks. As such, caching a CTE after fetching it from DRAM (e.g., after accessing the CTE in DRAM in parallel with normal data for verification after a TLB miss to a page) speeds up address translation for LLC misses that hit in TLB (e.g., later accesses to the same page).</p><p>Some of the latency benefit also comes from reducing how frequently TMCC accesses DRAM to fetch CTEs compared to Compresso. Like prior works, TMCC only fetches CTEs from DRAM when they miss in CTE cache; fetching CTEs from DRAM in parallel with normal blocks for verification  Sensitivity Analysis -Saving more Memory: TMCC builds on an OS-inspired approach; as such, TMCC also inherits the following behavior from OS memory compression: as a system's memory usage increases (e.g., due to having more background/context-switched processes in memory), more pages are migrated to ML2 and more DRAM will be saved by ML2's compression (see Section IV-A). As such, having high memory usage in a system can naturally trigger TMCC to save more DRAM than Compresso, especially since TMCC uses page-level Deflate, instead of blocklevel compression as does Compresso; in our evaluation, Compresso uses the block-level compression in Figure <ref type="figure" target="#fig_12">15</ref>.</p><p>But, of course, saving more DRAM also comes at the cost of performance, as more pages will be stored in ML2 compressed. To fairly evaluate TMCC's memory savings over Compresso, we evaluate the performance of TMCC at various higher memory savings to identify operating points where TMCC can still provide the same (i.e., &gt; 99% of the) performance as Compresso. Table <ref type="table" target="#tab_12">IV</ref> shows for each benchmark TMCC's compression ratio normalized to Compresso when operating at the same, instead of higher, performance as Compresso. It is 2.2x on average. Figure <ref type="figure" target="#fig_16">20</ref> shows improvement over the bare-bone OSinspired hardware compression in Section IV. When both designs are saving the same small amount of DRAM (i.e., each workload's DRAM usage matches Column B in Table <ref type="table" target="#tab_12">IV</ref>), TMCC improves performance by 12.5%. Figure <ref type="figure" target="#fig_16">20</ref> shows the split of benefit due to TMCC's ML1 and ML2 optimizations; they improve performance by 8.25% and 4.25%, respectively.</p><p>When both designs are aggressively saving the same amount of DRAM (i.e., each workload's DRAM usage matches Column C in Table <ref type="table" target="#tab_12">IV</ref>), TMCC improves performance by 15.4% over the bare-bone OS-inspired hardware compression. In this scenario, the performance benefit due to TMCC's ML2 optimization surpasses the benefit from ML1 optimization. When aggressively saving DRAM, accesses to ML2 become more frequent (see Figure <ref type="figure">21</ref>); higher ML2 access rate increases the impact of ML2 optimizations, while diminishing the impact of ML1 optimizations. Sensitivity Analysis -Smaller Workloads: We also evaluate TMCC with smaller workloads -remaining PAR-SEC 3.0 benchmarks and RocksDB using 1GB Twitter dataset. When saving the same amount of DRAM from these workloads as Compresso, TMCC can provide a maximum performance benefit of 5% (for RocksDB) and loses a maximum performance of 0.1% (for f reqmine) compared to Compresso. The average performance is within 1% of Compresso. TMCC provides no meaningful performance benefit for these workloads because they are small and have regular access patterns. However, even for these workloads, TMCC can still provide benefits; our evaluation shows TMCC can provide 1.7X compression ratio on average as Compresso, while still providing the same (i.e., &gt; 99% of the) performance as Compresso for every workload. The maximum is 3.1x, for blackscholes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VIII. DISCUSSION</head><p>Huge Pages: TMCC's ML1 optimization is ineffective for huge pages. Each PTB for huge pages covers eight huge pages or 8?2M B = 16M B. This equates to 16M B/4KB = 4K regular 4KB pages; 4K CTEs is too numerous to fit in a PTB. However, TMCC's ML2 optimization still applies. Compared to prior works on hardware memory compression, TMCC still improves CTE cache hit rate due to using pagelevel, instead of block-level, translation. When repeating our evaluation under huge pages across the workloads in Figure <ref type="figure" target="#fig_6">17</ref>, we find that compared to Compresso, TMCC can either improve average performance by 6%, while saving the same amount of memory, or provide 1.8X the effective memory capacity, while providing the same performance.</p><p>Memory Interleaving: Some CPUs not only interleave adjacent physical address ranges across the many memory channels in a memory controller, but also interleave adjacent physical address ranges across multiple memory controllers (MCs) to help balance bandwidth utilization. The granularity of this inter-MC memory interleaving can vary across CPUs, BIOS settings, and installed DIMM count/positions.</p><p>As TMCC resides in MC, interleaving memory across multiple MCs at sub-page (i.e., &lt;4KB) granularity can interfere with TMCC's page-level compression. Therefore, TMCC requires address mapping to only interleave memory across memory controllers at ?4KB granularity, instead of sub-page granularity.</p><p>We evaluate the performance impact of two TMCCcompatible interleaving policies on bandwidth-intensive benchmarks from a prior work on improving memory bandwidth <ref type="bibr" target="#b58">[60]</ref>. We choose these benchmarks because high bandwidth usage magnifies performance differences across different interleaving policies. We simulate a system with 16 cores and two MCs with two channels per MC. The baseline interleaving policy performs sub-page interleaving at 512B granularity across MCs and at 256B granularity across the channels within each MC.</p><p>Figure <ref type="figure" target="#fig_17">22</ref> compares sub-page interleaving only for channels within each MC (i.e., MCs are interleaved at 4KB and constituent channels are interleaved at 256B) against the baseline interleaving. The average performance is within 1%. The maximum degradation is &lt; 5%. However, using coarser interleaving improves row buffer locality and hit rate and, therefore, provides a maximum performance improvement of 10%. For sensitivity analysis, Figure <ref type="figure" target="#fig_17">22</ref> also compares always interleaving pages across channels (i.e., no sub-page interleaving across channels) to the baseline interleaving; the 0.8 0.9 performance degradation is more pronounced (e.g., 5%, 10% and 11% for sp D, and hpcg, respectively). Our results match that of a prior OS work <ref type="bibr" target="#b60">[61]</ref>; this work turns off hardware-level sub-page interleaving across MCs and, instead, interleaves pages across MCs by modifying the memory allocator to map adjacent 4KB virtual pages to different MCs. Only 1% real-system performance difference is reported; this includes the overheads of the OS changes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>IX. RELATED WORK</head><p>A prior work -LCP <ref type="bibr" target="#b4">[5]</ref> -relies on OS support to embed some CTE information into PTEs; OS manages new compressed pages of different sizes (e.g., 2KB, 1KB) and records the compressed page size in PTEs. LCP uses the embedded compressed size of a page to predict the page's data blocks' DRAM locations to speculatively access data in DRAM in parallel with accessing the CTE in DRAM. Beside changing OS, the speculative parallel accesses are often wrong (e.g., as often as ?50% of the time for many workloads, see Figure <ref type="figure" target="#fig_13">16</ref> in <ref type="bibr" target="#b4">[5]</ref>) because using compressed page size alone to accurately predict per-block DRAM location is difficult. When a page changes between different preset sizes due to fluctuation in compression ratio, hardware also raises interrupt to tell OS to update the page size recorded in the PTE. A later work shows these interrupts are costly <ref type="bibr" target="#b5">[6]</ref>.</p><p>Unlike LCP, TMCC embeds CTEs into PTBs softwaretransparently by compressing PTBs in hardware. By migrating memory content only at the page granularity, TMCC keeps CTEs small enough to fit them in PTBs to enable highly accurate speculative parallel accesses to DRAM.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>X. CONCLUSION</head><p>This paper is the first to explore the address translation problem for large and/or irregular workloads under hardware memory compression for capacity. TMCC builds on an OSinspired approach by addressing its latency overheads while accessing both hot pages and cold pages. For hot pages, TMCC hides the latency overhead of physical to DRAM address translation by compressing PTBs to free space in them to embed CTEs. For cold pages, we specialize ASIC Deflate for memory to reduce decompression latency by 4X compared to IBM's state-of-the art ASIC Deflate. Our evaluations show that for large and/or irregular workloads, TMCC can either improve performance by 14% without sacrificing effective capacity or provide 2.2x the effective memory capacity without sacrificing performance, when compared to state-of-the art hardware memory compression.</p><p>?/source_gem5 to process the output. The simulations take 36 hours to finish. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>G. Notes</head><p>We also provide a README.txt in each experiment folder for quick reference. For Gem5 and page table dump experiments, they provide code overview.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>H. Methodology</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Experiment methodology:</head><p>? Gem5 simulations: See Section VI.</p><p>? Page table dumps: We pause benchmarks in the region of interest. Then we use the page table dump tool in public artifact of <ref type="bibr" target="#b61">[62]</ref>. We also provide the evaluators the resources to take fresh page table dumps. ? Compute compression ratio of memory dumps: We use Linux's gcore tool to take memory dump of a program. Subsequently, we process the memory dump to compute the compression ratio. Note that we discard all-zero pages while computing compression ratios. ? ASIC Deflate verification: We use Verilator to run RTL simulations of the compressor and decompressor. We verify that each non-zero 4 KB page in the memory dumps are same as original after compression and decompression. Artifact submission, reviewing and badging methodology:</p><p>? http://cTuning.org/ae/submission-20201122.html ? http://cTuning.org/ae/reviewing-20201122.html ? https://www.acm.org/publications/policies/ artifact-review-badging</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 3 :</head><label>3</label><figDesc>Figure3: (a) A simplified design of the Hardware Free List in prior work<ref type="bibr" target="#b3">[4]</ref>; it stores a pair of pointers in free chunks 'for free' to implement a doubly linked list to track free 256B chunks. (b) ML1 Free List, which tracks free 4KB chunks. (c) An ML2 Free List that tracks 1.5KB free sub-chunks; it tracks all super-chunks containing at least one free 1.5KB sub-chunk.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>5 Figure 4 :</head><label>54</label><figDesc>Figure 4: Sequence of memory accesses to ML1.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Fraction of total CTE misses that are due to walker and data/instruction accesses immediately after a TLB miss. Each 8B CTE translates for a 4KB page.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: PTBs where status bits are same across all entries.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>PPN 1 PTEFigure 7 :</head><label>17</label><figDesc>Figure 7: Comparing and contrasting (a) conventional PTE and (b) conventional PTB encoding with (c) our hardware-compressed PTB encoding.'CTE for PPN1' translates 'PPN1' to a DRAM address. TMCC compresses a PTB only if the status bits across 8 PTEs are identical. To compress a PTB, TMCC records the status bits only once and truncates the leading identical bits in PPNs according to how much memory is installed.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: MC's timeline for serving LLC misses that also suffer from CTE cache miss. In the figure, the sum of TMCC common-case and TMCC uncommon-case do not add up to 100% because there is another uncommon-case scenario that the PTB does not currently embed any CTE (as opposed to embedding the right or wrong CTE).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Overview of architectural changes under TMCC.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head></head><label></label><figDesc>Walk under: (i) Uncompressed Memory System, (ii) Baseline, (iii)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: (a) Contrasting page walk under an uncompressed memory system, baseline, and TMCC. (b) 2D page walk for a virtual machine.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>UnusedFigure 13 :</head><label>13</label><figDesc>Figure 13: Internal layout of a CTE under TMCC</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 15 :</head><label>15</label><figDesc>Figure 15: Compression ratio under an aggressive block-level compression, our ASIC Deflate, and software Deflate (gzip).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 16 :</head><label>16</label><figDesc>Figure 16: Memory access characterization for the evaluated benchmarks under no hardware memory compression.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>Figure 17 :</head><label>17</label><figDesc>Figure 17: Performance normalized to Compresso when saving the same amount of memory as Compresso.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>Figure 18 :</head><label>18</label><figDesc>Figure 18: L3 miss latency under different systems.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_16"><head>Figure 20 :</head><label>20</label><figDesc>Figure 20: Improvement over barebone OS-inspired hardware compression under the two DRAM usage scenarios in Table IV Columns B and C.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_17"><head>Figure 22 :</head><label>22</label><figDesc>Figure 22: Performance of two TMCC-compatible interleaving policies normalized to the baseline of using sub-page interleaving across MCs.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>CTE Hits per L3 Miss in CTE$ in L3$</head><label></label><figDesc></figDesc><table><row><cell>total CTE accesses still go to DRAM. Another problem is</cell></row><row><cell>that modern server CPUs have a long LLC access time -</cell></row><row><cell>?20ns [32], [33] -due to having a distributed network-on-</cell></row><row><cell>chip architecture. As such, even if a CTE cache miss hits</cell></row><row><cell>in LLC, the subsequent data or PTB miss that needs the</cell></row><row><cell>CTE still slows down by 20ns. For example, assuming a</cell></row><row><cell>DRAM latency of ?35ns, a CTE cache hit can save ?35ns;</cell></row><row><cell>however, a CTE cache miss that hits in LLC only saves 35ns-</cell></row><row><cell>20ns=15ns. Making matters worse, a CTE cache miss that</cell></row><row><cell>also misses in LLC actually increases total memory access</cell></row><row><cell>latency; when MC realizes that the CTE access misses in</cell></row><row><cell>LLC 20ns later, it also fetches CTE from DRAM 20ns later</cell></row><row><cell>compared to not caching CTEs in LLC. Figure 2 shows that</cell></row><row><cell>CTE accesses that hit or miss in LLC are roughly equal; as</cell></row><row><cell>such, caching CTE in LLC increases average memory access</cell></row><row><cell>time. We find in our simulations that caching CTEs in LLC</cell></row><row><cell>is actually slightly slower than not caching CTEs in LLC.</cell></row><row><cell>CTEs are not cached in LLC in the rest of the paper.</cell></row><row><cell>100%</cell></row><row><cell>80%</cell></row><row><cell>60%</cell></row><row><cell>40%</cell></row><row><cell>20%</cell></row><row><cell>0%</cell></row><row><cell>Figure 2: CTE hits normalized to regular LLC misses assuming a 4X CTE</cell></row><row><cell>cache and LLC as a victim cache for CTEs.</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table Entry (b) Software-visible Page Table Block with 8 PTEs (c) Compressed Representation in Hardware (software invisible) (d) How hardware decodes a PTE in a compressed PTB</head><label>Entry</label><figDesc></figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">Identical Bits</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="5">Status Bits (24 bits)</cell><cell></cell><cell></cell><cell cols="6">Physical Page Number</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="3">PTE 1</cell><cell></cell><cell></cell><cell cols="3">PTE 2</cell><cell cols="3">PTE 3</cell><cell></cell><cell cols="2">PTE 4</cell><cell></cell><cell cols="2">PTE 5</cell><cell></cell><cell></cell><cell cols="2">PTE 6</cell><cell></cell><cell cols="2">PTE 7</cell><cell></cell><cell cols="3">PTE 8</cell></row><row><cell>Status Bits</cell><cell>Identical</cell><cell>PPN Bits</cell><cell>Identical</cell><cell cols="2">PPN 1</cell><cell>PPN 1</cell><cell>CTE for</cell><cell>PPN 2</cell><cell>PPN 2</cell><cell>CTE for</cell><cell>PPN 3</cell><cell>PPN 3</cell><cell>CTE for</cell><cell>PPN 4</cell><cell>PPM 4</cell><cell>CTE for</cell><cell>PPN 5</cell><cell>PPN 5</cell><cell>CTE for</cell><cell>PPN 6</cell><cell>PPN 6</cell><cell>CTE for</cell><cell>PPN 7</cell><cell>PPN 7</cell><cell>CTE for</cell><cell>PPN 8</cell><cell>PPN 8</cell><cell>CTE for</cell></row><row><cell></cell><cell>Status Bits</cell><cell>Identical</cell><cell cols="2">PPN Bits</cell><cell>Identical</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Data Miss Req + embedded CTE (8b) Use embedded CTE to read data in parallel</head><label></label><figDesc>Figure 10: CTE Buffer. PPN is the key for lookup. How MC gets the embedded CTE to access data in DRAM in parallel with accessing the actual CTE in DRAM. 'a' and 'b' actions under the same step are in parallel.forwards the request and the piggybacked CTE to MC.When receiving a request from LLC, MC first looks up CTE cache (i.e., by extracting the PPN from the request to access CTE cache). If the request hits in CTE cache, MC uses the CTE from the cache to translate the request's physical address to DRAM address to access DRAM.If the request misses in CTE cache, two cases can occur.</figDesc><table><row><cell></cell><cell cols="3">CPU Core</cell></row><row><cell></cell><cell cols="3">Inst: ld vaddr</cell></row><row><cell>TLB</cell><cell></cell><cell></cell><cell>(4) Lookup</cell></row><row><cell cols="2">(1) TLB Miss</cell><cell></cell><cell>Data</cell><cell>Memory Controller</cell></row><row><cell>Page</cell><cell>(2) Lookup PTB</cell><cell cols="2">(6) Cache</cell><cell>CTE$ (7) CTE$</cell></row><row><cell>Walker</cell><cell cols="2">(3a) Serve PTB (3b) Write to</cell><cell>(5) Read CTE</cell><cell>Miss DRAM Command Scheduler</cell></row><row><cell></cell><cell>CTE Buffer</cell><cell></cell><cell></cell><cell>(8a) Read CTE</cell></row><row><cell></cell><cell cols="3">CTE Buffer</cell><cell>DRAM</cell></row><row><cell>Figure 11:</cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PTE Buffer</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN</cell><cell>CTE</cell><cell>PTB Addr</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN #1</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN #2</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN #3</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>????.</cell><cell>????.</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN #64</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN</cell><cell>CTE</cell><cell>PTB Addr</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>CTE Buffer</cell><cell>PPN #1 PPN #2 ????.</cell><cell>????.</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>PPN #64</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head></head><label></label><figDesc>codes instead of the usual 286 as specified in RFC 1951 at the</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell cols="4">Compressor</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>/8B/</cell><cell>1KB CAM</cell><cell>Match Select</cell><cell>Processing Page 2 LZ 8-bit Encode Freq. Count</cell><cell>Select 15 Chars</cell><cell>Accumulate</cell><cell>Replay</cell><cell cols="2">Write Reduced Tree Processing Page 1 1 2 Build Reduced Tree</cell><cell>Huffman Encode</cell><cell>3</cell><cell>/32b/</cell></row><row><cell></cell><cell></cell><cell></cell><cell>Read Reduced Tree</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell>/32b/</cell><cell cols="3">Huffman Decode</cell><cell>LZ Decode</cell><cell>/8B/</cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table I :</head><label>I</label><figDesc>Synthesis results for our ASIC Deflate.</figDesc><table><row><cell></cell><cell></cell><cell>Area</cell><cell></cell><cell>Power</cell></row><row><cell cols="2">LZ Decompressor</cell><cell>0.022 mm 2</cell><cell cols="2">100 mW</cell></row><row><cell cols="2">LZ Compressor</cell><cell>0.060 mm 2</cell><cell cols="2">160 mW</cell></row><row><cell cols="3">Huffman Decompressor 0.014 mm 2</cell><cell cols="2">27 mW</cell></row><row><cell cols="2">Huffman Compressor</cell><cell>0.034 mm 2</cell><cell cols="2">160 mW</cell></row><row><cell cols="2">Complete Unit</cell><cell>0.13 mm 2</cell><cell cols="2">447 mW</cell></row><row><cell>Module</cell><cell cols="3">Latency ?-page Latency</cell><cell>Throughput</cell></row><row><cell>Our Decompressor</cell><cell>277 ns</cell><cell>140 ns</cell><cell></cell><cell>14.8 GB/s</cell></row><row><cell>Our Compressor</cell><cell>662 ns</cell><cell>N/A</cell><cell></cell><cell>17.2 GB/s</cell></row><row><cell>IBM Decompressor</cell><cell>1100 ns</cell><cell>878 ns</cell><cell></cell><cell>3.7 GB/s</cell></row><row><cell>IBM Compressor</cell><cell>1050 ns</cell><cell>N/A</cell><cell></cell><cell>3.9 GB/s</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head>Table II :</head><label>II</label><figDesc>Deflate performance for 4KB memory pages.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_9"><head></head><label></label><figDesc>Block-level Compression: Smallest of BDI, BPC, CPACK, and Zero Block</figDesc><table><row><cell>Our ASIC Deflate</cell><cell>X Software Deflate</cell><cell>+</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_10"><head>Table III :</head><label>III</label><figDesc>Simulated Microarchitecture parameters.</figDesc><table><row><cell cols="2">CPU</cell><cell></cell><cell cols="2">4 cores, 2.8GHz, 4-wide OoO, 2048 TLB entries</cell></row><row><cell cols="3">Caches</cell><cell cols="2">Size: 64KB L1d$+L1i$, 256KB L2$ inclusive,</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">8MB L3$ exclusive, 1 KB page walk cache per core</cell></row><row><cell></cell><cell></cell><cell></cell><cell>(similar to [23])</cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">L1$: 3 cycles, L2$: +11 cycles, L3$: +50 cycles</cell></row><row><cell cols="5">Prefetchers Next-line with automatic turn-off: L1$, L2$</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">Stride: L1$ (degree 2), L2$ (degree 4)</cell></row><row><cell cols="3">DRAM</cell><cell cols="2">DDR4-3200, 1-channel, 8-ranks, MC to Cache NoC</cell></row><row><cell></cell><cell></cell><cell></cell><cell>latency: 18ns</cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">FR-FCFS scheduling policy with row access cap of 4</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">XOR-based mapping function like Intel Skylake [57]</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">tCL: 13.75ns, tRCD: 13.75ns, tRP: 13.75ns</cell></row><row><cell cols="2">CTE$</cell><cell></cell><cell cols="2">TMCC: 64KB, 32KB reach per 64B CTE block</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">Compresso: 128KB, 4KB reach per 64B CTE block</cell></row><row><cell>Bandwidth</cell><cell>Utilization</cell><cell>0% 20% 40% 60%</cell><cell>Read</cell><cell>Write</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_11"><head>CTE$ Hit Parallel Data Access (Correct Embedded CTE) Incorrect Embedded CTE</head><label></label><figDesc></figDesc><table><row><cell>Benchmark</cell><cell cols="3">DRAM Usage: GB</cell><cell cols="2">Compression Ratio</cell><cell>Normalized</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Comp. Ratio</cell></row><row><cell></cell><cell>Col A</cell><cell>Col B</cell><cell>Col C</cell><cell>Col D</cell><cell>Col E</cell><cell>Col F</cell></row><row><cell></cell><cell>(Uncomp.)</cell><cell>(Compresso)</cell><cell>(TMCC)</cell><cell>(Compresso)</cell><cell>(TMCC)</cell><cell></cell></row><row><cell>pageRank</cell><cell>106</cell><cell>82.2</cell><cell>35.3</cell><cell>1.29</cell><cell>3.00</cell><cell>2.33</cell></row><row><cell>graphCol</cell><cell>106</cell><cell>82.5</cell><cell>35.3</cell><cell>1.28</cell><cell>3.00</cell><cell>2.33</cell></row><row><cell>connComp</cell><cell>105</cell><cell>83.2</cell><cell>35.0</cell><cell>1.26</cell><cell>3.00</cell><cell>2.38</cell></row><row><cell>degCentr</cell><cell>105</cell><cell>82.9</cell><cell>35.0</cell><cell>1.27</cell><cell>3.00</cell><cell>2.37</cell></row><row><cell>shortestPath</cell><cell>105</cell><cell>82.8</cell><cell>35.0</cell><cell>1.27</cell><cell>3.00</cell><cell>2.37</cell></row><row><cell>bfs</cell><cell>105</cell><cell>82.7</cell><cell>35.0</cell><cell>1.27</cell><cell>3.00</cell><cell>2.36</cell></row><row><cell>dfs</cell><cell>105</cell><cell>81.4</cell><cell>35.0</cell><cell>1.29</cell><cell>3.00</cell><cell>2.33</cell></row><row><cell>kcore</cell><cell>105</cell><cell>83.7</cell><cell>35.0</cell><cell>1.25</cell><cell>3.00</cell><cell>2.39</cell></row><row><cell>triCount</cell><cell>108</cell><cell>83.1</cell><cell>36.0</cell><cell>1.30</cell><cell>3.00</cell><cell>2.31</cell></row><row><cell>mcf</cell><cell>15.0</cell><cell>13.9</cell><cell>6.00</cell><cell>1.08</cell><cell>2.50</cell><cell>2.32</cell></row><row><cell>omnetpp</cell><cell>1.00</cell><cell>0.63</cell><cell>0.40</cell><cell>1.60</cell><cell>2.50</cell><cell>1.58</cell></row><row><cell>canneal</cell><cell>1.10</cell><cell>0.95</cell><cell>0.73</cell><cell>1.15</cell><cell>1.50</cell><cell>1.30</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Average</cell><cell>2.2</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Accesses</cell><cell>40% 60% 80% 100%</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>20%</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0%</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>CTE$ Hit</cell><cell>Parallel Data Access</cell><cell>Serialized Data Access w/o Embedded CTE</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">Accesses</cell><cell>40% 60% 80% 100%</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>20%</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0%</cell></row></table><note><p><p><p><p>76%</p>Figure</p>19</p>: Distribution of ML1 read accesses.</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_12"><head>Table IV :</head><label>IV</label><figDesc>Compression ratio normalized to Compresso when TMCC offers the same performance as Compresso. Col A shows each workload's original memory footprint. Col B shows how much DRAM each workload uses under Compresso. Col C shows how much DRAM each workload uses under TMCC when TMCC's performance reduces down to Compresso's.when the CTEs are already cached is unnecessary and avoided by our design in Section V-A3. As such, TMCC's DRAM access rate for CTEs (i.e., number of CTE fetches from DRAM per LLC miss) equals TMCC's CTE miss rate.</figDesc><table /><note><p><p><p>Because TMCC's CTE miss rate is 1-76% (76% is TMCC's average CTE hit rate, see Figure</p>19</p>), TMCC's DRAM access rate for CTE is 24%. Compresso has a much higher -34% -DRAM access rate for CTEs as block-level compression reduces CTE reach compared to page-level compression.</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_13"><head></head><label></label><figDesc>Figure 21: ML2 Accesses normalized to total LLC misses and writebacks under the two DRAM usages in Table IV Columns B and C.</figDesc><table><row><cell>ML2 Access Rate</cell><cell>0% 2% 4% 6% 8% 10%</cell><cell>DRAM Usage:</cell><cell>Table 4 Col B</cell><cell>Table 4 Col C</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_14"><head></head><label></label><figDesc>The script should finish in 15 minutes.? Compute compression ratio of memory dumps: Run ./run_script.sh in ?/compression_ratio. The script should take about 1 hour to finish. ? ASIC Deflate verification: Change directory into ?/rtl_function_verif and execute ./run_script.sh. The simulations take approximately 3 hours to finish. The script prints the results on to the terminal. To re-run, first execute: gradle clean -p hardware-compressor. Printed data (especially averages) should be close to the data in Figures 1, 5, 17, 18, 19 and 21. Some variation for a minority of individual cases is expected. All simulations should finish successfully. We request the evaluators to contact us if they see NaN or negative numbers as output as this indicates simulation failure or some other problem. ? Process page table dumps: Printed data should be very close to the data in Figure 6. It is also possible to visually inspect page table dumps by opening them in a text editor. ? Compute compression ratio of memory dumps: The compression ratio output for benchmarks should be similar to compression ratio data points in Figure 15. ? ASIC Deflate verification: In the printed results for every memory dump, failed (pages) should read 0. This means that the output after compression and decompression is same as the original for every nonzero 4KB page in memory dumps. Above these results, Gradle should also report BUILD SUCCESSFUL in green.</figDesc><table><row><cell>? Process</cell><cell>page</cell><cell>table</cell><cell>dumps:</cell></row><row><cell>Run</cell><cell cols="2">./run_process.sh</cell><cell>in</cell></row><row><cell cols="4">?/page_table_status_bits_all_same.</cell></row></table><note><p><p>F. Evaluation and expected results</p>? Gem5 simulations:</p></note></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>ACKNOWLEDGMENT</head><p>We thank <rs type="funder">National Science Foundation</rs> (<rs type="affiliation">NSF</rs>) for supporting this work under grants 1942590 and 1919113. We also thank <rs type="institution">Advanced Research Computing (ARC) at Virginia Tech</rs> for providing computational resources.</p></div>
+			</div>
+			<listOrg type="funding">
+			</listOrg>
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"> <ref type="figure">15</ref> <p>through memory dumps.</p><p>? Functional verification of our ASIC Deflate with RTL simulation. Due to high memory and disk requirements of our artifacts, we provide the evaluators access to a system with 28-cores, 256 GB RAM and 16 TB of disk space. The system contains: (i) Our Gem5 model with fast forwarded Gem5 checkpoints and submission/processing script(s), (ii) Page Table Dumps and processing script(s), (iii) Memory dumps and script(s) for compression ratio measurement, (iv) Script(s) to simulate RTL and verify functional correctness of our ASIC. We could not make the Gem5 model in our artifact publicly available due to high storage requirement for Gem5 checkpoints. However, the source code for our ASIC Deflate is publicly available at: https:// github.com/ HEAP-Lab-VT/ ASIC-DEFLATE-for-memory.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Artifact check-list (meta-information)</head><p>? Algorithm: TMCC opportunistically embeds compression translation entries in PTBs. This allows it to prefetch compression translation entries during a page work, instead of serially fetching them after a page walk. Moreover, TMCC's Deflate ASIC specialized for memory allows 4X faster compression than the state-of-the-art. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>C. Description 1) How to access:</head><p>We gave the evaluators SSH access to our own system. Each evaluator was provided their own user account and login credentials.</p><p>2) Hardware dependencies: A multi-core system with at least 256 GB RAM and 16 TB of disk space.</p><p>3) Software dependencies: (i) Gem5, (ii) Python2 virtual environment with prerequisite packages for Gem5, (iii) Java 8+, Verilator 4.220 and Gradle 7.4.2 for functional verification of ASIC Deflate.</p><p>4) Data sets:</p><p>? Fast-forwarded Gem5 checkpoints: For Gem5 simulations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>? Page Table dumps:</head><p>To determine the fraction of compressibile PTBs (See Figure <ref type="figure">6</ref>). Present for every user at ?/rtl_function_verif/.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>E. Experiment workflow</head><p>We recommend the evaluators to use a terminal multiplexer such as tmux to run experiments. tmux ensures spawned processes still run after SSH connection drops. For more details, please visit this link: https://tmuxcheatsheet. com/. Home directory of every user has four folders for four different experiments. The folders are: source_gem5, page_table_status_bits_all_same, compression_ratio and rtl_function_verif. All experiments must be run independently due to resource limitations. The second experiment is an exception and can be run simultaneously with any of the experiments.</p><p>? Gem5 simulations: Execute ./run_script.sh in ?/source_gem5/work. After the simulations finish, execute ./run_process.sh in</p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Tmo: Transparent memory offloading in datacenters</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Weiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Schatzberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Sanouillet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Sharma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Heo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Skarlatos</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3503222.3507731</idno>
+		<ptr target="https://doi.org/10.1145/3503222.3507731" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS 2022</title>
+		<meeting>the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS 2022<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="page" from="609" to="621" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Memory-harvesting vms in cloud platforms</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fuerst</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Novakovi?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><forename type="middle">N</forename><surname>Goiri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">I</forename><surname>Chaudhry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sharma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Arya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Broas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Bak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Iyigun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bianchini</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3503222.3507725</idno>
+		<ptr target="https://doi.org/10.1145/3503222.3507725" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS 2022</title>
+		<meeting>the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS 2022<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="page" from="583" to="594" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Software-defined far memory in warehouse-scale computers</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lagar-Cavilla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Souhlal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Burny</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Butt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Chaugule</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Shahid</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Thelen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">A</forename><surname>Yurtsever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3297858.3304053</idno>
+		<ptr target="https://doi.org/10.1145/3297858.3304053" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS &apos;19</title>
+		<meeting>the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems, ser. ASPLOS &apos;19<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="317" to="330" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Pinnacle: Ibm mxt in a memory controller chip</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Tremaine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wazlowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Har</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K.-K</forename><surname>Mak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Arramreddy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">21</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="56" to="68" />
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Linearly compressed pages: A low-complexity, low-latency main memory compression framework</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Pekhimnko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Seshadri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Xin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Kozuch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<imprint>
+			<biblScope unit="page" from="172" to="184" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+	<note>in 2013 46th</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Compresso: Pragmatic main memory compression</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Choukse</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Erez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">R</forename><surname>Alameldeen</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2018.00051</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2018.00051" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 51st Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO-51</title>
+		<meeting>the 51st Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO-51</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="546" to="558" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">A robust main-memory compression scheme</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ekman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Stenstrom</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2005.6</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2005.6" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05</title>
+		<meeting>the 32nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;05<address><addrLine>USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="74" to="85" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Buri: Scaling big-memory computing with hardware-based memory expansion</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">L</forename><surname>Byrne</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">L</forename><surname>Ramirez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Faraboschi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2808233</idno>
+		<ptr target="https://doi.org/10.1145/2808233" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Trans. Archit. Code Optim</title>
+		<imprint>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<date type="published" when="2015-10">oct 2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Cmh: Compression management for improving capacity in the hybrid memory cube</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Childers</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3203217.3203235</idno>
+		<ptr target="https://doi.org/10.1145/3203217.3203235" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 15th ACM International Conference on Computing Frontiers, ser. CF &apos;18</title>
+		<meeting>the 15th ACM International Conference on Computing Frontiers, ser. CF &apos;18<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="121" to="128" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Transparent dual memory compression architecture</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2017 26th International Conference on Parallel Architectures and Compilation Techniques</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="206" to="218" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Data compression accelerator on ibm power9 and z15 processors</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Abali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Blaner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Reilly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Klein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mishra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">B</forename><surname>Agricola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Sendir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Buyuktosunoglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Jacobi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">J</forename><surname>Starke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Myneni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wang</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA45697.2020.00012</idno>
+		<ptr target="https://doi.org/10.1109/ISCA45697.2020.00012" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM/IEEE 47th Annual International Symposium on Computer Architecture, ser. ISCA &apos;20</title>
+		<meeting>the ACM/IEEE 47th Annual International Symposium on Computer Architecture, ser. ISCA &apos;20</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="1" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Bit-plane compression: Transforming data for better compression in many-core architectures</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Sullivan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Choukse</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Erez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 ACM/IEEE 43rd Annual International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2016-06">June 2016</date>
+			<biblScope unit="page" from="329" to="340" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Memzip: Exploring unconventional benefits from memory compression</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Shafiee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Taassori</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Balasubramonian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Davis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 IEEE 20th International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="638" to="649" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">A case for toggle-aware compression for gpu systems</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Pekhimenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Bolotin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vijaykumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 IEEE International Symposium on High Performance Computer Architecture</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="188" to="200" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">CRAM: efficient hardware-based memory compression for bandwidth enhancement</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Young</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kariyappa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">K</forename><surname>Qureshi</surname></persName>
+		</author>
+		<idno>abs/1807.07685</idno>
+		<ptr target="http://arxiv.org/abs/1807.07685" />
+	</analytic>
+	<monogr>
+		<title level="j">CoRR</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Interactions between compression and prefetching in chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">R</forename><surname>Alameldeen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Wood</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2007 IEEE 13th International Symposium on High Performance Computer Architecture</title>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="228" to="239" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Lossless and lossy memory i/o link compression for improving performance of gpgpu workloads</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sathish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">J</forename><surname>Schulte</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">S</forename><surname>Kim</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2370816.2370864</idno>
+		<ptr target="https://doi.org/10.1145/2370816.2370864" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 21st International Conference on Parallel Architectures and Compilation Techniques, ser. PACT &apos;12</title>
+		<meeting>the 21st International Conference on Parallel Architectures and Compilation Techniques, ser. PACT &apos;12<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="325" to="334" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">A case for core-assisted bottleneck acceleration in gpus: Enabling flexible data compression with assist warps</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vijaykumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Pekhimenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Jog</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bhowmick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ausavarungnirun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Das</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kandemir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2749469.2750399</idno>
+		<ptr target="https://doi.org/10.1145/2749469.2750399" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 42nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;15</title>
+		<meeting>the 42nd Annual International Symposium on Computer Architecture, ser. ISCA &apos;15<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="41" to="53" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Enabling transparent memory-compression for commodity memory systems</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">K Q</forename><surname>Vinson Young</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Kariyappa</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE 25st International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<imprint>
+			<date type="published" when="2010-02">Feb 2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Attach?: Towards ideal memory compression by mitigating metadata bandwidth overheads</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Hong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">J</forename><surname>Nair</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Abali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Buyuktosunoglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K.-H</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">B</forename><surname>Healy</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2018.00034</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2018.00034" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 51st Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO-51</title>
+		<meeting>the 51st Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO-51</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="326" to="338" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Big data systems: A software engineering perspective</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Davoudian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Liu</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3408314</idno>
+		<ptr target="https://doi.org/10.1145/3408314" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Comput. Surv</title>
+		<imprint>
+			<biblScope unit="volume">53</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<date type="published" when="2020-09">sep 2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Performance analysis of the memory management unit under scale-out workloads</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Karakostas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><forename type="middle">S</forename><surname>Unsal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Nemirovsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Cristal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Swift</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 IEEE International Symposium on Workload Characterization (IISWC)</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Prefetched address translation</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Margaritov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Ustiugov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Bugnion</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Grot</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3352460.3358294</idno>
+		<ptr target="https://doi.org/10.1145/3352460.3358294" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture, ser. &apos;52</title>
+		<meeting>the 52nd Annual IEEE/ACM International Symposium on Microarchitecture, ser. &apos;52<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1023" to="1036" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">Every Walk&apos;s a Hit: Making Page Walks Single-Access Cache Hits</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">H</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Vougioukas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Sandberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Black-Schaffer</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3503222.3507718</idno>
+		<ptr target="https://doi.org/10.1145/3503222.3507718" />
+		<imprint>
+			<date type="published" when="2022">2022</date>
+			<publisher>Association for Computing Machinery</publisher>
+			<biblScope unit="page" from="128" to="141" />
+			<pubPlace>New York, NY, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Elastic Cuckoo Page Tables: Rethinking Virtual Memory Translation for Parallelism</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Skarlatos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kokolis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Torrellas</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378493</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378493" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<publisher>Association for Computing Machinery</publisher>
+			<biblScope unit="page" from="1093" to="1108" />
+			<pubPlace>New York, NY, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Compendia: Reducing virtualmemory costs via selective densification</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3459898.3463902</idno>
+		<ptr target="https://doi.org/10.1145/3459898.3463902" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2021 ACM SIGPLAN International Symposium on Memory Management, ser. ISMM 2021</title>
+		<meeting>the 2021 ACM SIGPLAN International Symposium on Memory Management, ser. ISMM 2021<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="52" to="65" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Perforated page: Supporting fragmented memory allocation for large pages</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">H</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Cha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Black-Schaffer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="913" to="925" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Colt: Coalesced large-reach tlbs</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vaidyanathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Jaleel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2012 45th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="258" to="269" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">The gem5 simulator</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Binkert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Saidi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Basu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hestness</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">R</forename><surname>Hower</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sardashti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Sen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Sewell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Shoaib</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vaish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Wood</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2024716.2024718</idno>
+		<ptr target="http://doi.acm.org/10.1145/2024716.2024718" />
+	</analytic>
+	<monogr>
+		<title level="s">SIGARCH Comput. Archit. News</title>
+		<imprint>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="1" to="7" />
+			<date type="published" when="2011-08">Aug. 2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Graphbig: Understanding graph computing in the context of industrial solutions</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Nai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><forename type="middle">G</forename><surname>Tanase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C.-Y</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2807591.2807626</idno>
+		<ptr target="https://doi.org/10.1145/2807591.2807626" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, ser. SC &apos;15</title>
+		<meeting>the International Conference for High Performance Computing, Networking, Storage and Analysis, ser. SC &apos;15<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<title level="m" type="main">Last accessed on</title>
+		<author>
+			<persName><forename type="first">"</forename><surname>Ldbc Graphalytics</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Datasets</surname></persName>
+		</author>
+		<ptr target="https://graphalytics.org/datasets" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">Skylake (server) -microarchitectures -intel</title>
+		<ptr target="https://en.wikichip.org/wiki/intel/microarchitectures/skylake(server" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">Memory and cache latency comparisons</title>
+		<author>
+			<persName><forename type="first">Joe</forename><surname>Chang -Qpdma</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Com</surname></persName>
+		</author>
+		<ptr target="http://www.qdpma.com/ServerSystems/ServerSystems2017.html" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">What is memory compression in windows 10</title>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Hoffman</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Memory allocation among processes</title>
+		<ptr target="https://developer.android.com/topic/performance/memory-management#lowmemorymanagement" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+			<publisher>Android Developers Documentation</publisher>
+		</imprint>
+	</monogr>
+	<note>Last accessed on</note>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">zram: Compressed ram based block devices</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">; Ibm Knowledge</forename><surname>Center</surname></persName>
+		</author>
+		<ptr target="https://www.ibm.com/docs/en/aix/7.2?topic=management-active-memory-expansion-ame" />
+		<imprint>
+			<date type="published" when="2016-02">Aug 13, 2022. February 2016</date>
+			<biblScope unit="volume">37</biblScope>
+		</imprint>
+	</monogr>
+	<note>Active memory expansion (ame). Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">Memory compression brings ram doubler to os x mavericks</title>
+		<author>
+			<persName><forename type="first">Topher</forename><surname>Kessler</surname></persName>
+		</author>
+		<ptr target="https://www.lifewire.com/understanding-compressed-memory-os-x-2260327" />
+		<imprint/>
+	</monogr>
+	<note>lifewire.com, 2020</note>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">Security Guidelines for IBM Power Systems</title>
+		<author>
+			<persName><surname>Ibm Redbooks</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Cloud</surname></persName>
+		</author>
+		<ptr target="https://www.redbooks.ibm.com/redbooks/pdfs/sg248242.pdf" />
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<publisher>Vervante</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">The Linux Kernel documentation</title>
+		<author>
+			<persName><surname>Kernel</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Org</surname></persName>
+		</author>
+		<ptr target="https://www.kernel.org/doc/html/v4.19/vm/zsmalloc.html" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">LWN.net, Last accessed on</title>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Corbet</surname></persName>
+		</author>
+		<ptr target="https://lwn.net/Articles/477067/" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+	<note>The zsmalloc allocator</note>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Intel 64 and IA-32 Architectures Software Developer&apos;s Manual Combined Volumes: 1, 2A, 2B, 2C, 2D, 3A, 3B, 3C, 3D and 4. Intel</title>
+		<author>
+			<persName><surname>Intel</surname></persName>
+		</author>
+		<ptr target="https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html#combined" />
+	</analytic>
+	<monogr>
+		<title level="m">-Paging, Figure 4-11: Formats of CR3 and Paging-Structure Entries with 4-Level Paging and 5-Level Paging</title>
+		<imprint>
+			<date type="published" when="2022-04">Apr 2022</date>
+			<biblScope unit="volume">3</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<title level="m" type="main">Protect data of virtual machines with mktme on kvm</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Huang</surname></persName>
+		</author>
+		<ptr target="https://www.linux-kvm.org/images/d/d7/Mktmekvmforum2018.pdf" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<title level="m" type="main">High bandwidth decompression of variable length encoded data streams</title>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">B</forename><surname>Agarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">P</forename><surname>Hofstee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Jamsek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">K</forename><surname>Martin</surname></persName>
+		</author>
+		<idno>US Patent 20 130 148 745A1</idno>
+		<ptr target="https://patents.google.com/patent/US20130147644" />
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Asap7: A 7-nm finfet predictive process design kit</title>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">T</forename><surname>Clark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vashishtha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Shifren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gujja</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sinha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Cline</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Ramamurthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Yeric</surname></persName>
+		</author>
+		<ptr target="https://www.sciencedirect.com/science/article/pii/S002626921630026X" />
+	</analytic>
+	<monogr>
+		<title level="j">Microelectronics Journal</title>
+		<imprint>
+			<biblScope unit="volume">53</biblScope>
+			<biblScope unit="page" from="105" to="115" />
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<title level="m" type="main">Synopsys Design Compiler Ultra</title>
+		<ptr target="https://www.synopsys.com/implementation-and-signoff/rtl-synthesis-test/dc-ultra.html" />
+		<imprint>
+			<date type="published" when="2022-08-27">Aug 27, 2022</date>
+		</imprint>
+	</monogr>
+	<note>Last accessed on</note>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<monogr>
+		<title level="m" type="main">Verilator</title>
+		<ptr target="https://www.veripool.org/verilator" />
+		<imprint>
+			<date type="published" when="2022-08-27">Aug 27, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">The parsec benchmark suite: Characterization and architectural implications</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Bienia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">P</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Li</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1454115.1454128</idno>
+		<ptr target="https://doi.org/10.1145/1454115.1454128" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 17th International Conference on Parallel Architectures and Compilation Techniques, ser. PACT &apos;08</title>
+		<meeting>the 17th International Conference on Parallel Architectures and Compilation Techniques, ser. PACT &apos;08<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="72" to="81" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Spec cpu2017: Next-generation compute benchmark</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bucek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K.-D</forename><surname>Lange</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">V</forename><surname>Kistowski</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3185768.3185771</idno>
+		<ptr target="https://doi.org/10.1145/3185768.3185771" />
+	</analytic>
+	<monogr>
+		<title level="m">Companion of the 2018 ACM/SPEC International Conference on Performance Engineering, ser. ICPE &apos;18</title>
+		<meeting><address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="41" to="42" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Sparkbench: A comprehensive benchmarking suite for in memory data analytic platform spark</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Salapura</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2742854.2747283</idno>
+		<ptr target="https://doi.org/10.1145/2742854.2747283" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th ACM International Conference on Computing Frontiers, ser. CF &apos;15</title>
+		<meeting>the 12th ACM International Conference on Computing Frontiers, ser. CF &apos;15<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">The DaCapo benchmarks: Java benchmarking development and analysis</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">M</forename><surname>Blackburn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Garner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Hoffman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">M</forename><surname>Khan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bentzur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Diwan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Feinberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Frampton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">Z</forename><surname>Guyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hirzel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Hosking</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Jump</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">E B</forename><surname>Moss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Phansalkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Stefanovi?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Vandrunen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Dincklage</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Wiedermann</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">OOPSLA &apos;06: Proceedings of the 21st annual ACM SIGPLAN conference on Object-Oriented Programing, Systems, Languages, and Applications</title>
+		<meeting><address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM Press</publisher>
+			<date type="published" when="2006-10">Oct. 2006</date>
+			<biblScope unit="page" from="169" to="190" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Renaissance: A modern benchmark suite for parallel applications on the jvm</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Prokopec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ros?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Leopoldseder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Duboscq</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>T?ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Studener</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Bulej</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Villaz?n</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Simon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>W?rthinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Binder</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3359061.3362778</idno>
+		<ptr target="https://doi.org/10.1145/3359061.3362778" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings Companion of the 2019 ACM SIGPLAN International Conference on Systems, Programming, Languages, and Applications: Software for Humanity, ser. SPLASH Companion</title>
+		<meeting>Companion of the 2019 ACM SIGPLAN International Conference on Systems, Programming, Languages, and Applications: Software for Humanity, ser. SPLASH Companion<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019. 2019</date>
+			<biblScope unit="page" from="11" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Base-delta-immediate compression: Practical data compression for on-chip caches</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Pekhimenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Seshadri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Kozuch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2012 21st International Conference on Parallel Architectures and Compilation Techniques (PACT)</title>
+		<imprint>
+			<date type="published" when="2012-09">Sep. 2012</date>
+			<biblScope unit="page" from="377" to="388" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Cpack: A high-performance microprocessor cache compression algorithm</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">P</forename><surname>Dick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Shang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lekatsas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Transactions on Very Large Scale Integration (VLSI) Systems</title>
+		<imprint>
+			<date type="published" when="2010-08">Aug 2010</date>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="page" from="1196" to="1208" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Ramulator: A fast and extensible dram simulator</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/LCA.2015.2414456</idno>
+		<ptr target="https://doi.org/10.1109/LCA.2015.2414456" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Comput. Archit. Lett</title>
+		<imprint>
+			<biblScope unit="volume">15</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="45" to="49" />
+			<date type="published" when="2016-01">Jan. 2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<monogr>
+		<title level="m" type="main">Standard Performance Evaluation Corporation</title>
+		<ptr target="https://www.spec.org/cpu" />
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note>Spec cpu2017</note>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">DRAMA: Exploiting DRAM Addressing for Cross-CPU Attacks</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Pessl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Gruss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Maurice</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mangard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of USENIX Security&apos;16</title>
+		<meeting>USENIX Security&apos;16</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<monogr>
+		<title level="m" type="main">Zen 3 -microarchitectures -amd</title>
+		<ptr target="https://en.wikichip.org/wiki/amd/microarchitectures/zen3" />
+		<imprint>
+			<date type="published" when="2022-08-13">Aug 13, 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">Quantifying memory underutilization in hpc systems and using it to improve performance via architecture support</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Panwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Dahshan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Debardeleben</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ravindran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Jian</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3352460.3358267</idno>
+		<ptr target="https://doi.org/10.1145/3352460.3358267" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO &apos;52</title>
+		<meeting>the 52nd Annual IEEE/ACM International Symposium on Microarchitecture, ser. MICRO &apos;52<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="821" to="835" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<analytic>
+		<title level="a" type="main">Quantifying server memory frequency margin and using it to improve performance in hpc systems</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Panwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">B</forename><surname>Kotra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Debardeleben</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Blanchard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Jian</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th Annual International Symposium on Computer Architecture, ser. ISCA &apos;21</title>
+		<meeting>the 48th Annual International Symposium on Computer Architecture, ser. ISCA &apos;21</meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="748" to="761" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<monogr>
+		<title/>
+		<idno type="DOI">10.1109/ISCA52012.2021.00064</idno>
+		<ptr target="https://doi.org/10.1109/ISCA52012.2021.00064" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<monogr>
+		<title level="m" type="main">HaRMony: Heterogeneous-Reliability Memory and QoS-Aware Energy Management on Virtualized Servers</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Tovletoglou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Mukhanov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">S</forename><surname>Nikolopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Karakonstantis</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378489</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378489" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<publisher>Association for Computing Machinery</publisher>
+			<biblScope unit="page" from="575" to="590" />
+			<pubPlace>New York, NY, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<monogr>
+		<title level="m" type="main">Mitosis: Transparently Self-Replicating Page-Tables for Large-Memory Machines</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Achermann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Panwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Roscoe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gandhi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378468</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378468" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<publisher>Association for Computing Machinery</publisher>
+			<biblScope unit="page" from="283" to="300" />
+			<pubPlace>New York, NY, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

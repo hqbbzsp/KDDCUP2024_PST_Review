@@ -1,0 +1,953 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">TeraPipe: Token-Level Pipeline Parallelism for Training Large-Scale Language Models</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2021-02-16">16 Feb 2021</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Zhuohan</forename><surname>Li</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Siyuan</forename><surname>Zhuang</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Shiyuan</forename><surname>Guo</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Danyang</forename><surname>Zhuo</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Hao</forename><surname>Zhang</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Dawn</forename><surname>Song</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ion</forename><surname>Stoica</surname></persName>
+						</author>
+						<title level="a" type="main">TeraPipe: Token-Level Pipeline Parallelism for Training Large-Scale Language Models</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2021-02-16">16 Feb 2021</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2102.07988v1[cs.LG]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T12:59+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Model parallelism has become a necessity for training modern large-scale deep language models. In this work, we identify a new and orthogonal dimension from existing model parallel approaches: it is possible to perform pipeline parallelism within a single training sequence for Transformer-based language models thanks to its autoregressive property. This enables a more finegrained pipeline compared with previous work. With this key idea, we design TeraPipe, a highperformance token-level pipeline parallel algorithm for synchronous model-parallel training of Transformer-based language models. We develop a novel dynamic programming-based algorithm to calculate the optimal pipelining execution scheme given a specific model and cluster configuration. We show that TeraPipe can speed up the training by 5.0x for the largest GPT-3 model with 175 billion parameters on an AWS cluster with 48 p3.16xlarge instances compared with state-of-theart model-parallel methods.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Transformer-based language models (LMs) have revolutionized the area of natural language processing (NLP) by achieving state-of-the-art results for many NLP tasks, including text classification, question answering, and text generation <ref type="bibr" target="#b2">(Brown et al., 2020;</ref><ref type="bibr" target="#b17">Radford et al., 2019)</ref>. The accuracy of a Transformer-based LM grows substantially with its model size, attributing to the fact that they can be unsupervisedly trained on almost unlimited text data. Today, a large LM, such as GPT-3 <ref type="bibr" target="#b2">(Brown et al., 2020)</ref>, can have more than 175B parameters, which amounts to 350 GB, assuming 16-bit floating-point numbers. This significantly exceeds the memory capacity of existing hardware accelerators, such as GPUs and TPUs, which makes model-parallel training a necessity, i.e., partitioning the model on multiple devices during the training process.</p><p>Because of the demands for efficient LM training, many researchers and industry practitioners have proposed different ways for model parallel training. One approach is to partition the weight matrices and dispatch smaller matrix operations to parallel devices (Figure <ref type="figure" target="#fig_0">1b</ref>; <ref type="bibr" target="#b20">Shoeybi et al., 2019;</ref><ref type="bibr" target="#b19">Shazeer et al., 2018)</ref>. Another approach is to split a batch of training data into many microbatches and then evenly pipeline the layer computations across different microbatches and devices (Figure <ref type="figure" target="#fig_0">1c</ref>; <ref type="bibr" target="#b6">Huang et al., 2019)</ref>. Unfortunately, these approaches either introduce excessive communication overheads between compute devices, or lead to reduced efficiency due to pipeline "bubbles" (i.e. device idle time, see Section 2 and 3.2 for details).</p><p>Our key observation in this paper is that Transformer-based language models have a key property: the computation of a given input token only depends on previous tokens, but not on future tokens. This lack of dependency on future tokens provides new opportunities for pipeline parallel training. In particular, it allows us to create a fine-grained pipeline within a single training sequence for Transformer-based LMs, by parallelizing the computation of the current token on the current layer with the computation of the previous token on the next layer of the model. For example, in Figure <ref type="figure" target="#fig_0">1d</ref>, we can pipeline the execution across all 5 devices within a single input sequence. Similar to other synchronous model parallel training methods, e.g., Gpipe <ref type="bibr" target="#b6">(Huang et al., 2019)</ref>, Megatron-LM <ref type="bibr" target="#b20">(Shoeybi et al., 2019)</ref>, we do not change the underlying optimization algorithm, so the resulting model has exactly the same accuracy.</p><p>However, leveraging the token dimension for efficient model parallel training raises several challenges. First, if the partitioning along the token dimension is too fine-grained, it leads to under-utilization on devices that require large blocks of data for efficient processing (e.g., GPU). Second, since each token position in the sequence depends on all previous tokens, different positions in a transformer layer exhibit uneven computation loads. This means that uniformly partitioning along the token dimension might cause uneven load across devices, and degenerate the training efficiency. In each layer, each position only takes only its previous positions as input. (b) shows operation partitioning <ref type="bibr" target="#b20">(Shoeybi et al., 2019)</ref>. An allreduce operation is required to synchronize the results of each layer. (c) shows microbatch-based pipeline parallelism <ref type="bibr" target="#b6">(Huang et al., 2019)</ref>, which allows different microbatches (red and green bars) to be executed on different layers of the DNN in parallel. (d) show TeraPipe (our work), which pipelines along the token dimension.</p><p>To this end, we design and implement TeraPipe, a highperformance synchronous model parallel training approach for large-scale Transformer-based language models, which exploits the token dimension to pipeline the computation across devices. TeraPipe uses a small number of simple workloads to derive a performance model and then uses a novel dynamic programming algorithm to compute the optimal partitioning of the token dimension for the pipeline.</p><p>TeraPipe is orthogonal to previous model-parallel training methods, so it can be used together with these methods to further improve the training performance. Our evaluation shows that for the largest GPT-3 model with 175 billion parameters, TeraPipe achieves a 5.0x speedup improvement over the state-of-the-art synchronous model-parallel training methods on an AWS cluster consisting of 48 p3.16xlarge instances.</p><p>Our paper makes the following contributions:</p><p>• We propose a new dimension, token dimension, for pipeline-parallel training of Transformer-based LMs.</p><p>• We develop a dynamic programming algorithm to compute a partition along the token dimension to maximize pipeline parallelism.</p><p>• We implement TeraPipe and show that we can increase the synchronous training throughput of the largest GPT-3 model (with 175 billion parameters) by 5.0x over the previous state-of-the-art model-parallel methods.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Related Work</head><p>Data parallelism scales ML training by partitioning training data onto distributed devices <ref type="bibr" target="#b27">(Zinkevich et al., 2010;</ref><ref type="bibr" target="#b10">Krizhevsky, 2014;</ref><ref type="bibr" target="#b4">Goyal et al., 2017;</ref><ref type="bibr" target="#b18">Rajbhandari et al., 2019)</ref>. Each device holds a model replica, works on an independent data partition, and synchronizes the updates via allreduce <ref type="bibr" target="#b10">(Krizhevsky, 2014)</ref> or a parameter server <ref type="bibr" target="#b11">(Li et al., 2014)</ref>. Data parallelism alone is not enough to train large-scale DNNs due to two main reasons: (1) every device has to have enough memory to store the model and the gradients generated during the training process;</p><p>(2) communication can be a performance bottleneck to synchronize model parameters.</p><p>Model parallelism allows for training models larger than the memory capacity of a single device, by partitioning the model (e.g., layers) into disjoint parts and executing each on a dedicated device. Existing model parallel training approaches can be roughly categorized as: operation partitioning and pipeline parallelism.</p><p>Operation partitioning. One way to split the model is to partition and parallelize computational operations across multiple devices. For example, the computation of matrix multiplications (matmul) XAB can be spitted across multiple devices by partitioning A and B along its rows and columns, respectively.</p><formula xml:id="formula_0">XAB = X • A 1 A 2 • B 1 B 2 = XA 1 B 1 + XA 2 B 2 .</formula><p>This means we can have one device calculate XA 1 B 1 and another device calculate XA 2 B 2 in parallel. After that, cross-device communication is needed to compute the sum of these two parts.</p><p>Many existing works <ref type="bibr" target="#b7">(Jia et al., 2018;</ref><ref type="bibr">2019;</ref><ref type="bibr" target="#b24">Wang et al., 2019;</ref><ref type="bibr" target="#b19">Shazeer et al., 2018)</ref> study how to optimize the partitioning schemes for different operations to maximize throughput and minimize communication overheads, among which, Megatron-LM (Figure <ref type="figure" target="#fig_0">1b</ref>; <ref type="bibr" target="#b20">Shoeybi et al., 2019)</ref> designs partitioning schemes specifically for large-scale Transformers. However, due to the excessive communication required to collect partial results after each layer, it is not efficient when the bandwidth between devices is limited <ref type="bibr" target="#b20">(Shoeybi et al., 2019)</ref>. Flexflow <ref type="bibr" target="#b7">(Jia et al., 2018)</ref> proposes a framework to find the optimal operation partitioning, but it cannot model the new dimension proposed in our work.</p><p>Pipeline parallelism partitions a DNN into layers and put different layers onto different devices (Figure <ref type="figure" target="#fig_0">1c</ref>; <ref type="bibr" target="#b16">Petrowski et al., 1993)</ref>. Each device computes the input on a given layer and sends the result to the next device. Pipeline parallelism significantly reduces communication between devices, because only devices holding neighboring layers need to communicate and they only need to communicate the activations on a particular layer.</p><p>Previous pipeline parallel training methods are based on microbatch pipelining, e.g., GPipe <ref type="bibr" target="#b6">(Huang et al., 2019)</ref>. This means the computation for a given microbatch in a minibatch on a layer can run in parallel with the next microbatch in the same minibatch on the previous layer. However, microbatch-based pipeline parallelism still cannot achieve high efficiency due to its pipeline bubbles. This is because the start of the forward propagation on a minibatch requires the backward propagation of the previous minibatch to complete (Figure <ref type="figure" target="#fig_1">2a</ref>). This problem becomes more severe when model sizes increase (see Section 3.2). <ref type="bibr" target="#b5">Harlap et al. (2018)</ref> propose using an asynchronous training algorithm to mitigate the effect of pipeline bubbles in microbach-based pipeline parallel training, but asynchronous training introduces uncertainty in model accuracy and is thus not widely adopted for training DNNs.</p><p>Wavefront parallelism is a variant of pipeline parallelism, broadly applied in shared-memory multiprocessors <ref type="bibr" target="#b21">(Sinharoy &amp; Szymanski, 1994;</ref><ref type="bibr" target="#b13">Manjikian &amp; Abdelrahman, 1996)</ref>. In deep learning, it has been used to accelerate the computation of multi-layer RNNs on a single GPU <ref type="bibr" target="#b0">(Appleyard et al., 2016)</ref>, where different input positions of different layers can execute in parallel in a wavefront fashion to maximize the utilization of the GPU. However, wavefront parallelism cannot accelerate the execution of Transformers because there is no dependency between different input positions within a single Transformer layer to begin with. In addition, wavefront parallelism uses fine-grained per-word pipelining due to the temporal data dependency in RNNs, while too fine-grained pipelining in TeraPipe would lead to inferior pipeline efficiency (see Section 3.2 and 3.3).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Method</head><p>In this section, we briefly introduce language modeling and Transformers. Based on their structures, we identify new opportunities for performing pipelining along the input sequence (which we will notate as the token dimension in the rest of the paper). With that, we derive the optimal slicing scheme over the token dimension to maximize pipeline efficiency using a dynamic programming algorithm. Finally, we show how to combine our new method with existing parallel training techniques.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.">Language Modeling and Transformers</head><p>The task of language modeling is usually framed as unsupervised distribution estimation of a text corpus X , where each example x ∼ X is a variable length sequence of tokens (x 1 , x 2 , . . . , x L ). Since language has a natural sequential ordering, it is common to factorize the joint probability over the tokens as the product of conditional probabilities (a.k.a. autoregressive decomposition; <ref type="bibr" target="#b1">Bengio et al., 2003)</ref>:</p><formula xml:id="formula_1">P (x) = L t=1 P (xt|x1, . . . , xt−1).<label>(1)</label></formula><p>Transformer <ref type="bibr" target="#b23">(Vaswani et al., 2017)</ref> is the state-of-the-art architecture for modeling these conditional probabilities. As visualized in Figure <ref type="figure" target="#fig_0">1a</ref>, a Transformer-based LM F takes the sequence ( sos , x 1 , . . . , x L−1 ) as input, where sos represents the start of a sentence, and outputs a probability distributions p t at each position t that models the conditional probability P (x t |x 1 , . . . , x t−1 ) as in Eq. 1. In practice, F is stacked with many Transformer layers <ref type="bibr" target="#b23">Vaswani et al., 2017;</ref><ref type="bibr" target="#b17">Radford et al., 2019)</ref>: f 1 takes the embedding of the original sequence as input, while f i (i &gt; 1) takes the output of f i−1 as input. The main components of a Transformer layer f contain a self-attention layer and a position-wise feed-forward network layer:</p><formula xml:id="formula_2">F = f N • f N −1 • • • • • f 1 (</formula><formula xml:id="formula_3">SeltAtt(h t ; h 1 , . . . , h t−1 ) = t s=1 α ts • (W V h s ),</formula><p>where</p><formula xml:id="formula_4">α ts = softmax (W Q h t ) (W K h s ) √ H ; (2) FFN(h t ) = W 2 σ(W 1 h t + b 1 ) + b 2 .</formula><p>(3) h 1 , . . . , h L ∈ R H are hidden states correspond to each position of the input sequence, W and b are learnable parameters, and σ is the nonlinear activation function. An important note here: for each h t , Eq. 2 takes only the hidden states before position t as inputs and Eq. 3 only takes h t as input.</p><p>The operation and data dependency in Transformers make it more amenable to parallelization on GPUs/TPUs compared to RNNs <ref type="bibr" target="#b23">(Vaswani et al., 2017)</ref>. Therefore, Transformers have been scaled to enormous datasets and achieved state-ofthe-art performance on a wide range of NLP tasks <ref type="bibr" target="#b23">(Vaswani et al., 2017;</ref><ref type="bibr" target="#b3">Devlin et al., 2018;</ref><ref type="bibr" target="#b17">Radford et al., 2019;</ref><ref type="bibr" target="#b25">Yang et al., 2019;</ref><ref type="bibr" target="#b2">Brown et al., 2020;</ref><ref type="bibr" target="#b12">Liu et al., 2019)</ref>. Recently, people show that the accuracy of LMs can consistently improve with increasing model sizes <ref type="bibr" target="#b17">(Radford et al., 2019;</ref><ref type="bibr" target="#b25">Yang et al., 2019)</ref>. While the growing model size greatly exceeds the memory capacity of a single GPU <ref type="bibr" target="#b2">(Brown et al., 2020)</ref>, model parallelism becomes a necessity for training large-scale LMs <ref type="bibr" target="#b20">(Shoeybi et al., 2019)</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.">Pipeline Parallelism Within a Sequence</head><p>In this subsection, we expose the limitations of existing pipelining parallelism approaches, and develop the proposed new pipelining method for Transformer-based LMs.</p><p>Typically, to perform pipeline parallelism, a Transformer model F is partitioned into multiple cells c 1 , . . . , c K . Each cell c k consists of a set of consecutive Transformer layers</p><formula xml:id="formula_5">f j • • • • • f i+1 • f i so that F = c K • • • • • c 2 • c 1 .</formula><p>Each c k is placed and executed on the k-th device (e.g. GPU). The output of cell c k is sent to cell c k+1 during forward propagation, and the backward states computed on cell c k+1 is sent to cell c k during backward propagation. Since each layer f exhibits the same structure, the entire LM can be uniformly partitioned: each cell possesses the same number of layers hence the same amount of computation workload, to reach optimal pipeline efficiency (see Figure <ref type="figure" target="#fig_1">2</ref>).</p><p>However, previous pipelining methods <ref type="bibr" target="#b6">(Huang et al., 2019;</ref><ref type="bibr" target="#b5">Harlap et al., 2018)</ref> do not perform well on large Transformer-based LMs due to the growing model size. Consider a minibatch of size B. The input to a Transformer layer f is a 3-dimensional tensor (h (1) , h (2) , . . . , h (B) ) of size (B, L, H), where L is the sequence length and H is the hidden state size. To improve accuracy, large LMs are often configured to have a large L to capture longer-term dependency in language sequences <ref type="bibr" target="#b22">(Tay et al., 2020;</ref><ref type="bibr" target="#b26">Zaheer et al., 2020)</ref>. To fit the model into a GPU, the minibatch size B has to decrease accordingly. The pipeline bubbles become larger (Figure <ref type="figure" target="#fig_1">2b</ref>) because fewer input sequences can be processed in parallel.</p><p>In this work, we make a key observation: for Transformerbased LMs, with appropriate scheduling, the token dimension L can be pipelined for parallel training; and this pipelining dimension is complementary to other model parallelism approaches. Precisely, for an input hidden state sequence (h 1 , h 2 , . . . , h L ), the computation of a self-attention layer SelfAtt(h t ) only depends on the hidden states of previous positions (h 1 , . . . , h t−1 ), and the computation of a feedforward layer FFN(h t ) only depends on h t itself. These offer a new opportunity for pipelining: the computation of layer f i at step t can commence once the hidden states of previous steps (&lt; t) at f i−1 are ready, which, also, can be parallelized with the computation of latter steps at f i−1 , illustrated in Figure <ref type="figure" target="#fig_0">1d</ref>. This property enables us to perform pipeline parallelism within a single input sequence. Specifically, we can split an input sequence x 1 , . . . , x L into s 1 , . . . , s M , where each subsequence s i consists of tokens (x l , x l+1 , . . . , x r ). The computation of c 1 , . . . , c K over s 1 , . . . , s M can be pipelined, for example: when c k computes over s i , c k+1 can process s i−1 and c k−1 can process s i+1 in parallel.</p><p>Considering that nowadays LMs operate on sequences with thousands of tokens <ref type="bibr" target="#b17">(Radford et al., 2019;</ref><ref type="bibr" target="#b2">Brown et al., 2020</ref>) (e.g. 2048 for GPT-3), the token dimension opens substantial space to improve the pipelining efficiency. However, applying it in practice is still challenging, especially on GPUs, for the following reasons.</p><p>First, finer-grained pipelining (i.e. picking a small |s i |) is prone to underutilizing the computational power of GPUs, and thus lowering the training throughput. As shown on the top part of Figure <ref type="figure" target="#fig_2">3</ref>, for a single layer of the GPT3-1B model (see Table <ref type="table" target="#tab_0">1</ref> for specs), the forward propagation time for an input sequence with a single token is the same as an input sequence with 256 tokens. In this case, the GPU is not being fully utilized for input sequence lengths less than 256. This means a large subsequence length is needed to achieve high throughput for a single layer (see the bottom part of Figure <ref type="figure" target="#fig_2">3</ref>). On the other hand, although GPUs have better training throughput per layer for longer sequences due to the SIMD architecture and better locality, longer input slices lead to fewer pipeline stages within a sequence, which will increase the pipeline bubble, and thus reduce the pipeline efficiency and hurt the overall training speed.</p><p>Second, splitting inputs into multiple same-size chunks for pipelining, as normally done in existing work <ref type="bibr" target="#b6">(Huang et al., 2019;</ref><ref type="bibr" target="#b5">Harlap et al., 2018)</ref>, is not the ideal way for pipelining on the token dimension. For the self-attention layer, the computation of SelfAtt(h 1 ) only requires the hidden state h 1 from its previous layer, while the computation of SelfAtt(h L ) takes all h 1 , . . . , h L as inputs, as shown in Figure <ref type="figure" target="#fig_0">1a</ref>. Therefore, the computation load on a later token position in a sequence is heavier than that of previous tokens. Since the total latency of a pipeline is determined by its slowest stage (Figure <ref type="figure" target="#fig_3">4</ref>), an optimal slicing scheme should have a long slice in the beginning and a shorter slice in the end. We next develop methods to select the optimal slicing scheme over the token dimension.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.">Selecting Optimal Slicing Scheme</head><p>We propose a dynamic programming (DP) algorithm to partition the input sequence to achieve the optimal pipeline efficiency. Specifically, given a partitioned Transformerbased LM F = c K • • • • • c 1 and a training input sequence of length L, the goal of the algorithm is to find the slicing scheme l 1 , . . . , l M to minimize the total forward and backward propagation latency, where</p><formula xml:id="formula_6">l i = |s i | is the length each sub-sequence slice s i (l 1 + • • • + l M = L).</formula><p>Let's first consider the latency of forward propagation. As shown in Section 3.2, all cells c k have exact same amount of computation. The forward propagation time t i for the slice s i on the cell c k is determined by the length of the ith slice (l i ), the lengths of all the previous subsequences (l 1 , . . . , l i−1 ), and the cluster specifications (e.g., GPU, bandwidth and latency of the underlying computer networks). We use f f wd to denote the sum of the computation latency plus data transmission latency for a given l i and the previous subsequences l 1 , . . . , l i−1 . We have:</p><formula xml:id="formula_7">t i = t fwd   l i , i−1 j=1 l j   ,<label>(4)</label></formula><p>Note the second term i−1 j=1 l j is the total length of previous subsequences s 1 , . . . , s i−1 to compute SelfAtt(s t ). As visualized in Figure <ref type="figure" target="#fig_3">4</ref>, The overall pipeline forward propagation latency we want to minimize is:</p><formula xml:id="formula_8">T = M i=1 t i + (K − 1) • max 1≤j≤M {t j }.</formula><p>(5)</p><p>The first term here is the total forward propagation time on a device (i.e. on a cell c k ). The second term is the overhead brought by the pipeline execution, which is determined by the slowest component in the whole pipeline multiplied by the number of pipeline stages K minus 1. For example, on the top of Figure <ref type="figure" target="#fig_3">4</ref>, the total execution time will be T = (t 1 + . . . + t 4 ) + 3t 4 .</p><p>If t max = max 1≤j≤M {t j } is fixed, the problem reduces to a standard Knapsack problem with an additional constraint: no t i can be larger than t max . The high-level idea of our DP algorithm is thus simple: we enumerate all the possible t max and then run the solver algorithm for the Knapsack problem with a fixed t max . Algorithm 1 demonstrates the proposed algorithm in detail.</p><p>Complexity. With our DP algorithm, we can compute the best partition in O(L 2 ) time (i.e., standard running time for Knapsack problem) for a fixed t max . Note that in total there are at most O(L 2 ) different choices (t fwd (i, j) for i, j = 1, . . . , L) of t max . We therefore can derive the optimal slicing scheme in O(L 4 ) time.</p><p>Optimization. To further accelerate the above DP algorithm, we enumerate different t max from small to large;</p><p>Algorithm 1 Selecting optimal slicing scheme given t max .</p><p>Input: Forward propagation time function t fwd and maximum per-slice time t max .</p><p>Output: Minimal total forward propagation time T and optimal slicing scheme l 1 , . . . , l M . // Dynamic programming for the total forward propagation time.</p><formula xml:id="formula_9">r 0 ← 0 for i from 1 to L do r i ← min 1≤k≤i {r i−k + t fwd (k, i − k) | t fwd (k, i − k) ≤ t max }. q i ← argmin 1≤k≤i {r i−k +t fwd (k, i−k) | t fwd (k, i− k) ≤ t max }. end for T = r L + (K − 1) • t max // Derive the optimal slicing scheme. i ← L l ← {} while i &gt; 0 do l.prepend (q i ) i ← i − q i end while</formula><p>when K • t max is greater than the current best T , we stops the enumeration since larger t max cannot provide a better slicing scheme. In addition, during enumeration of t max , we only evaluate with t max larger than the last t max by at least ε. In this case, the gap between the solution found by the DP algorithm and the global optima is at most K • ε. We choose ε = 0.1 ms in our evaluation and observe that the solution given by Algorithm 1 and the real optimal solution (ε = 0) are always the same in all our evaluated settings. With these two optimizations, the dynamic programming can finish within a minute in our evaluations.</p><p>Estimating t fwd . To avoid the cost of evaluating t fwd (i, j) for all O(L 2 ) combinations of i, j on real clusters, we use a simple performance model to estimate t fwd . Specifically, we split t fwd (i, j) into two terms:</p><formula xml:id="formula_10">t fwd (i, j) = t fwd (i, 0) + t ctx (i, j), (<label>6</label></formula><formula xml:id="formula_11">)</formula><p>where t fwd (i, 0) is the forward propagation time without any extra context input and t ctx (i, j) is the latency overhead brought by the extra context input. We measure the first term with all L choices of i and we fit a simple linear model t ctx (i, j) = a 0 + a 1 i + a 2 j + a 3 ij for the second term with a subset of all (i, j) combinations. In our experiments, the linear model can achieve a &lt; 2% relative prediction error compared to the actual overhead.</p><p>The development above can be applied to backward propagation time t bwd , since the backward propagation computation in transformers is symmetric with its forward counterpart.</p><p>One step further, we can replace all the t fwd above with t fwd + t bwd to derive the optimal slicing scheme that minimizes the total training time.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.">Combining with Other Parallel Training methods</head><p>The new dimension to perform pipeline parallelism proposed by TeraPipe is orthogonal to all previous model parallel techniques, hence can be naturally combined with them.</p><p>We explain next how TeraPipe can be combined with other parallelization methods and show, when combined, it significantly boosts parallelization performance in Section 4.</p><p>Combine with microbatch-based pipeline parallelism.</p><p>To combine with microbatch-based pipeline parallelism <ref type="bibr" target="#b6">(Huang et al., 2019)</ref>, we slice the batch dimension and the token dimension jointly to form the pipeline. Specifically, consider a training input batch (x (1) , x (2) , . . . , x (B) ), where each x (i) is an input sequence (x</p><formula xml:id="formula_12">(i) 1 , . . . , x<label>(i)</label></formula><p>L ) of length L, we partition the input batch into (s (1) , s (2) , . . . , s (D) ), such that each s</p><formula xml:id="formula_13">(d) i includes (x (a) l , x (a) l+1 , . . . , x (a) r ), (x (a+1) l , x (a+1) l+1 , . . . , x (a+1) r ), . . . , (x (b) l , x (b) l+1 , . . . , x (b)</formula><p>r ), which is the subsequence from position l to r of input data a to b. During training, all slices s</p><p>(1) 1 , . . . , s </p><formula xml:id="formula_14">M , s (2) 1 , . . . , s<label>(1)</label></formula><formula xml:id="formula_16">+ • • • + b D = B and T b1 + • • • + T b D is minimized.</formula><p>This reduces to a 1D knapsack problem and can be solved using off-the-shelf solvers.</p><p>Combine with operation partitioning. TeraPipe is orthogonal from operation partitioning in the sense that: operation partitioning is intra-operation parallelism that parallelizes the execution of a single operation, whereas TeraPipe pipelines the execution of different operations. To combine with operation partitioning, we distribute each pipeline parallel cell c K to a set of target devices and then perform operation partitioning across target devices.</p><p>Combine with data parallelism. Similarly, because data parallelism maintains multiple identical copies of the model, we can perform model parallelism for each data parallel model replica and synchronize the gradient updates between the replicas after each forward and backward propagation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Evaluation</head><p>TeraPipe is a synchronous model parallel training method that performs exactly the same underlying optimization al-  We evaluate TeraPipe following the setup in <ref type="bibr" target="#b2">Brown et al. (2020)</ref>. Specifically, we test 3 settings in <ref type="bibr" target="#b2">Brown et al. (2020)</ref>: GPT3-1B, GPT3-13B, and GPT3-175B, which have 1 billion, 13 billion, and 175 billion parameters in total, respectively. Note that GPT3-175B is the largest setting in <ref type="bibr" target="#b2">Brown et al. (2020)</ref>. In addition, we also test on a GPT3-44B model with half the hidden state size H of the GPT3-175B model, which includes 44 billion parameters in total.</p><p>For each model, we select multiple data parallelism, operation partitioning, and pipeline parallelism setup combinations. The configuration details are shown in Table <ref type="table" target="#tab_0">1</ref>. For all configurations, we set the input sequence length L = 2048 following <ref type="bibr" target="#b2">Brown et al. (2020)</ref>. We evaluate the configurations on an AWS cluster with p3.16xlarge nodes (each with 8 NVIDIA V100 GPUs). For each model, we select a cluster size based on its model size and number of layers so that each pipeline stage (each cell c k ) has the same number of layers. Since operation partitioning requires higher inter-connection speed compared to pipeline parallelism, we perform operation partitioning only inside a node, where all GPUs have high-speed inter-connection thanks to NVLink. For each configuration, we select the maximal batch size that can fit the memory of the GPUs.</p><p>We compare the per-iteration latency achieved by previous model parallel methods without TeraPipe and the latency achieved by TeraPipe for each configuration. Specifically, for the setup without TeraPipe, we measure the training latency with GPipe <ref type="bibr" target="#b6">(Huang et al., 2019)</ref> as the pipeline parallel training method. For TeraPipe, we perform a joint dynamic programming on both batch and token dimension as shown in Section 3.4 and measure the training latency with the optimal slicing scheme found by the dynamic programming algorithm. All the latency results in the paper are averaged over 10 runs. The detailed numbers of the latency results and the solution find by the dynamic programming algorithm can be found in the appendix. and ( <ref type="formula">5</ref>). For GPT3-44B, TeraPipe accelerates the training by 1.88x, 1.56x, and 2.40x for setting ( <ref type="formula" target="#formula_10">6</ref>), ( <ref type="formula">7</ref>), and (8), respectively. For GPT3-175B, TeraPipe accelerates the training by 6.75x and 5.02x for setting ( <ref type="formula">9</ref>) and ( <ref type="formula">10</ref>), respectively.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.">Main Results</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>We show the latency results for all configurations in</head><p>TeraPipe provides higher speedup for larger models: Larger models have a larger hidden state size H, and a larger portion of GPU memory is devoted to storing the model weights and hidden states. Therefore, the batch size B has to be decreased to fit the model into the GPU memory, as shown in the setup in Table <ref type="table" target="#tab_0">1</ref>. Smaller batch size B limits the previous microbatch-based pipeline parallel methods' ability to saturate the pipeline bubbles, while the token dimension used by TeraPipe still provides abundant opportunity to improve pipeline efficiency. In addition, larger models have more pipeline stages compared to smaller models, because larger models have more layers and each layer takes more memory than the smaller models. More pipeline stages require more input slices to saturate the pipeline.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.">Dynamic Programming</head><p>In this subsection, we provide an ablation study on the effectiveness of the dynamic programming algorithm proposed in Section 3.3. We compare the training latency with the slicing scheme found by the dynamic programming algorithm, to a simple heuristic that slices the input sequence uniformly. Specifically, we evaluate GPT3-44B with setting (8) and GPT3-175B with setting (9). For the uniform slicing baseline, we slice the whole input on the batch dimension and range the number of slices on the token dimension from 1 to 16 and 1 to 128 for two settings, respectively, and evaluate the iteration latency for each uniform slicing scheme.</p><p>The result is shown in Figure <ref type="figure" target="#fig_6">6</ref>. As in Section 3.2, too finegrained pipeline (e.g. #slices=128 in Figure <ref type="figure" target="#fig_6">6b</ref>) performs badly because of the underutilization of the GPUs. Also, too coarse-grained pipeline (e.g. #slices=4 in Figure <ref type="figure" target="#fig_6">6b</ref>) has large pipeline bubbles, which leads to high iteration latency. In addition, because of the non-uniform running time brought by the Transformer structure, the slicing scheme derived by the dynamic programming program achieves better performance compared to the best uniform sliced pipeline: the optimal solutions found by dynamic programming are 1.12x and 1.04x faster compared to the best uniform slicing scheme for GPT3-44B and GPT3-175B model, respectively.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.">Longer Sequence Length</head><p>A growing set of works start to focus on increasing the input sequence length of the Transformers <ref type="bibr" target="#b22">(Tay et al., 2020;</ref><ref type="bibr" target="#b26">Zaheer et al., 2020;</ref><ref type="bibr" target="#b9">Kitaev et al., 2020)</ref>. Long sequence length enables Transformers to reason about long-term dependencies and thus extends its applicability to more complex applications such as modeling documents. However, longer sequences increases the memory usage of a single input sequence, and decreases the maximum batch size allowed, which limits the pipeline efficiency of previous microbatchbased pipeline parallelism methods.</p><p>In this subsection, we vary the sequence length from 2048 to 8192 for the GPT3-13B model (setting (5)) and evaluate the training iteration latency. Because of the growth in memory usage, the batch sizes for sequence length 4096, 6144, 8196 are reduced to 8, 4, 2, respectively. We show the results in Figure <ref type="figure" target="#fig_7">7</ref>. TeraPipe achieves 2.76x, 4.97x, 7.83x speedup for sequence length 4096, 6144, and 8196, respectively. As the sequence length grows, the gap between the performance with and without TeraPipe significantly increases, as expected. Meanwhile, longer sequence length provides more space on the token dimension and thus TeraPipe can perform even better -TeraPipe enables efficient training of future-emerging LMs with growing sequence lengths.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Conclusion</head><p>We present TeraPipe, a high-performance token-level pipeline parallel algorithm for training large-scale Transformer-based language model. We develop a novel dynamic programming-based algorithm to calculate the optimal pipelining execution scheme, given a specific LM and a cluster configuration. TeraPipe is orthogonal to other model parallel training methods and can be complemented by them. Our evaluations show that TeraPipe accelerates the synchronous training of the largest GPT-3 models with 175 billion parameters by 5.0x on an AWS cluster with 48 p3.16xlarge instances compared to previous methods.  <ref type="bibr">[552,</ref><ref type="bibr">536,</ref><ref type="bibr">528,</ref><ref type="bibr">512,</ref><ref type="bibr">504,</ref><ref type="bibr">496,</ref><ref type="bibr">488,</ref><ref type="bibr">480]</ref> </p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 .</head><label>1</label><figDesc>Figure 1. Different approaches of model parallel training of Transformer-based LMs. (a) shows a standard multi-layer Transformer LM.In each layer, each position only takes only its previous positions as input. (b) shows operation partitioning<ref type="bibr" target="#b20">(Shoeybi et al., 2019)</ref>. An allreduce operation is required to synchronize the results of each layer. (c) shows microbatch-based pipeline parallelism<ref type="bibr" target="#b6">(Huang et al., 2019)</ref>, which allows different microbatches (red and green bars) to be executed on different layers of the DNN in parallel. (d) show TeraPipe (our work), which pipelines along the token dimension.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. Execution timeline for different pipelining methods. Grey blocks indicate GPUs idle time (a.k.a. pipeline bubbles). (a) Microbatch-based pipeline parallelism (e.g. GPipe). Each color corresponds to a microbatch. (b) Microbatch-based pipeline parallelism with longer sequence (hence smaller minibatch size due to fixed GPU memory). Pipeline bubbles significantly increase. (c) TeraPipe. Pipeline bubbles are substantially reduced because of the improved pipelining granularity.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Forward propagation time and throughput for a single layer of GPT3-1B model with a single input sequence with different number of input tokens on a single NVIDIA V100 GPU, averaged by 30 independent runs. Top: Time per forward propagation. Bottom: Throughput measured by number of tokens per millisecond.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. Execution timeline for inputs for uniform sequence split with non-uniform running time (top) and non-uniform sequence split with uniform running time (bottom). The total latency of a pipeline is determined by its slowest stage, and thus splits with non-uniform running time result in larger pipeline bubbles and inferior pipeline efficiency.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>c 1 , . . . , c K in a pipelined fashion. To jointly optimize the sequence slicing and batch splitting, the DP algorithm in Section 3.3 can be extended to include the batch dimension: we can first run the whole DP algorithm in Section 3.3 for all different batch sizes b from 1 to B. For each b, we derive the optimal T b and the corresponding slicing scheme s b . With all T b and s b , we only need to determine the size of each slice in the batch dimension b 1 , . . . , b D such that b 1</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 5 .</head><label>5</label><figDesc>Figure5. Training iteration latency for all configurations with and without TeraPipe. Details for each configuration are listed in Table1.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 6 .</head><label>6</label><figDesc>Figure6. Training iteration latency of TeraPipe with uniform slicing scheme with different number of slices and the optimal slicing scheme find by the dynamic programming algorithm.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 7 .</head><label>7</label><figDesc>Figure 7. Training iteration latency of TeraPipe with different input sequence length for the GPT3-13B model.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 .</head><label>1</label><figDesc>Model settings and parallel training setups used in the evaluation. N : Number of Transformer layers. H: Hidden state size. #Params: Number of total parameters. L: Input sequence length. #GPUs: Total number of GPUs. B: Batch size. #Data: Number of data parallel shards. #Pipe: Number of pipeline stages. #Op: Number of GPUs used for operational partitioning by each Transformer layer.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Model</cell><cell>N</cell><cell>H</cell><cell>#Params</cell><cell>L</cell><cell>#GPUs</cell><cell>B</cell><cell>#Data #Pipe #Op</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>(1)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>128</cell><cell>8</cell><cell>24</cell><cell>1</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>(2)</cell><cell>GPT3-1B</cell><cell cols="2">24 2048</cell><cell>1B</cell><cell>2048</cell><cell>192</cell><cell>72</cell><cell>2</cell><cell>12</cell><cell>8</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>(3)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>72</cell><cell>1</cell><cell>12</cell><cell>8</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="4">(4) GPT3-13B 40 5120 (5)</cell><cell>13B</cell><cell>2048</cell><cell>320</cell><cell>32 32</cell><cell>2 1</cell><cell>20 40</cell><cell>8 8</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>(6)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>8</cell><cell>4</cell><cell>96</cell><cell>1</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>(7)</cell><cell cols="3">GPT3-44B 96 6144</cell><cell>44B</cell><cell>2048</cell><cell>384</cell><cell>8</cell><cell>2</cell><cell>24</cell><cell>8</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>(8)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>8</cell><cell>1</cell><cell>48</cell><cell>8</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="4">(9) GPT3-175B 96 12288 (10)</cell><cell>175B</cell><cell>2048</cell><cell>384</cell><cell>2 2</cell><cell>1 1</cell><cell>96 48</cell><cell>4 8</cell></row><row><cell>Latency (s)</cell><cell>0.0 0.2 0.4 0.6 0.8 1.0 1.2 1.4 1.6</cell><cell>(1)</cell><cell>(2)</cell><cell cols="2">(3) w/o TeraPipe w/ TeraPipe</cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 4 .</head><label>4</label><figDesc>Detailed numbers and slicing schemes in experiments with longer sequence lengths (Figure7).</figDesc><table><row><cell>Model</cell><cell>Input Sequence Length</cell><cell>Algorithm</cell><cell></cell><cell>Slicing Scheme</cell><cell>Latency (s)</cell></row><row><cell></cell><cell>2048</cell><cell>w/o Terapipe w/ Terapipe</cell><cell></cell><cell>[(1, [2048])] * 32 [(1, [704, 688, 656])] * 32</cell><cell>1.863 ± 0.007 1.328 ± 0.037</cell></row><row><cell>GPT3-13B</cell><cell>4096</cell><cell>w/o Terapipe w/ Terapipe</cell><cell>[(1,</cell><cell>[(1, [4096])] * 8</cell><cell>2.526 ± 0.001</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">UC Berkeley</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">Duke University. Correspondence to: Zhuohan Li &lt;zhuohan@cs.berkeley.edu&gt;.Preprint. Under Review.</note>
+		</body>
+		<back>
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Appendix</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Implementation</head><p>We implement TeraPipe with PyTorch <ref type="bibr" target="#b15">(Paszke et al., 2019)</ref> and NCCL (NCCL). We use Megatron-LM <ref type="bibr" target="#b20">(Shoeybi et al., 2019)</ref> as the library for operation partitioning and implement microbatch-based pipeline parallelism and data parallelism by ourselves. The core of TeraPipe is implemented using 1714 lines of Python. The code will be open-sourced.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Experiment Results</head><p>Here, we include the detailed numbers (mean and standard deviation of the latency) and the slicing schemes found by the DP algorithms for all experiments in the main paper. Specifically, we list the details of Figure <ref type="figure">5</ref>, 6, and 7 in Table <ref type="table">2</ref>, 3, and 4.  <ref type="bibr">[384,</ref><ref type="bibr">384,</ref><ref type="bibr">368,</ref><ref type="bibr">320,</ref><ref type="bibr">296,</ref><ref type="bibr">296]</ref>)] * 8 1.111 ± 0.002  </p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Optimizing performance of recurrent neural networks on gpus</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Appleyard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Kocisky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Blunsom</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1604.01946</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">A neural probabilistic language model</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ducharme</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Vincent</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Jauvin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of machine learning research</title>
+		<imprint>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="page" from="1137" to="1155" />
+			<date type="published" when="2003-02">Feb. 2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title level="m" type="main">Language models are few-shot learners</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">B</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Askell</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2005.14165</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M.-W</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Toutanova</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Bert</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1810.04805</idno>
+		<title level="m">Pre-training of deep bidirectional transformers for language understanding</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<author>
+			<persName><forename type="first">P</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dollár</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Noordhuis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wesolowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kyrola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Tulloch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Accurate</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1706.02677</idno>
+		<title level="m">large minibatch sgd: Training imagenet in 1 hour</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><surname>Harlap</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Narayanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Phanishayee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Seshadri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Devanur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Ganger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Pipedream</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1806.03377</idno>
+		<title level="m">Fast and efficient pipeline parallel dnn training</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Gpipe: Efficient training of giant neural networks using pipeline parallelism</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bapna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Firat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ngiam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="103" to="112" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Exploring hidden dimensions in parallelizing convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Ruizhongtai Qi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Aiken</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">02</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Beyond data and model parallelism for deep neural networks</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Aiken</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019. 2019</date>
+			<pubPlace>SysML</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Reformer: The efficient transformer</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Kitaev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ł</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Levskaya</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2001.04451</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">One weird trick for parallelizing convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<idno>ArXiv, abs/1404.5997</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Scaling distributed machine learning with the parameter server</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">W</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">J</forename><surname>Smola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ahmed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Josifovski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Long</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">J</forename><surname>Shekita</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B.-Y</forename><surname>Su</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">11th {USENIX} Symposium on Operating Systems Design and Implementation</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="volume">14</biblScope>
+			<biblScope unit="page" from="583" to="598" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Joshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Roberta</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1907.11692</idno>
+		<title level="m">A robustly optimized bert pretraining approach</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Scheduling of wavefront parallelism on scalable shared-memory multiprocessors</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Manjikian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">S</forename><surname>Abdelrahman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1996 ICPP Workshop on Challenges for Parallel Processing</title>
+				<meeting>the 1996 ICPP Workshop on Challenges for Parallel Processing</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1996">1996</date>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="page" from="122" to="131" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">The nvidia collective communication library (nccl</title>
+		<ptr target="https://developer.nvidia.com/nccl" />
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+		<respStmt>
+			<orgName>NCCL</orgName>
+		</respStmt>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Pytorch: An imperative style, high-performance deep learning library</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Paszke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gross</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Massa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lerer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradbury</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Chanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Killeen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Gimelshein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Antiga</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1912.01703</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Performance analysis of a pipelined backpropagation parallel algorithm</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Petrowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dreyfus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Girault</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/72.286892</idno>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Neural Networks</title>
+		<imprint>
+			<biblScope unit="volume">4</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="970" to="981" />
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Language models are unsupervised multitask learners</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Luan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Amodei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Rajbhandari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Rasley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Ruwase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zero</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1910.02054</idno>
+		<title level="m">Memory optimization towards training a trillion parameter models</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Mesh-tensorflow: Deep learning for supercomputers</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Tran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Koanantakool</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Hawkins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Young</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="10414" to="10423" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<author>
+			<persName><forename type="first">M</forename><surname>Shoeybi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Patwary</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Puri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Legresley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Casper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Catanzaro</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1909.08053</idno>
+		<title level="m">Megatron-lm: Training multi-billion parameter language models using gpu model parallelism</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">Finding optimum wavefront of parallel computation. Parallel Algorithms and Applications, 2, 08</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Sinharoy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Szymanski</surname></persName>
+		</author>
+		<idno type="DOI">10.1080/10637199408915404</idno>
+		<imprint>
+			<date type="published" when="1994">1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Tay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Dehghani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Abnar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bahri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Rao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ruder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Metzler</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2011.04006</idno>
+		<title level="m">Long range arena: A benchmark for efficient transformers</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ł</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Polosukhin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="5998" to="6008" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Supporting very large models using automatic dataflow graph partitioning</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C.-C</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fourteenth EuroSys Conference</title>
+				<meeting>the Fourteenth EuroSys Conference</meeting>
+		<imprint>
+			<date type="published" when="2019">2019. 2019</date>
+			<biblScope unit="page" from="1" to="17" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Xlnet: Generalized autoregressive pretraining for language understanding</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Carbonell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="5753" to="5763" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<title level="m" type="main">Big bird: Transformers for longer sequences</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaheer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Guruganesh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Dubey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ainslie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Alberti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ontanon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ravula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2007.14062</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Parallelized stochastic gradient descent</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zinkevich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Weimer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Smola</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<editor>
+			<persName><forename type="first">J</forename><surname>Lafferty</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">C</forename><surname>Williams</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">J</forename><surname>Shawe-Taylor</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Zemel</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">A</forename><surname>Culotta</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="volume">23</biblScope>
+			<biblScope unit="page" from="2595" to="2603" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

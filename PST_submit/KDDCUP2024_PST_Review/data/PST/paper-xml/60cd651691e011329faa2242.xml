@@ -1,0 +1,857 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Algorithm to Compilation Co-design: An Integrated View of Neural Network Sparsity</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Fu-Ming</forename><surname>Guo</surname></persName>
+							<email>fuming.guo@fmr.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Austin</forename><surname>Huang</surname></persName>
+							<email>austinh@alum.mit.edu</email>
+						</author>
+						<title level="a" type="main">Algorithm to Compilation Co-design: An Integrated View of Neural Network Sparsity</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:25+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Reducing computation cost, inference latency, and memory footprint of neural networks are frequently cited as research motivations for pruning and sparsity. However, operationalizing those benefits and understanding the end-to-end effect of algorithm design and regularization on the runtime execution is not often examined in depth.</p><p>Here we apply structured and unstructured pruning to attention weights of transformer blocks of the BERT language model, while also expanding block sparse representation (BSR) operations in the TVM compiler. Integration of BSR operations enables the TVM runtime execution to leverage structured pattern sparsity induced by model regularization. This integrated view of pruning algorithms enables us to study relationships between modeling decisions and their direct impact on sparsity-enhanced execution. Our main findings are: 1) we validate that performance benefits of structured sparsity block regularization must be enabled by the BSR augmentations to TVM, with 4x speedup relative to vanilla PyTorch and 2.2x speedup relative to standard TVM compilation (without expanded BSR support). 2) for BERT attention weights, the end-to-end optimal block sparsity shape in this CPU inference context is not a square block (as in <ref type="bibr" target="#b10">Gray et al. [2017]</ref>) but rather a linear 32x1 block 3) the relationship between performance and block size / shape is is suggestive of how model regularization parameters interact with task scheduler optimizations resulting in the observed end-to-end performance.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Capabilities of neural networks have accelerated in the last decade and that progress has been accompanied by a productive tension between two competing goals. One goal is to expand the boundaries of functionality and performance, which has been accompanied by increasing scale in data and compute. A second goal is for new capabilities to have broad impact and operationalization. This goal tends towards the opposite direction -shrinking down compute and data required to achieve a capability.</p><p>For example, expansion of data and compute has led to recent NLP advances showing how large language models have unprecedented generalization capabilities <ref type="bibr" target="#b1">[Brown et al., 2020</ref><ref type="bibr" target="#b16">, Raffel et al., 2019]</ref>. These models should enable new realtime human-model interactions and entirely novel model development process where capabilities are instantiated at inference time, or can be rapidly adapted using lightweight methods such as prefix tuning <ref type="bibr" target="#b15">[Li and Liang, 2021]</ref>. However computational cost is an impediment to the impact and adoption of such models. How do we make these models accessible for both small and large scale research and deployment? Could such models be used in conjunction with privacy-preserving AI which requires model computation on edge devices? How can these Preprint. Under review.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>arXiv:2106.08846v2 [cs.</head><p>LG] 17 Jun 2021 language models be embedded at low cost into human-in-the-loop interactions requiring realtime latency?</p><p>One proposed answer to these questions has been the literature around sparsification and pruning of neural networks. Since the 1980s, we have known that it is usually possible to prune most parameters from trained neural networks without affecting accuracy <ref type="bibr" target="#b13">[LeCun et al., 1990]</ref>. <ref type="bibr" target="#b11">Han et al. [2015]</ref> reduced number of parameters of AlexNet <ref type="bibr" target="#b12">[Krizhevsky et al., 2012]</ref> by 9× and VGG <ref type="bibr" target="#b18">[Simonyan and Zisserman, 2014]</ref> by 13× using connection pruning. The lottery ticket hypothesis was proposed by <ref type="bibr" target="#b8">Frankle and Carbin [2018]</ref>, which observes that a subnetwork of randomly-initialized network can replace the original network with the same performance. <ref type="bibr" target="#b3">Chen et al. [2020</ref><ref type="bibr" target="#b4">Chen et al. [ , 2021] ]</ref> demonstrate the core LTH observations remain generally relevent in transformer models for both computer vision and natural language processing. Although current-generation CPUs and GPUs do not immediately benefit from sparsity, there is an active research area dedicated to writing libraries to accelerate sparse neural networks on these platforms <ref type="bibr" target="#b7">[Elsen et al., 2020]</ref> and next generation hardware has native sparsity support (e.g., the NVIDIA A100, GraphCore IPU, and Cerebras Wafer-Scale Engine).</p><p>Although pruning is often motivated by performance, algorithms are often studied in isolation separate from their consequences with respect to compilation and execution. However, interactions between model regularization choices, model compilation, and inference execution can have subtle-yet-critical effects on performance.</p><p>In this research, we implement both unstructured and structured sparsification of the attention weights of BERT alongside BSR sparsity optimizations in the TVM compiler <ref type="bibr" target="#b2">[Chen et al., 2018]</ref>. We show how algorithms and compiler optimizations interact at different levels of the abstraction stack to determine end-to-end performance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Methods</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Structured Sparsification</head><p>Following the conventional pruning formulation, we consider the following optimization problem <ref type="bibr" target="#b11">[Han et al., 2015]</ref>:</p><formula xml:id="formula_0">minimize w f (w) + λ w p ,<label>(1)</label></formula><p>where w denotes the parameters of a neural network model, w p denotes the p norm of w for p ∈ {0, 1}. Note that equation 1 can be interpreted as the Lagrangian form of the problem: minimize</p><formula xml:id="formula_1">w∈R d f 0 (w) subject to w p ≤ τ,<label>(2)</label></formula><p>where f 0 is the pruning loss, p ∈ {0, 1}, and τ is the tolerance of nonzero weights. To obtain models with structured sparsity, we calculate our norm w p in a structured group manner</p><formula xml:id="formula_2">w p = N n=1 B b=1 w b,n p<label>(3)</label></formula><p>A weight matrix or convolution kernel can be divided into blocks with sparsity determined by the outcome of the model optimization. Here B is the block size and N is the number of blocks that comprise the weight matrix or convolution kernel.</p><p>In contrast to the standard (unstructured) 1 / lasso procedure, group sparsity regularizes towards sparsity within each block, leading to a smaller set of more common used intra-block patterns, at least in the regime where B is sufficiently small.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">TVM Compiler Integration</head><p>Gray et al. <ref type="bibr">[2017]</ref>, <ref type="bibr" target="#b9">Gale et al. [2020]</ref> has shown the advantage of block sparsity in executing Transformer <ref type="bibr" target="#b20">[Vaswani et al., 2017</ref>] models on GPU. <ref type="bibr" target="#b26">Zhang et al. [2021]</ref>, <ref type="bibr" target="#b9">Gale et al. [2020]</ref> demonstrates that the compiler scheduling introduces tremendous inference speed up on neural network. We augmented the TVM compiler with the following additions to achieve inference speed up on sparse neural network:</p><p>• We expand support for Block Sparse Row (BSR) for use with attention kernels and fully connected layers. BSR reduces the sparse neural network memory footprint and speeds up inference. Acceleration of sparse neural networks depends on eliminating operations (e.g., element-wise matrix multiplication) on zeroed weights (through pruning) and reusing the sparsity structure-based operations.</p><p>• To eliminate the operation on zeroed-out weights, we implement the element-wise matrix multiplication for the BSR format. Specifically, we represent BSR matrices as data values, indices, and indptr (index pointer). Through indices and indptr, TVM picks only the nonzero weight in the sparse attention kernel and executes element-wise multiplication with input tensor. The BSR format and sparse multiplication operator implementation follow SciPy <ref type="bibr" target="#b21">[Virtanen et al., 2020]</ref>.</p><p>• The TVM task scheduler is able to reuse structure-based sparsity. The aforementioned indices and indptr of BSR representation intrinsically reflect the characteristics of sparse matrices. The BSR representations are stored in a task buffer together with corresponding operators in TVM. TVM analyzes the similarity of tasks in the buffer and optimize the execution of the tasks through an auto-scheduler. The analysis proceeds in the task searching stage, attending to different hardware specifications (e.g., number of cores, cache size, instruction set architecture (ISA), max memory per block, and max thread per block). If two tasks in the task buffer are the same, TVM treats them as identical and reuse them. If two tasks are similar, TVM schedules them adjacent in the execution path. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Experiments</head><p>The goal of our experiments was to implement both unstructured and structured sparsification and assess the relative end-to-end impact on performance when the algorithm interacts with the compiler implementation, while assessing accuracy at different levels of sparsification. Here we focus on a sparsity and compiler co-design approach to achieve inference speed up on CPU (Intel Core Processor Haswell). Haswell is not a high performance CPU, but rather a cost-effective contemporary standard and widely used in cloud computing environments.</p><p>We use the official BERT model from Google as the starting point. Following the notation from <ref type="bibr" target="#b5">Devlin et al. [2019]</ref>, we denote the number of layers (i.e., transformer blocks) as L, the hidden size as H, and the number of self-attention heads as A. We prune the BERT model: BERT BASE (L = 12, H = 768, A = 12, total parameters = 110M). As the parameters of these transformer blocks take up more than 90% weights of the entire BERT, the weights of these transformer blocks are our pruning target.</p><p>Data: In pre-training, we use the same pre-training corpora as <ref type="bibr" target="#b5">Devlin et al. [2019]</ref>: BookCorpus (800M words) <ref type="bibr" target="#b27">[Zhu et al., 2015]</ref> and English Wikipedia (2, 500M words). Based on the same corpora, we use the same preprocessing script<ref type="foot" target="#foot_0">1</ref> to create the pre-training data. In fine-tuning, we report our results on the Stanford Question Answering Dataset (SQuAD) <ref type="bibr" target="#b17">[Rajpurkar et al., 2016]</ref> and the General Language Understanding Evaluation (GLUE) benchmark <ref type="bibr" target="#b22">[Wang et al., 2018]</ref>. The GLUE is a collection of datasets/tasks for evaluating natural language understanding systems<ref type="foot" target="#foot_1">2</ref> .</p><p>Input/Output representations: We follow the input/output representation setting from <ref type="bibr" target="#b5">Devlin et al. [2019]</ref> for both pre-training and fine-tuning. We use the WordPiece <ref type="bibr" target="#b25">Wu et al. [2016]</ref> embeddings with a 30, 000 token vocabulary. The first token of every sentence is always a special classification token ([CLS]). The sentences are differentiated with a special token ([SEP]).</p><p>Evaluation: In pre-training, BERT considers two objectives: masked language modeling (MLM) and next sentence prediction (NSP). For MLM, a random sample of the tokens in the input sequence is selected and replaced with the special token ([MASK]). The MLM objective is a cross-entropy loss on predicting the masked tokens. NSP is a binary classification loss for predicting whether two segments follow each other in the original text. In pre-training, we use MLM and NSP as training objectives to pre-train, retrain the BERT model, and as metrics to evaluate the BERT model . In fine-tuning, F1 scores are reported for SQuAD, QQP and MRPC. Matthew's Corr and Pearson-Spearman Corr are reported for CoLA and SST2 respectively. Accuracy scores are reported for the other tasks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Results</head><p>We first run standard dense computations to set baselines for uncompiled PyTorch / Tensorflow inference (Table <ref type="table" target="#tab_0">1</ref>) without any model pruning or TVM compilation. We compare these baselines against sparse model variants using irregular sparse pruning and structured sparse pruning to BERT for a standard SQuAD QA task <ref type="bibr" target="#b17">[Rajpurkar et al., 2016]</ref> and GLUE benchmark <ref type="bibr" target="#b22">[Wang et al., 2018]</ref>.</p><p>Next, with standard TVM compilation (i.e. prior to adding expanded BSR support) we observe an expected speedup, with inference time reduced to about 55% of the vanilla PyTorch inference time (from 1389ms to 764ms). Note we are less interested in the absolute inference times which will be specific to a hardware configuration, and more interested in relative reduction observed in this context of commodity CPU hardware. Table <ref type="table" target="#tab_0">1</ref> shows inference times at an 80% sparsity ratio for a range of block sparsity optimizations.</p><p>As a negative control, we apply irregular sparse pruning and structured sparse pruning of various dimensions and assess the inference time using the standard (unmodified) TVM compiler and runtime. We observe that inference performance remains approximately the same with most deviations being within ∼ 5% of dense inference in spite of the 80% sparsity ratio.</p><p>We then apply the same experiments for the augmented TVM compiler, expanding BSR support, labeled TVM + in Table <ref type="table" target="#tab_0">1</ref>. Here we observe notable performance improvements from the structured sparse pruning, with inferences times improving by as much as 55 % (0.45 TVM + /Dense) in the case of 1 × 32 block sparsity.</p><p>There is a non-monotonic relationship between linear block size and computation time. Inference time improves for L1 block sparsity dimensions from 1 × 1 to 1 × 32, but becomes worse for larger sizes (Figure <ref type="figure" target="#fig_1">2</ref>, Table <ref type="table" target="#tab_0">1</ref>).</p><p>When transitioning from single-row linear blocks for structured sparsity to square blocks of 4x4, 8x8, 16x16, and 64x64 we see a marked decrease in performance, although inference is still more performant than the dense computation.</p><p>The performance of the models (Table <ref type="table" target="#tab_1">2</ref>) is relatively consistent as the sparsity ratio varied from 50% to 80%. The largest drop was in SQuAD F1 scores while other tasks were within 1-3% for </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Discussion</head><p>We have implemented pruning algorithms alongside compiler support for sparse inference. In doing so, we are able to assess sparsity regularization from an integrated perspective. We show how the performance implications of modeling decisions are dependent on compiler support for sparsity, and illustrate the interaction between regularization and scheduling algorithms embedded in the compiler and runtime.</p><p>An interesting observation was the non-monotonic relationship between inference time and block size. This could reflect how modeling choices interact with the runtime scheduler. For small sparse blocks, block computation improves performance while the sparsity pattern is also likely to be replicated, leading to computation reuse by the TVM scheduler. As block sizes increase, in spite of larger-scale parallel computation, the cardinality of repeated sparsity patterns drops, which reduces the compute savings available to the scheduler. Thus larger linear patterns such as 1 × 384 as well as larger N × N square blocks are likely to have this issue.</p><p>Some direct follow-ups to this work include 1) create instrumentation tools for introspection of task reuse by the scheduler to better quantify effects of regularization choices 2) examine whether the finding that 1 × 32 linear blocks are optimal relates to the sparsity patterns and structure of BERT's attention weight matrices 3) examine algorithm-to-compiler performance relationships in other architectures such as convolution and graph neural networks and 4) generalize principles for  </p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Overview of the augmented compiler: algorithm to compilation co-design</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Performance benchmark for different structured sparsity</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>Inference times in milliseconds on a commodity Haswell Intel Core Processor and improvement relative to the dense baseline (TVM + /Dense).2x-5x compression rates. Fine tuning and hyperparameters were not aggressively optimized and these values can likely be improved with more computationally intensive fine tuning assessments.</figDesc><table><row><cell></cell><cell>1</cell><cell>PyTorch</cell><cell cols="2">Tensorflow</cell><cell>TVM ms</cell><cell>TVM + ms</cell><cell>TVM + /Dense</cell></row><row><cell></cell><cell>block size</cell><cell>ms</cell><cell>ms</cell><cell></cell><cell>mean std</cell><cell>mean std</cell><cell>mean std</cell></row><row><cell>Dense</cell><cell></cell><cell>1389</cell><cell>1298</cell><cell></cell><cell cols="2">764 (19) 772 (19)</cell><cell>1.000 (0.025)</cell></row><row><cell>Irregular Sparsity</cell><cell>1 × 1</cell><cell>1375</cell><cell>1281</cell><cell></cell><cell cols="2">759 (14) 754 (6)</cell><cell>0.977 (0.008)</cell></row><row><cell>Structured Sparsity</cell><cell>1 × 4</cell><cell></cell><cell></cell><cell></cell><cell cols="2">756 (28) 583 (17)</cell><cell>0.755 (0.022)</cell></row><row><cell></cell><cell>1 × 8</cell><cell></cell><cell></cell><cell></cell><cell cols="2">755 (11) 533 (2)</cell><cell>0.690 (0.003)</cell></row><row><cell></cell><cell>1 × 16</cell><cell></cell><cell></cell><cell></cell><cell cols="2">795 (13) 379 (8)</cell><cell>0.491 (0.010)</cell></row><row><cell></cell><cell>1 × 32</cell><cell></cell><cell></cell><cell></cell><cell>795 (9)</cell><cell>348 (5)</cell><cell>0.451 (0.006)</cell></row><row><cell></cell><cell>1 × 64</cell><cell></cell><cell></cell><cell></cell><cell cols="2">790 (10) 353 (5)</cell><cell>0.457 (0.006)</cell></row><row><cell></cell><cell>1 × 128</cell><cell></cell><cell></cell><cell></cell><cell cols="2">793 (12) 366 (8)</cell><cell>0.474 (0.010)</cell></row><row><cell></cell><cell>1 × 256</cell><cell></cell><cell></cell><cell></cell><cell>799(18)</cell><cell>366 (6)</cell><cell>0.474 (0.008)</cell></row><row><cell></cell><cell>1 × 384</cell><cell></cell><cell></cell><cell></cell><cell cols="2">779 (12) 576 (6)</cell><cell>0.746 (0.008)</cell></row><row><cell></cell><cell>4 × 4</cell><cell></cell><cell></cell><cell></cell><cell cols="2">751 (10) 556 (7)</cell><cell>0.720 (0.009)</cell></row><row><cell></cell><cell>8 × 8</cell><cell></cell><cell></cell><cell></cell><cell cols="2">776 (14) 529 (15)</cell><cell>0.685 (0.019)</cell></row><row><cell></cell><cell>16 × 16</cell><cell></cell><cell></cell><cell></cell><cell>768 (6)</cell><cell>417 (6)</cell><cell>0.540 (0.008)</cell></row><row><cell></cell><cell>32 × 32</cell><cell></cell><cell></cell><cell></cell><cell>781 (9)</cell><cell>425 (4)</cell><cell>0.551 (0.005)</cell></row><row><cell></cell><cell>64 × 64</cell><cell></cell><cell></cell><cell></cell><cell cols="2">760 (16) 427 (15)</cell><cell>0.553 (0.019)</cell></row><row><cell>Sparsity Ratio</cell><cell cols="6">SQuAD 1.1 MNLI MNLIM MRPC QNLI QQP RTE SST-2 CoLA</cell></row><row><cell>Dense</cell><cell cols="2">88.5 84.1</cell><cell>84.1</cell><cell>84.6</cell><cell cols="2">91.4 90.4 69.7 93.2</cell><cell>81.5</cell></row><row><cell>50% Zeros</cell><cell cols="2">86.5 83.6</cell><cell>82.5</cell><cell>87.0</cell><cell cols="2">90.9 89.7 68.6 92.1</cell><cell>81.9</cell></row><row><cell>80% Zeros</cell><cell cols="2">81.8 81.3</cell><cell>81.1</cell><cell>86.8</cell><cell cols="2">89.5 89.0 64.6 91.5</cell><cell>80.4</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 2 :</head><label>2</label><figDesc>Task accuracy for dense, 50% sparsified, and 80% sparsified BERT variants.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head></head><label></label><figDesc>Performance benchmark for different structured sparsity</figDesc><table><row><cell></cell><cell></cell><cell>1.100</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Sparse inference time</cell><cell>/ dense inference time</cell><cell>0.275 0.550 0.825</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell>0.000</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell>dense</cell><cell>1x1</cell><cell>1x4</cell><cell>1x8</cell><cell>1x16</cell><cell>1x32</cell><cell>1x64</cell><cell>1x128</cell><cell>1x256</cell><cell>1x384</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">https://github.com/google-research/bert</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">The datasets/tasks are: CoLA<ref type="bibr" target="#b23">[Warstadt et al., 2018]</ref>, Stanford Sentiment Treebank (SST)<ref type="bibr" target="#b19">[Socher et al., 2013]</ref>, Microsoft Research Paragraph Corpus (MRPC)<ref type="bibr" target="#b6">[Dolan and Brockett, 2005]</ref>, Semantic Texual Similarity Benchmark (STS)<ref type="bibr" target="#b0">[Agirre and Soroa, 2007]</ref>, Quora Question Pairs (QQP), Multi-Genre NLI (MNLI)<ref type="bibr" target="#b24">[Williams et al., 2017]</ref>, Question NLI (QNLI)<ref type="bibr" target="#b17">[Rajpurkar et al., 2016]</ref>, Recognizing Textual Entailment (RTE) and Winograd NLI(WNLI)<ref type="bibr" target="#b14">[Levesque et al., 2012]</ref>.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments and Disclosure of Funding</head><p>Both authors are employeed by Fidelity Investments personal investing. They have no conflicts of interest to disclose.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Semeval-2007 task 02: Evaluating word sense induction and discrimination systems</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Agirre</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Soroa</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 4th International Workshop on Semantic Evaluations</title>
+				<meeting>the 4th International Workshop on Semantic Evaluations</meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="7" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Language models are few-shot learners</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">B</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Askell</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2005.14165</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">{TVM}: An automated end-to-end optimizing compiler for deep learning</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Cowan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">13th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} 18)</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="578" to="594" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">The lottery ticket hypothesis for pre-trained bert networks</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Frankle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Carbin</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2007.12223</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">The lottery tickets hypothesis for supervised and self-supervised pre-training in computer vision models</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Frankle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Carbin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2012.06908</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">BERT: Pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M.-W</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Toutanova</surname></persName>
+		</author>
+		<idno type="DOI">10.18653/v1/N19-1423</idno>
+		<ptr target="https://www.aclweb.org/anthology/N19-1423" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies</title>
+		<title level="s">Long and Short Papers</title>
+		<meeting>the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies<address><addrLine>Minneapolis, Minnesota</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019-06">June 2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="4171" to="4186" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Automatically constructing a corpus of sentential paraphrases</title>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">B</forename><surname>Dolan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Brockett</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Third International Workshop on Paraphrasing (IWP2005)</title>
+				<meeting>the Third International Workshop on Paraphrasing (IWP2005)</meeting>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Fast sparse convnets</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Elsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Dukhan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Gale</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Simonyan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE/CVF conference on computer vision and pattern recognition</title>
+				<meeting>the IEEE/CVF conference on computer vision and pattern recognition</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="14629" to="14638" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><surname>Frankle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Carbin</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1803.03635</idno>
+		<title level="m">The lottery ticket hypothesis: Finding sparse, trainable neural networks</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Gale</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Young</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Elsen</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2006.10901</idno>
+		<title level="m">Sparse gpu kernels for deep learning</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">P</forename><surname>Kingma</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1711.09224</idno>
+		<title level="m">Gpu kernels for block-sparse weights</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page">3</biblScope>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1510.00149</idno>
+		<title level="m">Deep compression: Compressing deep neural networks with pruning, trained quantization and huffman coding</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Imagenet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="1097" to="1105" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Optimal brain damage</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Lecun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">S</forename><surname>Denker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">A</forename><surname>Solla</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="1990">1990</date>
+			<biblScope unit="page" from="598" to="605" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">The winograd schema challenge</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Levesque</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Morgenstern</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Thirteenth International Conference on the Principles of Knowledge Representation and Reasoning</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Prefix-tuning: Optimizing continuous prompts for generation</title>
+		<author>
+			<persName><forename type="first">X</forename><forename type="middle">L</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2101.00190</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<title level="m" type="main">Exploring the limits of transfer learning with a unified text-to-text transformer</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Raffel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roberts</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Matena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">J</forename><surname>Liu</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1910.10683</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Squad: 100,000+ questions for machine comprehension of text</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Rajpurkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lopyrev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1606.05250</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Very deep convolutional networks for large-scale image recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zisserman</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1409.1556</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Recursive deep models for semantic compositionality over a sentiment treebank</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Perelygin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chuang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">D</forename><surname>Manning</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Potts</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2013 conference on empirical methods in natural language processing</title>
+				<meeting>the 2013 conference on empirical methods in natural language processing</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="1631" to="1642" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Polosukhin</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1706.03762</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Scipy 1.0: fundamental algorithms for scientific computing in python</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Virtanen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Gommers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">E</forename><surname>Oliphant</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Haberland</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Reddy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Cournapeau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Burovski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Peterson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Weckesser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bright</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Nature methods</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="261" to="272" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">R</forename><surname>Bowman</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1804.07461</idno>
+		<title level="m">Glue: A multi-task benchmark and analysis platform for natural language understanding</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><surname>Warstadt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">R</forename><surname>Bowman</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.12471</idno>
+		<title level="m">Neural network acceptability judgments</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">A broad-coverage challenge corpus for sentence understanding through inference</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Williams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Nangia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">R</forename><surname>Bowman</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1704.05426</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Google&apos;s neural machine translation system: Bridging the gap between human and machine translation</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Schuster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Norouzi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Macherey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Krikun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Macherey</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1609.08144</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<title level="m" type="main">A full-stack accelerator search technique for vision applications</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Huda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Songhori</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Goldie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mirhoseini</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2105.12842</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Aligning books and movies: Towards story-like visual explanations by watching movies and reading books</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kiros</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Zemel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Urtasun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Torralba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Fidler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE international conference on computer vision</title>
+				<meeting>the IEEE international conference on computer vision</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="19" to="27" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

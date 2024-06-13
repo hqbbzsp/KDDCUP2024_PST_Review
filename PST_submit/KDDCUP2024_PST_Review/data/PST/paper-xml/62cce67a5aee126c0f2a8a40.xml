@@ -1,0 +1,2093 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Turbocharge Interactive NLP at the Edge</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2022-07-11">11 Jul 2022</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Liwei</forename><surname>Guo</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of Virginia</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Wonkyo</forename><surname>Choe</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">University of Virginia</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Felix</forename><forename type="middle">Xiaozhu</forename><surname>Lin</surname></persName>
+							<affiliation key="aff2">
+								<orgName type="institution">University of Virginia</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Turbocharge Interactive NLP at the Edge</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2022-07-11">11 Jul 2022</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2207.05022v1[cs.LG]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T09:23+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Natural Language Processing (NLP) inference is seeing increasing adoption by mobile applications, where on-device inference is desirable for crucially preserving user data privacy and avoiding network roundtrips. Yet, the unprecedented size of an NLP model stresses both latency and memory, creating a tension between the two key resources of a mobile device. To meet a target latency, holding the whole model in memory launches execution as soon as possible but increases one app's memory footprints by several times, limiting its benefits to only a few inference before being recycled by mobile memory management. On the other hand, loading the model from storage on demand incurs a few seconds long IO, far exceeding the delay range satisfying to a user; pipelining layerwise model loading and execution does not hide IO either, due to the large skewness between IO and computation delays.</p><p>To this end, we propose Speedy Transformer Inference (STI). Built on the key idea of maximizing IO/compute resource utilization on the most important parts of a model, STI reconciles the latency/memory tension via two novel techniques. First, model sharding. STI manages model parameters as independently tunable shards, and profiles their importance to accuracy. Second, elastic pipeline planning with a preload buffer. STI instantiates an IO/compute pipeline and uses a small buffer for preload shards to bootstrap execution without stalling in early stages; it judiciously selects, tunes, and assembles shards per their importance for resource-elastic execution, which maximizes inference accuracy.</p><p>Atop two commodity SoCs, we build STI and evaluate it against a wide range of NLP tasks, under a practical range of target latencies, and on both CPU and GPU. We demonstrate that, STI delivers high accuracies with 1-2 orders of magnitude lower memory, outperforming competitive baselines.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Natural Language Processing (NLP) is seeing increasing adoption by mobile applications <ref type="bibr" target="#b14">[15]</ref>. For instance, a note-taking app allows users to verbally query for old notes and dictate new notes. Under the hood, the app invokes an NLP model in order to infer on user input. It is often desirable to execute NLP inference on device, which crucially preserves user data privacy and eliminates long network trips to the cloud <ref type="bibr" target="#b49">[49,</ref><ref type="bibr" target="#b10">11]</ref>.</p><p>NLP inference stresses mobile devices on two aspects. (1) Impromptu user engagements. Each engagement comprises a few turns <ref type="bibr" target="#b8">[9]</ref>; users expect short delays of no more than several hundred ms each turn <ref type="bibr" target="#b9">[10]</ref>, often mandated as target latencies <ref type="bibr" target="#b49">[49]</ref>. <ref type="bibr" target="#b1">(2)</ref> Large model size. Designed to be overparameterized <ref type="bibr" target="#b38">[38,</ref><ref type="bibr" target="#b64">64]</ref> each <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b45">45,</ref><ref type="bibr" target="#b43">43]</ref>, much larger than most vision models <ref type="bibr" target="#b44">[44,</ref><ref type="bibr" target="#b67">67]</ref>. As common practice, separate NLP model instances are fine-tuned for tasks and topics, e.g. one instance for sentiment classification <ref type="bibr" target="#b0">[1]</ref> and one for sequence tagging <ref type="bibr" target="#b7">[8]</ref>, which further increase the total parameter size on a mobile device. How to execute NLP models? There are a few common approaches (Figure <ref type="figure" target="#fig_0">1</ref>). <ref type="bibr" target="#b0">(1)</ref> Hold in memory: preloading a model before user engagement or making the model linger in memory after engagement. The efficacy is limited: a model in memory increases one app's memory footprint (often less than 100MB <ref type="bibr" target="#b29">[30,</ref><ref type="bibr" target="#b30">31]</ref>) by a few times, making the app a highly likely victim of the mobile OS's low memory killer <ref type="bibr" target="#b5">[6]</ref>; as user engagements are bursty and each consists of as few as 1-3 model executions <ref type="bibr" target="#b8">[9]</ref>, a lingering model likely benefits no more than 2 executions before its large memory is reclaimed by the OS; since user engagements are impromptu <ref type="bibr" target="#b31">[32,</ref><ref type="bibr" target="#b51">51]</ref>, predicting when to preload/unload models is challenging. (2) Load on demand. The problem is the long IO delays for loading a NLP model. For instance, DistilBERT, a popular model optimized for mobile, takes 2.1 seconds to load its 170 MB parameters as we measured, far exceeding user desirable latencies of several hundred ms. To hide IO delays, one may stream model parameters from storage to memory during computation: execute model layer k while loading parameters for layer k + 1. While such a IO/compute pipeline was known in ML <ref type="bibr" target="#b63">[63,</ref><ref type="bibr" target="#b37">37]</ref>, directly applying it to NLP inference is ineffective: the core parts of NLP models such as attention has a skewed IO/compute ratio due to low arithmetic intensity <ref type="bibr" target="#b57">[57]</ref>. As a result, most of the time (&gt;72%) the computation is stalling.</p><p>These approaches suffer from common drawbacks: (1) key resources -memory for preload and IO/compute for model execution -are managed in isolation and lack coordination; <ref type="bibr" target="#b1">(2)</ref> obliviousness to a model's parameter importance, i.e. which parameters matter more to model accuracy. Hence, the preload buffer unnecessarily holds parameters that could have been streamed in parallel to execution; IO unnecessarily loads parameters that the computation cannot consume within the target latency. The results are memory waste, frequent pipeline stalls, and inferior model accuracy due to low FLOPs.</p><p>Our design We present an engine called STI. Addressing the drawbacks above, STI integrates on-demand model loading with lightweight preload, getting the best of both approaches.</p><p>(1) A model as resource-elastic shards. The engine preprocesses an N-layer model: partitioning each layer into M shards; compressing each shard as K fidelity versions, each version with a different parameter bitwidth. The engine therefore stores the N ? M ? K shard versions on flash. At run time, the engine assembles a submodel of its choice: a subset of n layers (n &lt;= N); m shards (m &lt;= M) from each selected layer; a fidelity version for each selected shard. Any such submodel can yield meaningful inference results, albeit with different accuracies and resource costs. Our model sharding is a new combination of existing ML techniques <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b65">65]</ref>.</p><p>In this way, the engine can dynamically vary a model's total execution time, adjust IO/compute ratios for individual shards, and allocate IO bandwidth by prioritizing important shards.</p><p>(2) Preload shards for warming up pipeline. The engine maintains a small buffer of preload shards, adjusting the size to available memory. Instead of trying to hold the entire model, it selectively holds shards from a model's bottom layers (closer to input). Upon user engagement, the engine can start executing the early stage of a pipeline with much of the parameters already loaded, which otherwise would have to stall for IO.</p><p>(3) A joint planner for memory, IO, and computation. The engine's planner selects shards and their versions to preload and to execute. Its goal is to compose a submodel that simultaneously meets the target latency, minimizes pipeline stalling, and maximizes accuracy.</p><p>Towards this goal, our ideas are (1) set layerwise IO budgets according to layerwise computation delays and (2) allocate IO budgets according to shard importance. To plan, STI first decides a submodel that can be computed under the target latency. The engine then sets accumulated IO budgets (AIBs) at each layer to be the computation delays of all prior layers; it further treats the available memory for preload shards as bonus IO budgets to all layers. Having set the budgets, the engine iterates over all shards, allocating extra bitwidths to loading important shards and hence debiting IO budgets of respective layers. The engine preloads the first k shards in the layer order that maximize the usage of preload memory size |S| but not exceeding |S|.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Results</head><p>We implement STI atop PyTorch and demonstrate it on mobile CPU and GPU of two embedded platforms. On a diverse set of NLP tasks, STI meet target latencies of a few hundred ms while yielding accuracy comparable to the state of the art. We compare STI against competitive baselines enhanced with recent ML techniques <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b65">65]</ref> as illustrated in Figure <ref type="figure" target="#fig_0">1</ref>. Compared to holding a model in memory, STI reduces parameter memory by 1-2 orders of magnitude to 1-5MB, while only seeing accuracy drop no more than 0.1 percentage points; compared to existing execution pipelines, STI increases accuracy by 5.9-54.1 percentage points as its elastic pipeline maximizes both compute and IO utilization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Contributions</head><p>The paper makes the following contributions: ? Model sharding, allowing the engine to fine control an NLP model's total computation time and finetune each shard's IO time according to resource constraints and shard importance. ? A pipeline with high IO/compute utilization: a small preload buffer for warming up the pipeline; elastic IO and computation jointly tuned to minimize pipeline bubbles and maximize model accuracy. ? A two-stage planner for the pipeline: picking a submodel, tracking layerwise IO budgets, and prioritizing importance shards in resource allocation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Motivations</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1.">Transformer on mobile devices</head><p>A primer on transformer Figure <ref type="figure" target="#fig_1">2</ref> shows the architecture of Transformer <ref type="bibr" target="#b52">[52]</ref>, the modern NN developed for NLP tasks.</p><p>Compared with traditional NNs (e.g. LSTM <ref type="bibr" target="#b24">[25]</ref>), it features a unique Multi-Headed Attention (MHA) mechanism. MHA extracts features at sequence dimension by modeling pairwise word interactions through many attention heads (typically 12), which are backed by three fully-connected (i.e. linear) layers, namely Query (Q), Key (K), Value (V). Given an input, each attention head independently contributes an attention score as one representation of the feature space. Scores across attention heads are concatenated via a linear output layer (O) and then projected into higher feature dimensions by two linear layers in the point-wise Feed-Forward Network (FFN) module. Due to the large number of fully connected layers, a transformer based model contains over 100 million parameters. As a result, a typical pretrained model is of a few hundred MBs. For instance, BERT <ref type="bibr" target="#b15">[16]</ref> as one of the most popular model is over 400MB large.</p><p>Resource demands (1) Low latencies. Prior studies show that users expect mobile devices to respond in several hundred milliseconds, and their satisfaction quickly drops as latency grows beyond around 400ms <ref type="bibr" target="#b11">[12]</ref>. (2) Large model parameters. The scale of NLP parameters is unprecedented for on-device machine learning. Even DistilBERT <ref type="bibr" target="#b45">[45]</ref> optimized for mobile has nearly 200MB of parameters, contrasting to popular vision models which are as small as a few MBs <ref type="bibr" target="#b44">[44,</ref><ref type="bibr" target="#b67">67]</ref>. Such numerous parameters stress both memory capacity and IO for loading them.</p><p>Besides parameters, model execution also allocates memory for intermediate results. Yet, such data has short lifespans and . . . does entail loading from storage. Hence, it can be served with a relatively small working buffer sufficient to hold a model tile (often a few MBs); the size do not grow with the model size. We therefore do not optimize for it.</p><formula xml:id="formula_0">Output FFN 1 Inputs Q FFN 2 Module # of param.</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2.">Transformers challenge existing paradigms</head><p>Existing paradigms are inadequate, as shown in Figure <ref type="figure" target="#fig_0">1</ref>.</p><p>First, hold in memory. An app may keep model files lingering in memory or even pin them; thus, the model can start execution anytime without IO delays. For how long the app holds the model depends on its prediction of future user engagements.</p><p>The major drawback is that an in-memory model will take hundreds of MBs of memory, bloating an app's memory footprint which is often less than 100 MBs <ref type="bibr" target="#b29">[30,</ref><ref type="bibr" target="#b30">31]</ref>. When an app's memory footprint is much larger than its peers, it becomes a highly likely victim of mobile memory management, which aggressively kills memory-hungry apps <ref type="bibr" target="#b29">[30]</ref>. Once killed, the app has to reload the model for the next engagement. Furthermore, precise prediction of user engagement is difficult, as mobile apps often exhibit sporadic and ad hoc usage <ref type="bibr" target="#b46">[46,</ref><ref type="bibr" target="#b9">10]</ref>. To exacerbate the problem, co-running apps may invoke separate models for their respective tasks, e.g. for sentiment analysis and for next-word prediction.</p><p>Second, load before execute. As the default approach by popular ML frameworks <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b3">4]</ref>: upon user engagement, the app sequentially loads the model and executes it. As we measured on a modern hexa-core Arm board (see Table <ref type="table" target="#tab_3">2</ref>), it takes 3.6 seconds to execute DistilBERT, among which 3.1 seconds are for loading the whole 240 MB model file. Prior work observed similar symptoms of slow start of model inference <ref type="bibr" target="#b62">[62,</ref><ref type="bibr" target="#b63">63]</ref>.</p><p>Third, pipelined load/execution. To hide IO delays, one may leverage layerwise execution of ML models <ref type="bibr" target="#b27">[28,</ref><ref type="bibr" target="#b39">39]</ref> and overlap the layer loading IO and execution <ref type="bibr" target="#b63">[63,</ref><ref type="bibr" target="#b37">37]</ref>. This approach is barely effective for on-device NLP due to the high skewness between IO delays and computation delays. As we measured, a layer in DistilBERT requires 339 ms for parameter load while only 95 ms to compute. The root causes are (1) low arithmetic intensity in Transformer's attention modules <ref type="bibr" target="#b41">[41]</ref> and (2) mobile device's efficiency-optimized flash, which limits the rate of streaming parameters from storage to memory. As a result, the pipeline is filled with bubbles and the computation stalls most of the time at each model layer.</p><p>Section 7 will compare our system against these approaches.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3.">Model compression is inadequate</head><p>For efficient NLP inference, a popular category of techniques is model compression, including pruning networks (e.g. layers <ref type="bibr" target="#b45">[45]</ref> and attention heads <ref type="bibr" target="#b53">[53]</ref>), reducing feature dimensions <ref type="bibr" target="#b48">[48]</ref>, and sharing weights across layers <ref type="bibr" target="#b28">[29]</ref>. A notable example is DistilBERT <ref type="bibr" target="#b45">[45]</ref>: through distilling knowledge, it prunes half of BERT's layers, shrinking the model by 2?. Still, model compression alone is inadequate.</p><p>(1) While one may compress a model to be sufficiently small (e.g. ?10MBs <ref type="bibr" target="#b42">[42]</ref>) so that the load delay or the memory footprint is no longer a concern, the resultant accuracy is inferior, often unusable <ref type="bibr" target="#b50">[50]</ref>. <ref type="bibr" target="#b1">(2)</ref> The execution pipeline's bubbles still exist: compression often scales model compute and parameters in tandem, without correcting the computation/IO skewness. Hence, compute is still being wasted. (3) Most compression schemes lack flexibility as needed to accommodate diverse mobile CPU, GPU, and IO speeds. They either fix a compression ratio or require model re-training to adjust the ratios, which must done by the cloud for each mobile device. Section 7 will evaluate the impact of model compression.  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Design overview</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>L1 L2</head><p>The planner size is largely constant, not growing with the model size; it is not a focus of STI.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Compute IO</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.">The operation</head><p>The STI architecture is shown in Figure <ref type="figure" target="#fig_3">3</ref>. STI preprocesses a given language model (e.g. DistilBERT finetuned for sentiment analysis): decomposing the model into shards and profiling shard importance (Section 5). As a one-time, per-model effort, the preprocessing is expected to be done in the cloud prior to model deployment to mobile devices; as preprocessing only requires lightweight model transformation (as opposed to expensive re-training <ref type="bibr" target="#b32">[33]</ref>), it can be done on device as needed.</p><p>The resultant model shards are stored alongside apps.</p><p>STI profiles each device's hardware once. The goal is to measure IO and computation delays in executing a language model; the profiling results serve as the basis for pipeline planning. To do so, STI loads and executes a Transformer layer in different bitwidths.</p><p>As an app launches, STI is initialized as part of the app. The app specifies which NLP model(s) it expects to execute, as well as the corresponding target latencies T s and preload buffer sizes |S|s. Later, the app can update T s and |S|s at any time. For each expected model, STI plans a separate execution pipeline with separate preload model shards. STI plans a pipeline once and executes it repeatedly. Replanning is necessary only when a model's T or |S| is changed by the app or OS.</p><p>Upon user engagement, STI executes a pipeline for the requested model. Since planning is already done beforehand, STI simply loads and executes the shards that have been selected in planning.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.">Example execution scenarios</head><p>One-shot execution In this scenario, a user engagement consists of one turn, executing the model once. With preloaded shards, STI executes the pipeline without stalling in bottom layers close to input. STI uses the working buffer during the execution and frees it right after. Throughout the execution, the content of preload buffer is unchanged. A few back-to-back executions One engagement may comprise multiple executions (often no more than 3) <ref type="bibr" target="#b8">[9]</ref>. The scenarios is similar to above except for the opportunity of caching already loaded shards between executions. To this end, the app may request to enlarge the preload buffer so it selectively caches the loaded shards. In subsequent executions, STI no longer reloads these shards; its planner redistributes the freed IO bandwidth to other shards (Section 5), loading their higher-fidelity versions for better accuracy. After the series of executions, the app may choose to keep the additional cached shards as permitted by the OS or simply discard them. <ref type="bibr" target="#b58">[58,</ref><ref type="bibr" target="#b25">26,</ref><ref type="bibr" target="#b32">33]</ref>. This paper focuses on classification tasks (BERT and its variants), which underpin today's on-device NLP. Although STI's key ideas apply to generative models such as GPT-2 <ref type="bibr" target="#b43">[43]</ref>, their wide adoption on mobile (in lieu of template-based responses <ref type="bibr" target="#b36">[36]</ref>) is yet to be seen; we consider them as future work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.">Applicability</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>STI supports Transformer-based models</head><p>STI keeps a model's execution time under a target latency T . However, it alone is insufficient to keep the total wall-clock time under T . Such a guarantee would require additional OS support, e.g. real-time scheduling. Towards such a guarantee, STI lays the foundation.</p><p>STI expects a small preload buffer. It can, however, work without such a buffer (i.e. "cold start" every time), for which its elastic sharding and pipeline still offer significant benefits as we will show in Section 7.</p><p>On future hardware/workloads, we expect STI's benefit to be more pronounced: mobile compute continues to scale (due to advances in technology nodes and accelerators); users expect results in higher accuracy; NLP models are becoming larger. All these lead to higher computation/IO skewness, necessitating an elastic pipeline of loading and execution.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Elastic model sharding 4.1. Key challenges</head><p>We solve a key challenge: how to partition the model into individual shards? Set to enable the resource elasticity of a model (i.e. depths/widths/fidelity), the shards must meet the following criteria: ? Elastic execution. Shards must preserve the same expressiveness of the attention mechanism and can execute partially to produce meaningful results.  ? Tunable IO. The IO delays of shards must be tunable to accommodate IO/compute capability of different hardware (e.g. due to diverse CPU/GPUs and DVFS).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>1/M neurons</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>2-bit version</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.">Instantiating model shards on disk</head><p>To address the challenges, our key idea is to combine two machine learning techniques -dynamic transformer <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b58">58]</ref> and dictionary-based quantization <ref type="bibr" target="#b22">[23]</ref>, in a novel way. We next describe details.</p><p>First, vertical partitioning per layer The system adopts a pretrained transformer model, which has already been finetuned on a downstream task.</p><p>For each of the N layers, the system partitions it into M vertical slices, as shown in Figure <ref type="figure" target="#fig_5">4</ref> ( 1 ). By construction, each vertical slice is independent, constituting one attention head plus 1/M of FFN neurons of the layer; the partitioning is similar to a dynamic transformer <ref type="bibr" target="#b58">[58,</ref><ref type="bibr" target="#b25">26]</ref>. Table <ref type="table" target="#tab_1">1</ref> shows the weight compositions of a vertical slice. Each cell of the table describes the dimension of the weight matrix, where d is hidden state size, M is the number of attention heads, and d f f is the number of FFN neurons; a shard is therefore one of the M equal slices of a layer. Doing so warrants model shards the same capability to extract linguistic features from inputs, as done by the attention mechanism: of an individual shard, its attention head obtains one independent representation of input tokens, which is projected into a higher feature dimension by FFN neurons <ref type="bibr" target="#b54">[54,</ref><ref type="bibr" target="#b12">13]</ref>; jointly, multiple shards attend to information from different representation subspace at different positions <ref type="bibr" target="#b52">[52]</ref>. Therefore, an arbitrary subset of shards of a layer can be executed and still give meaningful results.</p><p>STI uses the submodel to describe the transformer model on shards, e.g. a n ? m submodel comprises n layers, each layer having m shards. The number m is the same across all layers, as mandated by the transformer architecture <ref type="bibr" target="#b52">[52]</ref>, which specifies each layer must have the same width (i.e. number of shards m) for aligning input/output features between layers. Although it is possible for a shard to use 0s as placeholder weights, STI expects all m shards to have concrete weights for a good accuracy.</p><p>Second, quantization per shard The system compresses To compress, STI uses Gaussian outlier-aware quantization <ref type="bibr" target="#b65">[65]</ref>. The key idea is to represent the vast majority of weights (e.g. 99.9%) which follow a Gaussin distribution using 2 k floating point numbers called centroids, hence compressing the original weights into k-bit indexes pointing to centroids. For the very few outliers (e.g. 0.1%) which do not follow the Gaussian distribution, it preserves their weights as-is. The process is shown in Figure <ref type="figure" target="#fig_5">4</ref> ( 2 ).</p><formula xml:id="formula_1">Attn (Q,K,V,O) FFN1 FFN2 Transformer Layer d ? d d f f ? d d ? d f f Shard (vertical slice) d ? d M d f f M ? d d ? d f f M</formula><p>We choose it for two main reasons. 1) It provides good compatibility between shards of different bitwidths, allowing STI to tune their bitwidth individually per their importance and to assemble a mixed-bitwidth submodel. This is due to its lossy compression nature -shards still preserve the original distribution of layer weights, albeit in different fidelities. Hence they can work with each other seamlessly. 2) It does not need to fine-tune a model or require additional hardware support. The quantization analyzes the weight distribution of the pretrained model and is not specific to network structures; it hence does not require fine-tuning, as opposed to fixed-point quantization <ref type="bibr" target="#b66">[66,</ref><ref type="bibr" target="#b42">42]</ref>. The resultant mixed-bitwidth submodel also differs from a traditional mixed-precision network <ref type="bibr" target="#b59">[59,</ref><ref type="bibr" target="#b16">17,</ref><ref type="bibr" target="#b20">21]</ref>, which requires DSP extensions for executing integer operations efficiently; the extensions are often exclusive to microcontrollers on ARM devices, e.g. Cortex-M4 <ref type="bibr" target="#b35">[35]</ref>.</p><p>Quantized shards are not meant to be used as-is. Prior to use, STI must decompress them, which is a mirror process of compression, by substituting dictionary indexes with floating point centroids and outliers. Therefore model shards quantization reduces IO but not computation (FLOPs) as the inference still executes on floating point numbers.</p><p>Third, storing shards per version STI stores each shard of every bitwidth on disk, in total N ? M ? K shards (e.g. N=M=12, K=2 . . . 6, 32, where 32 is the uncompressed, full fidelity). Each shard contains a weight matrix of the same dimensions listed in Table <ref type="table" target="#tab_1">1</ref>. Instead of original FP32 weights, the weight matrix now stores K-bit indexes, which reduces its file size by 32/K?. Additional to the weight matrix, it stores centroids and outliers as dictionaries to look up during decompression, as illustrated by Figure <ref type="figure" target="#fig_5">4</ref> ( 3 ). To load, it refers to individual on-disk shards by their original layer/vertical slice indexes and bitwidths.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Pipeline planning 5.1. Overview</head><p>Planning goals Towards maximizing the accuracy under T, STI plans for two goals: ? First, minimize pipeline bubbles. It attempts to utilize both IO and computation as much as possible. On one hand, maxing out computation (FLOPs) drives the inference towards a higher accuracy. On the other hand, it can always improve submodel fidelity by loading higher-bitwidth shards, as long as not all shards are at full, 32 bitwidth.</p><p>? Second, prioritize bitwidths on important shards. Under T, the total shard loading schedules compose a combinatorial space, making it intractable to enumerate. Yet, the engine must propose one which leads to maximum accuracy at run time.</p><p>Two-stage planning Our key idea is to let computation bound the execution and prioritize IOs to most important shards.</p><p>To this end, STI conducts a two-stage planning: 1) Compute planning. Based on measured computation time of a layer, it proposes the largest submodel R' allowed by T. 2) IO planning. It assigns each layer an accumulated IO budget (AIB) for tracking layerwise IO resources and attempts to consume them to fill submodel R' with shards. It does so by allocating higher bitwidths to most important shards. We next describe details.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.">Prerequisite: offline profiling</head><p>The following measurements are done ahead of time.</p><p>Hardware capability STI measures them on the mobile device at installation time.</p><p>? IO delay T io (k) as a function of bitwidth k. STI measures the average disk access delay for loading one shard in k bitwidth, where k = 2 . . . 6, 32. It only has to measure one shard per bitwidth because all others have same amount of parameters.</p><p>? Computation delay T comp (l, m, freq) as a function of l, the input sentence length, m, the number of shards per layer (e.g. m = 3 . . . 12), and freq as the current operating frequency of CPU/GPU. It fixes l to be commonly used input lengths after padding (e.g. l = 128). It does a dry run for each (l, m, freq) tuple on one transformer layer. It measures the average execution delay, including decompressing m shards in 6-bitwidth and subsequent transformer execution. Although decompression delay is strictly dependent on the bitwidth of a shard, their differences are negligible in practice, e.g. less than 1ms; measuring 6-bitwidth shards further provides an upper bound for decompression delays, ensuring STI still stays under the target latency in the "worst" case, i.e. decompressing all 6-bit shards.  The delays can be recorded offline and replayed at run time because they are data-independent <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b40">40]</ref> and are shown deterministic <ref type="bibr" target="#b60">[60]</ref>, w.r.t. the parameters k, l, m, and freq.</p><p>Shard importance Intuitively, more important shards have greater impacts on accuracy. To this end, STI conducts an ablation study of shards: it first sets the full 12x12 model to the lowest bitwidth (e.g. 2-bit), enumerates through each shard, and increases its bitwidth to the highest (e.g. 32-bit); it then runs the resultant model on a dev set and profiles its accuracy.</p><p>Notably, as the ablation study profiles model characteristics, it needs to be done for each model, which is fine-tuned on individual benchmarks. Figure <ref type="figure" target="#fig_7">5a</ref> and<ref type="figure" target="#fig_7">5b</ref> shows the example of profiling results for models used in SST-2 and RTE respectively. As can be seen, shards of different models exemplify dissimilar importance distributions. For instance, important shards distribute more evenly throughout the layers of SST-2 model yet they are much more concentrated on bottom layers (i.e. layer 0-5) of RTE model.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3.">Compute planning</head><p>Given a target latency T, STI proposes a submodel sized by n ? m for the incoming inference, which maximizes FLOPs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Key ideas</head><p>In searching for the submodel size, STI follows two principles: 1) whenever possible, it always picks the submodel with most number shards, i.e. n ? m is maximized; 2) when two candidate submodels have similar number of shards, it prefers the deeper one, i.e. the candidate with a larger n. The rationale is to spend most time computing on least redundant parameters. As the transformer attention heads within the same layer are known to be redundant <ref type="bibr" target="#b38">[38]</ref>, it is wiser to incorporate more layers.</p><p>To infer (n, m), STI enumerates through all possible pairs using the profiled T comp (l, m, f req). The enumeration has constant complexity, i.e. o(l ? m ? f req ? n). Since all inputs can be padded to constant length (e.g. l = 128), and f req is often at peak during active inference, STI only needs to enumerate in total 144 pairs in practice. For each T, the enumeration therefore deterministically gives a submodel of (n ? m) which is both largest and deepest.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4.">IO planning</head><p>In this stage, STI selects the bitwidths for individual shards of the (n ? m) submodel. Without stalling the pipeline, it seeks those that maximize accuracy. 5.4.1. Problem formulation Given the deadline T , n ? m submodel R determined by compute planning, and the preload buffer S, STI plans for a shard configuration S to load during computation, s.t. 1) loading S does not stall the pipeline, and 2) R = S + S achieves maximum accuracy. 5.4.2. Accumulated IO budgets The goal is to track finegrained, per-layer available IO to ensure the planning S does not stall the pipline. Key ideas Our first idea is layerwise Accumulated IO Budgets (AIBs). Our observation is that the pipeline does not stall iff before executing k-th layer, all shards of 0 . . . k layers are loaded. To this end, we define AIBs as follows:</p><p>The AIB(k) of k-th layer is the available IO time the layer can leverage to load all shards from 0 . . . k layers.</p><p>Therefore, by checking if all AIBs are non-negative (i.e. each layer still has available IO time), STI deems the planning S' valid as it does not stall the pipeline.</p><p>The second idea is to consider the preload buffer S as bonus AIBs added to all AIB(k), hence unifying planning preloaded shards with that of the pipeline. AIB(k) is initialized to be the execution delays of all prior (k -1) layers (hence "accumulated") plus the bonus AIBs provided by the preload buffer S. E.g. AIB(0) is 0 because loading any shards at the first layer incurs a compulsory pipeline stall; AIB(n-1) is the largest because it has all the time to load its shards during previous layers' executions. Then, for each shard at k-th layer in the buffer S, its bonus AIB is added to AIB(k) and propagated to all subsequent layers. For instance, a shard at layer 0 from S propagates its bonus AIBs to all AIB(k)s, k=0 . . . n -1; the bonus AIB of a shard at layer 1 from S is propagated to AIB(1) . . . AIB(n-1), so long so forth.</p><p>To use, STI initializes AIBs as described earlier, upon each planning. When STI selects a shard at k-th layer, it deducts the shard IO from AIBs of k-th as well as all subsequent layers. The is because loading such shards only affect yet to be executed layers but not the already executed ones. At the end of selection, STI checks all AIBs to see if they are nonnegative. If so, STI deems the planning S valid, otherwise rejects it. Example Figure <ref type="figure" target="#fig_8">6</ref> shows a mini example of using AIBs to check the validity of S , where it plans for a 2x3 submodel, targeting a 2s deadline with T comp = 1s. The engine initializes AIBs recursively from L0, whose AIB(0) = 0.6s due to the three 2-bit shards in S. To plan, the engine first fills S with S, deducting 0.6s from both AIB(0) and AIB(1) because all shards in S are in L0. Since only L1 has spare AIB, the engine can only select shards for it. We show three execution plan Selecting optimal shard versions For each T , there exist an enormous number of execution plans. The goal is to select an optimal configuration S , which 1) is valid, and 2) maximizes accuracy. For instance, both A and B in Figure <ref type="figure" target="#fig_8">6</ref> are valid, but which has the maximum accuracy? Key idea To ensure validity, STI respects the key invariant AIB(k) ? 0 for each allocation attempt on layer k. To maximize accuracy, our key idea is to first uniformly increase bitwidths for all shards, then with the rest AIBs it greedily and iteratively allocate highest possible bitwidths to individual shards guided by shard importance. By doing so, we build an information passageway for most important shards, allowing their maximum activations to be preserved in highest fidelity as possible.</p><p>The allocation process comprises two passes as follows. In the first pass, STI picks a uniform bitwidth for all unallocated shards in the submodel, i.e. those not in preload buffer. To do so, it enumerates from lowest bitwidth (i.e. 2-bit) and selects the highest bitwidths while AIBs still satisfy the invariant. Notably, it fills a submodel layer with the shards from the same original layer and does not mix up shards across layers, due to quantization preserves layerwise weight distribution ( ?4.2). If AIBs cannot even support 2-bit shards, e.g. due to T and/or preload buffer S too small, STI still selects them as they are necessary for execution but aborts further allocation. In the second pass, STI iteratively upgrades the bitwidths of individual shards to full 32 bitwidth guided by the shard importance profiled in ?5.2, until all AIBs are consumed.</p><p>The allocation result is an optimal execution plan which instantiates the submodel with individual shard configurations, and is ready to be executed by the IO/compute pipeline.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.5.">Submodel execution</head><p>Despite STI partitions the model into shards, it still executes the plan (submodel) in a layerwise, pipelined manner from layer 0 to layer n-1. This is because although attention heads can be computed individually, FFN neurons must wait until all shards are loaded to execute. STI executes both IO and computation as fast as possible; it does not reorder the loading of individual shards in order to meet data dependency between execution, because by design AIBs have already ensured so. To compute, STI decompresses the shards into the working buffer using the dictionaries stored along with them; the working buffer is enough to hold one layer of FP32 weights and shared by all layers during their ongoing execution. After execution, STI evicts loaded shards from top to bottom layers until preload buffer is filled. It does so because shards at bottom layers (i.e. closer to input) are needed early during inference. Preserving as many of them as possible avoids compulsory pipeline stalls in early stages.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Implementation</head><p>We implement STI in 1K SLOC (Python: 800, C: 200) based on PyTorch v1.11 <ref type="bibr" target="#b2">[3]</ref> and sklearn v0.23.2 <ref type="bibr" target="#b4">[5]</ref>, atop two commodity SoCs listed in Table <ref type="table" target="#tab_3">2</ref>.</p><p>We preprocess the pretrained DynaBERT <ref type="bibr" target="#b25">[26]</ref> models. We choose them because they are easily accessible and well documented. We preprocess the model as follows. To quantize a model into k bitwidth, we first partition the model by layers and gathers all weights of the layer into a large flat 1D array. We then fit the 1D array into a Gaussian distribution using GaussianMixture with one mixture component from sklearn.mixture for detecting outliers. Based on the fitted distribution, we calculate the log likelihood of each sample in the 1D weight array. Following <ref type="bibr" target="#b65">[65]</ref> we also use -4 as the threshold -if the weight's log likelihood is below the threshold, we deem it as an outlier and records its array index; in our experiments, a model only has 0.14-0.17% outliers, which are an extremely small portion. For non-outliers which are the vast majority, we sort them based on their values and divided them into 2 k clusters with equal population. We calculate the arithmetic mean of each cluster as one centroid for representing all weights of the cluster. With such, we extract shards from the layer based on their weight composition in Table <ref type="table" target="#tab_1">1</ref> and massively substitutes their weights with k-bit indexes to centroids; for bit alignment, we represent outliers also as k-bit integers but bookkeep their original weights and offsets in the shard. We repeat the process for each layer and for each k = 2 . . . 6, which takes a few minutes per bitwidth. We co-locate disk blocks of shards from the same layer for access locality. To measure shard importance, we use dev set from the respective GLUE benchmark on which the model is fine-tuned.</p><p>Implementing the layerwise pipeline is straightforward, by intercepting the forwarding function at each BERT layer and using asynchronous IO for loading shards. Yet, we have discovered Python has a poor support for controlling concurrency at fine granularity (e.g. via low-level thread abstraction), which introduces artificial delays to shard decompression. Therefore we implement the decompression in separate 200 SLOC of C code using OpenMP <ref type="bibr" target="#b13">[14]</ref>, which concurrently substitutes the low-bit integers back to FP32 centroids using all available cores of our SoCs; we expect the decompression to be further accelerated with GPU, but leave it as future work.   For miscellaneous parameters of a layer which are not part of shards, i.e. layer normalization (layernorm) and biases, we them in memory in full fidelity because their sizes are small, e.g. tens of KB per layer.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Evaluation</head><p>We answer the following questions: 1. Can STI achieve competitive accuracy under time and memory constraints? ( ?7.2) 2. How much do STI's key designs contribute to its performance? ( ?7.3) 3. How do STI's benefits change with available time and memory? ( ?7.4)</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.1.">Methodology</head><p>Setup and metrics Table <ref type="table" target="#tab_3">2</ref> summarizes our test platforms, which are commodity SoCs. We choose them to evaluate STI on both CPU and GPU. Based on user satisfaction of NLP inference delays on mobile devices <ref type="bibr" target="#b11">[12]</ref>, we set T=150, 200, and 400ms. Prior work reported that beyond 400ms user satisfaction greatly drops <ref type="bibr" target="#b11">[12]</ref>. With T under 100ms, all comparisons including STI show low accuracy -there is not enough compute bandwidth. This is a limit in our test hardware, which shall mitigate on faster CPU/GPU. Table <ref type="table" target="#tab_4">3</ref> summarizes our benchmarks and metrics. We diversify them to include each category of GLUE benchmarks <ref type="bibr" target="#b56">[56]</ref>, which span a broad range of NLP use cases on mobile devices. Comparisons We consider two NLP models. (1) Distil-BERT <ref type="bibr" target="#b45">[45]</ref>, the outcome of knowledge distillation from BERT. Due to its high popularity on mobile, we use its accuracy as our references and call it gold accuracy. Yet, DistilBERT has fixed depths/widths (6 layers x 12 heads) and thus cannot adapt to different target latencies. (2) DynaBERT <ref type="bibr" target="#b25">[26]</ref>, which is derived from BERT (12 layers x 12 heads), allowing execution of a submodel to meet the target latency.</p><p>Based on DynaBERT, we design the following competitive baselines as summarized in Table <ref type="table">4</ref>.</p><p>? Load&amp;Exec: It loads model as a whole and executes it. It chooses the best submodel so the sum of IO and execution  STI's accuracy is significantly higher than Load&amp;Exec and StdPL, and is similar/higher compared to PreloadModel albeit using 1-2 orders of magnitude smaller memory. T=200ms. Full data and benchmarks in Table <ref type="table" target="#tab_7">5</ref>.</p><p>delays is closest to the target latency, using the algorithm described in Section 5.3. Model parameters are not quantized (32 bits).</p><p>? Standard pipelining (StdPL-X): It executes a layerwise pipeline, overlapping IO and computation. It chooses the best submodel so that the total pipeline delay stays under the target latency. We further augment it with quantization. All parameters in a model have the same bitwidth X.</p><p>? PreloadModel-X: The whole model is already in memory and no IO is required. It chooses the best submodel so that the total computation delay stays under the target latency. We augment it with quantization; all parameters have the same bitwidth X.</p><p>We choose X=6 as the highest quantization bitwidth, as further increasing the bitwidth has little accuracy improvement.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.2.">End-to-end results</head><p>STI achieves comparable accuracies to gold under target latencies (T) of a few hundred ms. Across all benchmarks and latencies, STI accuracy is on average 7.1 percentage point (pp) higher than that of baselines, which is significant.</p><p>Compared to preloading the whole model, STI reduces memory consumption by 1-2 orders of magnitude while seeing 0.16 pp higher accuracy averaged across all latencies and benchmarks; compared to loading the model on demand, STI improves the accuracy by 14 pp at the cost of preload memory of no more than 5 MBs. Figure <ref type="figure" target="#fig_10">7</ref> zooms in accuracy/memory tradeoffs under T=200ms of SST and QQP benchmarks. Note that we use log scale in X-axis (memory consumption) due to its large span. STI uses 204? lower memory than PreloadModel-full while having less than 1% average accuracy loss. Even when compared with the quantized version (i.e. PreloadModel-6bit), STI uses on average 41? smaller memory to achieve the same accuracy. Accuracy STI's accuracy matches those of DistilBERT. Given a target latency T, STI achieves consistent and significant accuracy gain over baselines. Storage &amp; energy overhead For a model, STI only requires 215 MB disk space to store five fidelity versions of {2,3,4,5,6} bits, in addition to the full model (in 32 bits) of 418 MB. This storage overhead is minor given that today's smartphone has tens or hundreds GB of storage.</p><p>For a given latency, we expect STI to consume notably more energy than low-accuracy baselines (e.g. Load&amp;Exec, StdPL-full), as STI has higher resource utilization to achieve higher accuracy. Compared to similar-accuracy, high-memory baselines (i.e. PreloadModel-full), we expect STI to consume moderately but not significantly more energy. First, the major energy consumer is active compute (FLOPs); similar accuracies indicate similar FLOPs. Second, although STI adds IO activities, the contribution to the system power is marginal because the whole SoC is already in high power states.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.3.">Significance of key designs</head><p>Submodel configuration Within a given latency, the result accuracy hinges on total FLOPs executed, which depends on the size of executed submodel. Our results show that STI dynamically adjusts submodel sizes towards the maximum    FLOPs. Table <ref type="table" target="#tab_8">6</ref> shows the details. Estimated by comparing submodel sizes: our FLOPs is as high as that of PreloadModel, which however consumes 1-2 orders of magnitude more memory; our FLOPs is 7? higher compared with Load&amp;Exec and StdPL-full, for which the IO blocks computation most of the time; our FLOPs is 1.3? higher than that of StdPL-2/6bit, two strong baselines that increase FLOPs through IO/compute parallelism and quantization as us; at lower T (e.g. T ? 200ms), their IO delays of loading the first layer may block computation, resulting in a smaller model. Figure <ref type="figure">8</ref> shows such an example. Thanks to a small preload buffer, our executed submodel has 1.25? higher FLOPs (i.e. it has one extra layer), which leads to 9.2 percentage point (pp) higher accuracy. Table <ref type="table" target="#tab_8">6</ref> also shows that our system adjusts submodels according to platform hardware. Specifically, our system assembles shallow/wide submodels on Jetson (GPU) as opposed to deeper/narrower submodels on Odroid (CPU). The reason is GPU's lack of proportionality on Transformer shards, e.g. executing a layer of 12 shards is only 0.7% longer than a layer of 3 shards. The root cause is that GPU is optimized for batch workload; it pays a fixed, significant cost even in executing a fraction of a transformer layer and for one input example, which is the case of interactive NLP. Preload buffers show a clear benefit as shown in Table <ref type="table" target="#tab_7">5</ref>. By using a small preload buffer of a few MBs, STI achieves a noticeable and consistent accuracy gain compared to not using the preload buffer (Ours-0MB). The benefit is most pronounced on QNLI and QQP among the benchmarks, increasing accuracy by up to 3.7 percent point (Odroid). Section 7.4 will present a sensitivity analysis regarding its size.</p><p>Shard importance . STI allocates its IO budgets to the most important shards. The accuracy benefit is most pronounced in a small/median submodel where most shards have low to medium bitwidths.</p><p>Case study. We demonstrate the efficacy through a differential analysis. Table <ref type="table" target="#tab_11">7</ref> shows an intermediate state of planning: a 5x3 submodel comprising all 2-bit shards. Now the planner is awarded additional IO budgets, e.g. from enlargement of the preload buffer, with which the planner will increase some shards' bitwidths to 6 bits. We compare two strategies: (1) randomly pick shards; <ref type="bibr" target="#b1">(2)</ref>   higher accuracy by up to 23.1 percent point (8.19 percent point on average) across all benchmarks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.4.">Sensitivity analysis</head><p>We examine how STI's benefit changes as resource amounts.</p><p>Target latencies A more relaxed target latency allows STI to deliver more FLOPs and execute a deeper submodel, suggesting a higher accuracy. Yet, an NLP model's accuracy sees diminishing return as its depth continues to grow, as shown in prior work <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b25">26]</ref>; as a result, STI's benefit diminishes as the target latency is further relaxed. Specifically, on Odroid (CPU) STI has most significant advantage over baselines (7.7 pp higher accuracy) when target latencies are below 200 ms; in such a feasible submodel has fewer than 10 layers. On Jetson (GPU) STI has most significant advantage when target latencies are below 400 ms and a feasible submodel has fewer than 7 layers. When the target latency grows beyond such ranges, STI's benefits gradually reduce. Preload buffer size Its significance hinges on the relative speeds of computation (which consumes model parameters) and IO (which loads the parameters), because the buffer bridges the speed gap of the two. When the computation is much faster than IO, an increase in the buffer size will result in large accuracy gain, and vice versa. On our platforms, STI shows a noticeable and consistent accuracy gain over baselines by using a preload buffer of a few MBs. Since at current preload buffer size STI has already reached best accuracy (i.e. same as PreloadModel-full), further increasing the buffer size does not boost the accuracy proportionally. We expect that with compute (e.g. neural accelerators), the preload buffer takes in a greater role. The reason is, when execution become faster and can only overlap with loading of low-fidelity shards (e.g. 2 bits), a few highfidelity shards provided by preload buffer can significantly boost the accuracy. Such a case is shown in Table <ref type="table" target="#tab_11">7</ref>, as preload buffer sizes increase from 0.4 to 4.0 MB, the accuracy increase by 19.2 pp.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.">Related work</head><p>Our system is related to a wide range of ML and systems techniques. We next discuss the similarities and differences. Model compression is a common technique for reducing model size (IO), facilitating faster loading; it includes model structure <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b45">45]</ref> and feature pruning <ref type="bibr" target="#b48">[48]</ref>, and quantization which reduces full-precisions (32bit) parameters into low-bit (e.g. 2bit) representations <ref type="bibr" target="#b42">[42,</ref><ref type="bibr" target="#b6">7,</ref><ref type="bibr" target="#b66">66,</ref><ref type="bibr" target="#b22">23]</ref>. We use quantization to compress the model; differently, we scale compression ratios to runtime IO by instantiating multiple compressed versions. Automated quantization searches for optimal bitwidths of a NN in the offline, often on a per layer basis <ref type="bibr" target="#b59">[59,</ref><ref type="bibr" target="#b16">17,</ref><ref type="bibr" target="#b33">34]</ref>. HAQ <ref type="bibr" target="#b59">[59]</ref> adopts the reinforcement learning to find the best mixed precision for each layer, similar with our multiple versions of shards. Compared with them, we do not need any fine-tuning, which is time-consuming and we must make fine-grained decisions (i.e. per-shard) at run time.</p><p>Dynamic configuration of DNNs changes model widths and/or depths in order to suit resource constraints <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b49">49,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b58">58,</ref><ref type="bibr" target="#b19">20]</ref>. EdgeBERT <ref type="bibr" target="#b49">[49]</ref> improves NLP energy efficiency under target latencies via early exit. NestDNN <ref type="bibr" target="#b19">[20]</ref> hosts one multi-capacity model on device and switches across submodels depending on available resources. Assuming the whole model always held in memory, these systems miss the opportunities of pipelined IO/compute and therefore incur high memory cost when applied to NLP. Similar to them, we configure the NLP model architecture dynamically. Unlike them, we address the challenge of loading large models through pipelining. Furthermore, our configuration is on the basis of individual shards and adapts to both memory and latency constraints.</p><p>Pipeline parallelism for ML Pipelining has been extensively used to accelerate ML. Prior work mainly uses it to scale out ML to multiple machines (overcome limit of single machine resource). Notably for training, PP is used to partition a model or training data over a cluster of machines <ref type="bibr" target="#b27">[28]</ref> for maximizing hardware utilization by minimizing pipeline stalls using micro/minibatches <ref type="bibr" target="#b39">[39]</ref>, exploiting hardware heterogeneity <ref type="bibr" target="#b26">[27]</ref>, or by adapting pipeline depths on the fly <ref type="bibr" target="#b23">[24]</ref>. We share a similar goal of maximizing pipeline utilization and minimizing bubbles. Unlike that they focus on a pipeline of computations (forward/backward passes of different inputs) or network/computation, our pipeline consists of disk IO tasks and computation. Our approach towards high efficiency is through adjusting IO workloads of model shards to the computation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9.">Concluding remarks</head><p>We present STI, a novel system for speedy transformer inference on mobile devices. STI contributes two novel techniques: model sharding and elastic pipeline planning with a preload buffer. The former allows STI to tune model parameters at fine granularities in a resource-elastic fashion. The latter facilitates STI for maximizing IO/compute utilization on most important parts of the model. With them, STI reduces memory consumption by 1-2 orders of magnitude while delivering high accuracies under a practical range of target latencies.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Comparison of model execution methods. Our method achieves high accuracy at low memory cost. T: target latency. M: model memory for Transformer weights.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>FFN2VFigure 2 :</head><label>2</label><figDesc>Figure 2: (Left) The BERT model comprising transformer layers and (Right) the number of 32-bit floating point parameters within a layer [52].</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: System architecture of Speedy Transformer Inference (STI) and workflow.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>00b: 0.098, 01b: 0.113 10b: 0.125, 11b: 0.138Outliers: Q[0][0] = -1.2134125 Q[4][1] = -1.2033245</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Instantiating N ? M ? K model shards on disk. The example shows a 2-bit shard. 99.9% of its weights are represented by 2-bit indexes pointing to 2 2 centroids; the rest 0.1% outliers are preserved as-is.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Example shard profiles on SST-2 and RTE show distinct importance distribution. Each cell at (x, y) marks a shard; the lighter its color is, the more important the shard is. Y-axis: transformer layer index, X-axis: vertical slice index.</figDesc><graphic url="image-2.png" coords="6,315.00,74.99,115.92,81.78" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: A mini example of AIB tracking the layerwise IO budgets.candidates A, B, and C. In this case, both candidates A and B are valid because their AIBs are non-negative, meaning loading them does not stall computation L1. Yet, C is invalid, because AIB(1) = -0.1s, violating the constraint and stalling the pipeline. 5.4.3. Selecting optimal shard versions For each T , there exist an enormous number of execution plans. The goal is to select an optimal configuration S , which 1) is valid, and 2) maximizes accuracy. For instance, both A and B in Figure6are valid, but which has the maximum accuracy? Key idea To ensure validity, STI respects the key invariant AIB(k) ? 0 for each allocation attempt on layer k. To maximize accuracy, our key idea is to first uniformly increase bitwidths for all shards, then with the rest AIBs it greedily and iteratively allocate highest possible bitwidths to individual shards guided by shard importance. By doing so, we build an information passageway for most important shards, allowing their maximum activations to be preserved in highest fidelity as possible.The allocation process comprises two passes as follows. In the first pass, STI picks a uniform bitwidth for all unallocated shards in the submodel, i.e. those not in preload buffer. To do so, it enumerates from lowest bitwidth (i.e. 2-bit) and selects the highest bitwidths while AIBs still satisfy the invariant. Notably, it fills a submodel layer with the shards from the same original layer and does not mix up shards across layers, due to quantization preserves layerwise weight distribution ( ?4.2). If AIBs cannot even support 2-bit shards, e.g. due to T and/or preload buffer S too small, STI still selects them as they are necessary for execution but aborts further allocation. In the second pass, STI iteratively upgrades the bitwidths of individual shards to full 32 bitwidth guided by the shard importance profiled in ?5.2, until all AIBs are consumed.The allocation result is an optimal execution plan which instantiates the submodel with individual shard configurations, and is ready to be executed by the IO/compute pipeline.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7:STI's accuracy is significantly higher than Load&amp;Exec and StdPL, and is similar/higher compared to PreloadModel albeit using 1-2 orders of magnitude smaller memory. T=200ms. Full data and benchmarks in Table5.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head></head><label></label><figDesc>Preload buffer holds shards preloaded selectively. STI keeps the buffer as long as the app is alive. STI can dynamically change the buffer size as demanded by the app or the OS.? Working buffer holds a layer's worth of intermediate results and uncompressed parameters. The buffer is temporary, allocated before each execution and freed afterward. The buffer</figDesc><table><row><cell>3.1. The system model</cell></row><row><cell>STI incarnates as an library linked to individual apps. For</cell></row><row><cell>complete NLP experience, we assume that the app incorpo-</cell></row><row><cell>rates other components such as automatic speech recognition</cell></row><row><cell>(ASR), word embedding, and speech synthesis [47, 61, 55, 18].</cell></row><row><cell>As they often run much faster than model execution and are</cell></row><row><cell>orthogonal to STI, this paper does not optimize for them.</cell></row><row><cell>STI loads and executes a model by layer: it loads one layer</cell></row><row><cell>(comprising multiple shards) as a single IO job, decompresses</cell></row><row><cell>all the shards in memory, and computes with the layer as a</cell></row><row><cell>single compute job. IO and compute jobs of different layers</cell></row><row><cell>can overlap. STI does not use smaller grains (e.g. load/ex-</cell></row><row><cell>ecute each shard) as they leave the IO and GPU bandwidth</cell></row><row><cell>underutilized, resulting in inferior performance.</cell></row><row><cell>STI allocates two types of memory buffers.</cell></row><row><cell>?</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 : The weight composition of a shard. M is number of attention heads. The M shards equally slices a transformer layer, where each shard of the layer can be uniquely identified by its vertical slice index</head><label>1</label><figDesc></figDesc><table><row><cell>K = 2 . . . 6). STI is the first to bring quantization to shard</cell></row><row><cell>granularity, whereas prior work only explores layer granular-</cell></row><row><cell>ity [21, 17, 59]. Doing so reduces IO/compute skewness and</cell></row><row><cell>facilitates elastic IO, allowing STI to prioritize IO resources at</cell></row><row><cell>a much finer granularity, e.g. by allocating higher bitwidths to</cell></row><row><cell>more important shards, and catering to IO/compute capability</cell></row><row><cell>of diverse devices.</cell></row></table><note><p><p>i = 0 . . . M -1.</p>each of the N ? M shards into K bitwidths versions (e.g.</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 2 : Platforms in evaluation. Benchmarks run on Odroid's CPU (its GPU lacks Pytorch support) and Jetson's GPU.</head><label>2</label><figDesc></figDesc><table><row><cell cols="2">Benchmark Category</cell><cell>Task</cell><cell cols="2">Metrics Domain</cell></row><row><cell>SST-2</cell><cell>Single-sentence</cell><cell cols="2">Sentiment Acc.</cell><cell>Movie rev.</cell></row><row><cell>RTE</cell><cell>Inference</cell><cell>NLI</cell><cell>Acc.</cell><cell>News, Wiki.</cell></row><row><cell>QNLI</cell><cell>Inference</cell><cell>QA/NLI</cell><cell>Acc.</cell><cell>Wiki.</cell></row><row><cell>QQP</cell><cell cols="4">Similarity/paraphrase Paraphrase Acc./F1 Social QA</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 3 : GLUE benchmarks [56] used in evaluation.</head><label>3</label><figDesc></figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc>Table 5 shows the full view. On Odroid, STI (Ours) increases average accuracy by 21.05/21.05/17.13/5.83 pp compared with Load&amp;Exec/StdPLfull/StdPL-2bit/StdPL-6bit, respectively. On Jetson, STI increases average accuracy by 18.77/18.77/6.53/3.15 pp compared with Load&amp;Exec/StdPL-full/StdPL-2bit/StdPL-6bit, respectively. Notably, STI's benefit is game-changing compared with Load&amp;Exec and StdPL-full. They are barely usable under low latency (T?200ms). Memory consumptions Compared with preloading the whole model, STI reduces memory consumption significantly and consistently, by 122? on average. This is because the PrelodModel baselines hold the whole 12x12 model in memory. By comparison, STI only needs preload memory of 1MB/5MB on Odroid and Jetson respectively, which is sufficient to hold shards of the first model layer and warms up the pipeline execution.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 5 : Model execution accuracies; given target latencies, ours are the best or the closest to the best. |S|: preload size. Gold accuracy from DistilBERT [45], which exceed all target latencies. End-to-end DistilBERT execution delays: 3.7s on Odroid, of which IO=3.1s; 3.36s on Jetson, of which IO=3.0s.</head><label>5</label><figDesc></figDesc><table><row><cell></cell><cell>Platform</cell><cell>Odroid (CPU)</cell><cell>Jetson (GPU)</cell></row><row><cell></cell><cell>Latency (ms)</cell><cell cols="2">150 200 400 150 200 400</cell></row><row><cell>Compute</cell><cell>Load&amp;Exec</cell><cell cols="2">1x4 1x5 3x3 2x1 3x1 5x1</cell></row><row><cell>underutilized</cell><cell>StdPL-full</cell><cell cols="2">1x4 1x5 3x3 2x1 3x1 5x1</cell></row><row><cell></cell><cell>StdPL-2bit</cell><cell cols="2">3x3 4x3 10x3 2x12 3x12 7x12</cell></row><row><cell>IO</cell><cell>StdPL-6bit</cell><cell cols="2">3x3 4x3 10x3 2x8 3x7 7x3</cell></row><row><cell>underutilized</cell><cell>Preload-full</cell><cell cols="2">3x3 5x3 10x3 2x12 3x12 7x12</cell></row><row><cell></cell><cell>Preload-6bit</cell><cell cols="2">3x3 5x3 10x3 2x12 3x12 7x12</cell></row><row><cell>Compute &amp; IO well utilized</cell><cell>Ours</cell><cell cols="2">3x3 5x3 10x3 2x12 3x12 7x12</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head>Table 6 : Sizes (depth?width) of selected under dif- ferent target latencies. A large submodel means more FLOPs executed, suggesting a higher accuracy. STI is able to run the largest submodel.</head><label>6</label><figDesc></figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_9"><head>A comparison between submodels executed by Ours and StdPL-6bit. Benchmark: SST-2 on Odroid. T=200ms. Ours runs a larger submodel and higher FLOPs, resulting in 9.2 pp higher accuracy.</head><label></label><figDesc>Elastic pipelining STI's per-shard bitwidths contribute to</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="3">Preloaded (1MB)</cell><cell></cell></row><row><cell cols="2">6bit 6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell cols="4">6 32 6 32</cell></row><row><cell>6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell cols="3">6 32 6</cell><cell>6</cell></row><row><cell>6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell>6</cell><cell cols="2">6 32</cell></row><row><cell>Layer0</cell><cell></cell><cell></cell><cell>Layer3</cell><cell>Layer0</cell><cell></cell><cell></cell><cell></cell><cell>Layer4</cell></row><row><cell cols="4">(a) StdPL-6bit</cell><cell></cell><cell></cell><cell>(b) Ours</cell><cell></cell></row><row><cell cols="9">Figure 8: its accuracy significantly. By contrast, one fixed bitwidth</cell></row><row><cell cols="9">for all shards in a model is too rigid, resulting in pipeline</cell></row><row><cell cols="9">bubbles. With a full bitwidth of 32 bits (StdPL-full), IO takes</cell></row><row><cell cols="9">long and stalls the computation (19.9 pp lower accuracy than</cell></row><row><cell cols="9">STI); with a lower bitwidth (StdPL-{2,6}bit), IO bandwidth</cell></row><row><cell cols="9">is left underutilized (8.2 pp lower accuracy than STI). Any</cell></row><row><cell cols="9">fixed bitwidth between 6 and 32 bits does not help either</cell></row><row><cell cols="9">(Section 7.1). Unlike them, STI well utilizes both compute</cell></row><row><cell cols="7">and IO through its two-stage planning ( ?5).</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_10"><head>.4 2.0 4.0 0.4 2.0 4.0 0.4 2.0 4.0 0.4 2.0 4.0</head><label></label><figDesc>pick shards in their importance order (as in STI). Despite the same IO budget is spent, STI shows Random 79.5 79.8 81.8 48.0 48.0 51.3 51.1 51.1 52.8 39.2 40.2 59.8 Ours 81.2 83.8 85.8 50.2 54.5 54.5 53.3 60.3 62.2 56.3 63.3 75.5</figDesc><table><row><cell>Benchmark</cell><cell>SST-2</cell><cell>RTE</cell><cell>QNLI</cell><cell>QQP</cell></row><row><cell>IO budget (MB) 0</cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_11"><head>Table 7 : Model accuracies resultant from allocating additional IO budget within a 5x3 submodel of 2-bit shards. Our method shows much higher accuracies than random shard selection.</head><label>7</label><figDesc></figDesc><table /></figure>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Hugging face:nlptown/bert-base-multilingual-uncasedsentiment</title>
+		<ptr target="https://huggingface.co/nlptown/bert-base-multilingual-uncased-sentiment" />
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Pytorch</surname></persName>
+		</author>
+		<ptr target="https://pytorch.org/" />
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<ptr target="https://pytorch.org/blog/pytorch-1.11-released/" />
+		<title level="m">Pytorch 1.11, torchdata, and functorch are now available | pytorch</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Tensorflow</surname></persName>
+		</author>
+		<ptr target="https://www.tensorflow.org/" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">-scikit-learn 1.1.1 documentation</title>
+		<idno>Version 0.23.2</idno>
+		<ptr target="https://scikit-learn.org/stable/whats_new/v0.23.html" />
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Android: Low memory killer daemon</title>
+		<author>
+			<persName><surname>Android</surname></persName>
+		</author>
+		<ptr target="https://source.android.com/devices/tech/perf/lmkd/" />
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<author>
+			<persName><forename type="first">Haoli</forename><surname>Bai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lu</forename><surname>Hou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lifeng</forename><surname>Shang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jing</forename><surname>Jin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qun</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Lyu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Irwin</forename><surname>King</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Binarybert</surname></persName>
+		</author>
+		<title level="m">Pushing the Limit of BERT Quantization</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">To BERT or not to BERT: comparing task-specific and task-agnostic semisupervised approaches for sequence tagging</title>
+		<author>
+			<persName><forename type="first">Kasturi</forename><surname>Bhattacharjee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miguel</forename><surname>Ballesteros</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rishita</forename><surname>Anubhai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Smaranda</forename><surname>Muresan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jie</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Faisal</forename><surname>Ladhak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yaser</forename><surname>Al-Onaizan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing</title>
+		<editor>
+			<persName><forename type="first">Bonnie</forename><surname>Webber</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Trevor</forename><surname>Cohn</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yulan</forename><surname>He</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yang</forename><surname>Liu</surname></persName>
+		</editor>
+		<meeting>the 2020 Conference on Empirical Methods in Natural Language Processing<address><addrLine>Online</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2020-11-16">2020. November 16-20, 2020. 2020</date>
+			<biblScope unit="page" from="7927" to="7934" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">A Study of Usage and Usability of Intelligent Personal Assistants in Denmark</title>
+		<author>
+			<persName><forename type="first">Toine</forename><surname>Bogers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ammar</forename><surname>Ali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abdelrahim</forename><surname>Al-Basri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Claes</forename><surname>Ostermann Rytlig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mads</forename><surname>Emil Bak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mette</forename><surname>M?ller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikita</forename><surname>Juhl Rasmussen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katrine</forename><forename type="middle">Bates</forename><surname>Michelsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sara</forename><surname>Gerling</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J?rgensen</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Information in Contemporary Society</title>
+		<title level="s">Lecture Notes in Computer Science</title>
+		<editor>
+			<persName><forename type="first">Natalie</forename><surname>Greene</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Taylor</forename></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Caitlin</forename><surname>Christian-Lamb</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Michelle</forename><forename type="middle">H</forename><surname>Martin</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Bonnie</forename><surname>Nardi</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Springer International Publishing</publisher>
+			<biblScope unit="page" from="79" to="90" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">An in-situ study of mobile app &amp; mobile search interactions</title>
+		<author>
+			<persName><forename type="first">Juan</forename><surname>Pablo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carrascal</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Church</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 33rd Annual ACM Conference on Human Factors in Computing Systems, CHI 2015</title>
+		<editor>
+			<persName><forename type="first">Bo</forename><surname>Begole</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Jinwoo</forename><surname>Kim</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Kori</forename><surname>Inkpen</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Woontack</forename><surname>Woo</surname></persName>
+		</editor>
+		<meeting>the 33rd Annual ACM Conference on Human Factors in Computing Systems, CHI 2015<address><addrLine>Seoul, Republic of Korea</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2015">April 18-23, 2015. 2015</date>
+			<biblScope unit="page" from="2739" to="2748" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">A reality check on inference at mobile networks edge</title>
+		<author>
+			<persName><forename type="first">Alejandro</forename><surname>Cartas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Kocour</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aravindh</forename><surname>Raman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilias</forename><surname>Leontiadis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jordi</forename><surname>Luque</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nishanth</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jos?</forename><surname>N??ez-Mart?nez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Diego</forename><surname>Perino</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carlos</forename><surname>Segura</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2nd International Workshop on Edge Systems, Analytics and Networking, EdgeSys@EuroSys</title>
+		<meeting>the 2nd International Workshop on Edge Systems, Analytics and Networking, EdgeSys@EuroSys<address><addrLine>Dresden, Germany</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019-03-25">2019. March 25. 2019. 2019</date>
+			<biblScope unit="page" from="54" to="59" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Evaluating response delay of multimodal interface in smart device</title>
+		<author>
+			<persName><forename type="first">Xiantao</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moli</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Renzhen</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yalin</forename><surname>Pan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiaqi</forename><surname>Mi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hui</forename><surname>Tong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daisong</forename><surname>Guan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Design, User Experience, and Usability. Practice and Case Studies -8th International Conference, DUXU 2019, Held as Part of the 21st HCI International Conference</title>
+		<title level="s">Lecture Notes in Computer Science</title>
+		<editor>
+			<persName><forename type="first">Aaron</forename><surname>Marcus</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Wentao</forename><surname>Wang</surname></persName>
+		</editor>
+		<meeting><address><addrLine>Orlando, FL, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2019-07-26">2019. July 26-31, 2019. 2019</date>
+			<biblScope unit="volume">11586</biblScope>
+			<biblScope unit="page" from="408" to="419" />
+		</imprint>
+	</monogr>
+	<note>Proceedings, Part IV</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">What does BERT look at? an analysis of bert&apos;s attention</title>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Clark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Urvashi</forename><surname>Khandelwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">D</forename><surname>Manning</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 ACL Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP, BlackboxNLP@ACL 2019</title>
+		<editor>
+			<persName><forename type="first">Grzegorz</forename><surname>Tal Linzen</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yonatan</forename><surname>Chrupala</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Dieuwke</forename><surname>Belinkov</surname></persName>
+		</editor>
+		<editor>
+			<persName><surname>Hupkes</surname></persName>
+		</editor>
+		<meeting>the 2019 ACL Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP, BlackboxNLP@ACL 2019<address><addrLine>Florence, Italy</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019-08-01">August 1, 2019. 2019</date>
+			<biblScope unit="page" from="276" to="286" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Openmp: an industry standard api for shared-memory programming</title>
+		<author>
+			<persName><forename type="first">Leonardo</forename><surname>Dagum</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ramesh</forename><surname>Menon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE computational science and engineering</title>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="46" to="55" />
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">Geert De Doncker, and Gustavo Federizzi. Intelligent personal assistants: A systematic literature review</title>
+		<author>
+			<persName><forename type="first">Allan</forename><surname>De</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barcelos</forename><surname>Silva</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marcio</forename><forename type="middle">Miguel</forename><surname>Gomes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cristiano</forename><surname>Andr? Da Costa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rodrigo</forename><surname>Da</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rosa</forename><surname>Righi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jorge</forename><surname>Luis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Victoria</forename><surname>Barbosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gustavo</forename><surname>Pessin</surname></persName>
+		</author>
+		<imprint>
+			<biblScope unit="volume">147</biblScope>
+			<biblScope unit="page">113193</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenton</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kristina</forename><surname>Toutanova</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">HAWQ: Hessian AWare Quantization of Neural Networks With Mixed-Precision</title>
+		<author>
+			<persName><forename type="first">Zhen</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhewei</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Gholami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Mahoney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kurt</forename><surname>Keutzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE/CVF International Conference on Computer Vision (ICCV)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<biblScope unit="page" from="293" to="302" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Bandana: Using Non-volatile Memory for Storing Deep Learning Models</title>
+		<author>
+			<persName><forename type="first">Assaf</forename><surname>Eisenman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maxim</forename><surname>Naumov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Darryl</forename><surname>Gardner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Misha</forename><surname>Smelyanskiy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Pupyrev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kim</forename><surname>Hazelwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Asaf</forename><surname>Cidon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sachin</forename><surname>Katti</surname></persName>
+		</author>
+		<imprint>
+			<biblScope unit="page">13</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">Angela</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Grave</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Armand</forename><surname>Joulin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Reducing Transformer Depth on Demand with Structured Dropout</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Nestdnn: Resource-aware multitenant on-device deep learning for continuous mobile vision</title>
+		<author>
+			<persName><forename type="first">Biyi</forename><surname>Fang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mi</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th Annual International Conference on Mobile Computing and Networking</title>
+		<editor>
+			<persName><forename type="first">Rajeev</forename><surname>Shorey</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Rohan</forename><surname>Murty</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">(</forename><surname>Yingying</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Kyle</forename><surname>Jennifer) Chen</surname></persName>
+		</editor>
+		<editor>
+			<persName><surname>Jamieson</surname></persName>
+		</editor>
+		<meeting>the 24th Annual International Conference on Mobile Computing and Networking<address><addrLine>New Delhi, India</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018-10-29">2018. October 29 -November 02, 2018. 2018</date>
+			<biblScope unit="page" from="115" to="127" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Mixed Precision Neural Architecture Search for Energy Efficient Deep Learning</title>
+		<author>
+			<persName><forename type="first">Chengyue</forename><surname>Gong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zixuan</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dilin</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yibo</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qiang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">Z</forename><surname>Pan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE</title>
+		<imprint>
+			<biblScope unit="page" from="1" to="7" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Minimum viable device drivers for ARM trustzone</title>
+		<author>
+			<persName><forename type="first">Liwei</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Xiaozhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EuroSys &apos;22: Seventeenth European Conference on Computer Systems</title>
+		<editor>
+			<persName><forename type="first">Y?rom-David</forename><surname>Bromberg</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Anne-Marie</forename><surname>Kermarrec</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</editor>
+		<meeting><address><addrLine>Rennes, France</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2022">April 5 -8, 2022. 2022</date>
+			<biblScope unit="page" from="300" to="316" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Deep compression: Compressing deep neural network with pruning, trained quantization and huffman coding</title>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huizi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">4th International Conference on Learning Representations</title>
+		<title level="s">Conference Track Proceedings</title>
+		<meeting><address><addrLine>San Juan, Puerto Rico</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2016-05-02">2016. May 2-4, 2016. 2016</date>
+		</imprint>
+	</monogr>
+	<note>Yoshua Bengio and Yann LeCun</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Pipetransformer: Automated elastic pipelining for distributed training of large-scale models</title>
+		<author>
+			<persName><forename type="first">Chaoyang</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shen</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mahdi</forename><surname>Soltanolkotabi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Salman</forename><surname>Avestimehr</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 38th International Conference on Machine Learning, ICML 2021</title>
+		<editor>
+			<persName><forename type="first">Marina</forename><surname>Meila</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Tong</forename><surname>Zhang</surname></persName>
+		</editor>
+		<meeting>the 38th International Conference on Machine Learning, ICML 2021</meeting>
+		<imprint>
+			<publisher>PMLR</publisher>
+			<date type="published" when="2021-07-24">18-24 July 2021. 2021</date>
+			<biblScope unit="volume">139</biblScope>
+			<biblScope unit="page" from="4150" to="4159" />
+		</imprint>
+	</monogr>
+	<note>Proceedings of Machine Learning Research</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Long short-term memory</title>
+		<author>
+			<persName><forename type="first">Sepp</forename><surname>Hochreiter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J?rgen</forename><surname>Schmidhuber</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Neural Computation</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<biblScope unit="page" from="1735" to="1780" />
+			<date type="published" when="1997">1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">Lu</forename><surname>Hou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiqi</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lifeng</forename><surname>Shang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qun</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Dynabert</surname></persName>
+		</author>
+		<title level="m">Dynamic BERT with Adaptive Width and Depth</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<title level="m" type="main">Pipeline Parallelism for Inference on Heterogeneous Edge Computing</title>
+		<author>
+			<persName><forename type="first">Yang</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Connor</forename><surname>Imes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuanang</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Souvik</forename><surname>Kundu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><forename type="middle">A</forename><surname>Beerel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><forename type="middle">P</forename><surname>Crago</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Paul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Walters</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Gpipe: Efficient training of giant neural networks using pipeline parallelism</title>
+		<author>
+			<persName><forename type="first">Yanping</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youlong</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankur</forename><surname>Bapna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Orhan</forename><surname>Firat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dehao</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mia</forename><surname>Xu Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyoukjoong</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiquan</forename><surname>Ngiam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yonghui</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhifeng</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems 32: Annual Conference on Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">M</forename><surname>Hanna</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Hugo</forename><surname>Wallach</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Alina</forename><surname>Larochelle</surname></persName>
+		</editor>
+		<editor>
+			<persName><surname>Beygelzimer</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Emily</forename><forename type="middle">B</forename><surname>Florence D'alch?-Buc</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Roman</forename><surname>Fox</surname></persName>
+		</editor>
+		<editor>
+			<persName><surname>Garnett</surname></persName>
+		</editor>
+		<meeting><address><addrLine>NeurIPS; Vancouver, BC, Canada</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2019-12-08">2019. 2019. December 8-14, 2019. 2019</date>
+			<biblScope unit="page" from="103" to="112" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">ALBERT: A Lite BERT for Selfsupervised Learning of Language Representations</title>
+		<author>
+			<persName><forename type="first">Zhenzhong</forename><surname>Lan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mingda</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sebastian</forename><surname>Goodman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Gimpel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piyush</forename><surname>Sharma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Radu</forename><surname>Soricut</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">End the senseless killing: Improving memory management for mobile operating systems</title>
+		<author>
+			<persName><forename type="first">Niel</forename><surname>Lebeck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arvind</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Henry</forename><forename type="middle">M</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Irene</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 USENIX Annual Technical Conference, USENIX ATC 2020</title>
+		<editor>
+			<persName><forename type="first">Ada</forename><surname>Gavrilovska</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Erez</forename><surname>Zadok</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>USENIX Association</publisher>
+			<date type="published" when="2020">July 15-17, 2020. 2020</date>
+			<biblScope unit="page" from="873" to="887" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Characterization of android memory references and implication to hybrid memory management</title>
+		<author>
+			<persName><forename type="first">Soyoon</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyokyung</forename><surname>Bahn</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Access</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="60997" to="61009" />
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Characterizing smartphone usage patterns from millions of android users</title>
+		<author>
+			<persName><forename type="first">Huoran</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuan</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuanzhe</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tao</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaigui</forename><surname>Bian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Xiaozhu Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qiaozhu</forename><surname>Mei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Feng</forename><surname>Feng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2015 ACM Internet Measurement Conference, IMC 2015</title>
+		<editor>
+			<persName><forename type="first">Kenjiro</forename><surname>Cho</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Kensuke</forename><surname>Fukuda</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Vivek</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Neil</forename><surname>Pai</surname></persName>
+		</editor>
+		<editor>
+			<persName><surname>Spring</surname></persName>
+		</editor>
+		<meeting>the 2015 ACM Internet Measurement Conference, IMC 2015<address><addrLine>Tokyo, Japan</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2015">October 28-30, 2015. 2015</date>
+			<biblScope unit="page" from="459" to="472" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Yinhan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Myle</forename><surname>Ott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jingfei</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mandar</forename><surname>Joshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Danqi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Veselin</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Roberta</surname></persName>
+		</author>
+		<imprint>
+			<publisher>A Robustly Optimized BERT Pretraining Approach</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">Evolutionary Quantization of Neural Networks with Mixed-Precision</title>
+		<author>
+			<persName><forename type="first">Zhenhua</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xinfeng</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shanshe</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Siwei</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wen</forename><surname>Gao</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m">ICASSP 2021 -2021 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)</title>
+		<imprint>
+			<biblScope unit="page" from="2785" to="2789" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">The dsp capabilities of arm cortex-m4 and cortex-m7 processors</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Lorenser</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<publisher>ARM White Paper</publisher>
+			<biblScope unit="volume">29</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">The conversational interface</title>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Frederick Mctear</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zoraida</forename><surname>Callejas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Griol</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<publisher>Springer</publisher>
+			<biblScope unit="volume">6</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">Enabling large nns on tiny mcus with swapping</title>
+		<author>
+			<persName><forename type="first">Hongyu</forename><surname>Miao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Xiaozhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename></persName>
+		</author>
+		<idno>CoRR, abs/2101.08744</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Are Sixteen Heads Really Better than One?</title>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Michel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Graham</forename><surname>Neubig</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Pipedream: generalized pipeline parallelism for DNN training</title>
+		<author>
+			<persName><forename type="first">Deepak</forename><surname>Narayanan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aaron</forename><surname>Harlap</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amar</forename><surname>Phanishayee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vivek</forename><surname>Seshadri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikhil</forename><forename type="middle">R</forename><surname>Devanur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gregory</forename><forename type="middle">R</forename><surname>Ganger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phillip</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matei</forename><surname>Zaharia</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th ACM Symposium on Operating Systems Principles, SOSP 2019</title>
+		<editor>
+			<persName><forename type="first">Tim</forename><surname>Brecht</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Carey</forename><surname>Williamson</surname></persName>
+		</editor>
+		<meeting>the 27th ACM Symposium on Operating Systems Principles, SOSP 2019<address><addrLine>Huntsville, ON, Canada</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2019">October 27-30, 2019. 2019</date>
+			<biblScope unit="page" from="1" to="15" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<monogr>
+		<title level="m" type="main">Tinystack: A minimal GPU stack for client ML</title>
+		<author>
+			<persName><forename type="first">Heejin</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Xiaozhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename></persName>
+		</author>
+		<idno>CoRR, abs/2105.05085</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<author>
+			<persName><forename type="first">Suchita</forename><surname>Pati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaizeen</forename><surname>Aga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nuwan</forename><surname>Jayasena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><forename type="middle">D</forename><surname>Sinclair</surname></persName>
+		</author>
+		<title level="m">Demystifying BERT: Implications for Accelerator Design</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<title level="m" type="main">BIBERT: ACCURATE FULLY BINARIZED BERT</title>
+		<author>
+			<persName><forename type="first">Yifu</forename><surname>Haotong Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mingyuan</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qinghua</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aishan</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qingqing</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ziwei</forename><surname>Dang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xianglong</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Liu</surname></persName>
+		</author>
+		<imprint>
+			<biblScope unit="page">24</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Language models are unsupervised multitask learners</title>
+		<author>
+			<persName><forename type="first">Alec</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rewon</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Luan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dario</forename><surname>Amodei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">OpenAI blog</title>
+		<imprint>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<biblScope unit="page">9</biblScope>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Mobilenetv2: Inverted residuals and linear bottlenecks</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">G</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Menglong</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrey</forename><surname>Zhmoginov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Liang-Chieh</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE Conference on Computer Vision and Pattern Recognition</title>
+		<meeting><address><addrLine>Salt Lake City, UT, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Computer Vision Foundation / IEEE Computer Society</publisher>
+			<date type="published" when="2018">June 18-22, 2018. 2018</date>
+			<biblScope unit="page" from="4510" to="4520" />
+		</imprint>
+	</monogr>
+	<note>CVPR 2018</note>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<monogr>
+		<title level="m" type="main">DistilBERT, a distilled version of BERT: Smaller, faster, cheaper and lighter</title>
+		<author>
+			<persName><forename type="first">Victor</forename><surname>Sanh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lysandre</forename><surname>Debut</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julien</forename><surname>Chaumond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Wolf</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Livelab: Measuring wireless networks and smartphone users in the field. SIGMETRICS Perform</title>
+		<author>
+			<persName><forename type="first">Clayton</forename><surname>Shepard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ahmad</forename><surname>Rahmati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chad</forename><surname>Tossell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename><surname>Zhong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phillip</forename><surname>Kortum</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Eval. Rev</title>
+		<imprint>
+			<biblScope unit="volume">38</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="15" to="20" />
+			<date type="published" when="2011-01">January 2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Emformer: Efficient memory transformer based acoustic model for low latency streaming speech recognition</title>
+		<author>
+			<persName><forename type="first">Yangyang</forename><surname>Shi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yongqiang</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chunyang</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ching-Feng</forename><surname>Yeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julian</forename><surname>Chan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Duc</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Seltzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICASSP 2021-2021 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="6783" to="6787" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<monogr>
+		<author>
+			<persName><forename type="first">Zhiqing</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hongkun</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaodan</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Renjie</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Denny</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Mobilebert</surname></persName>
+		</author>
+		<title level="m">A Compact Task-Agnostic BERT for Resource-Limited Devices</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">EdgeBERT: Sentence-Level Energy Optimizations for Latency-Aware Multi-Task NLP Inference</title>
+		<author>
+			<persName><forename type="first">Coleman</forename><surname>Thierry Tambe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lillian</forename><surname>Hooper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianyu</forename><surname>Pentecost</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">En-Yu</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Victor</forename><surname>Donato</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Sanh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexander</forename><forename type="middle">M</forename><surname>Whatmough</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Rush</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gu-Yeon</forename><surname>Brooks</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Wei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">MICRO-54: 54th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<imprint>
+			<publisher>ACM</publisher>
+			<biblScope unit="page" from="830" to="844" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">Yi</forename><surname>Tay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mostafa</forename><surname>Dehghani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dara</forename><surname>Bahri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Metzler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Efficient Transformers: A Survey</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Identifying tasks from mobile app usage patterns</title>
+		<author>
+			<persName><forename type="first">Ke</forename><surname>Yuan Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mounia</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Lalmas</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Pelleg</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 43rd International ACM SIGIR conference on research and development in Information Retrieval</title>
+		<editor>
+			<persName><forename type="first">Jimmy</forename><surname>Huang</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yi</forename><surname>Chang</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Xueqi</forename><surname>Cheng</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Jaap</forename><surname>Kamps</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Vanessa</forename><surname>Murdock</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Ji-Rong</forename><surname>Wen</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yiqun</forename><surname>Liu</surname></persName>
+		</editor>
+		<meeting>the 43rd International ACM SIGIR conference on research and development in Information Retrieval<address><addrLine>China</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2020">July 25-30, 2020. 2020</date>
+			<biblScope unit="page" from="2357" to="2366" />
+		</imprint>
+	</monogr>
+	<note>SIGIR 2020, Virtual Event</note>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aidan</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukasz</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Illia</forename><surname>Polosukhin</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+	<note>Attention Is All You Need</note>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Analyzing multi-head self-attention: Specialized heads do the heavy lifting, the rest can be pruned</title>
+		<author>
+			<persName><forename type="first">Elena</forename><surname>Voita</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Talbot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fedor</forename><surname>Moiseev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rico</forename><surname>Sennrich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ivan</forename><surname>Titov</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Conference of the Association for Computational Linguistics, ACL 2019</title>
+		<editor>
+			<persName><forename type="first">Anna</forename><surname>Korhonen</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>Traum</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Llu?s</forename><surname>M?rquez</surname></persName>
+		</editor>
+		<meeting>the 57th Conference of the Association for Computational Linguistics, ACL 2019<address><addrLine>Florence, Italy</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019-08-02">July 28-August 2, 2019. 2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="5797" to="5808" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Analyzing multi-head self-attention: Specialized heads do the heavy lifting, the rest can be pruned</title>
+		<author>
+			<persName><forename type="first">Elena</forename><surname>Voita</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Talbot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fedor</forename><surname>Moiseev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rico</forename><surname>Sennrich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ivan</forename><surname>Titov</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Conference of the Association for Computational Linguistics, ACL 2019</title>
+		<editor>
+			<persName><forename type="first">Anna</forename><surname>Korhonen</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>Traum</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Llu?s</forename><surname>M?rquez</surname></persName>
+		</editor>
+		<meeting>the 57th Conference of the Association for Computational Linguistics, ACL 2019<address><addrLine>Florence, Italy</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2019-08-02">July 28-August 2, 2019. 2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="5797" to="5808" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">FlashEmbedding: Storing embedding tables in SSD for large-scale recommender systems</title>
+		<author>
+			<persName><forename type="first">Xuan</forename><surname>Hu Wan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yufei</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chia-Lin</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tei-Wei</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chun</forename><surname>Kuo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xue</forename><surname>Jason</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th ACM SIGOPS Asia-Pacific Workshop on Systems</title>
+		<meeting>the 12th ACM SIGOPS Asia-Pacific Workshop on Systems</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<biblScope unit="page" from="9" to="16" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<monogr>
+		<title level="m" type="main">GLUE: A Multi-Task Benchmark and Analysis Platform for Natural Language Understanding</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amanpreet</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Julian</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Felix</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samuel</forename><forename type="middle">R</forename><surname>Bowman</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<monogr>
+		<title level="m" type="main">Efficient Algorithms and Hardware for Natural Language Processing</title>
+		<author>
+			<persName><forename type="first">Hanrui</forename><surname>Wang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+		<respStmt>
+			<orgName>Massachusetts Institute of Technology</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">PhD dissertation</note>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<title level="m" type="main">HAT: Hardware-Aware Transformers for Efficient Natural Language Processing</title>
+		<author>
+			<persName><forename type="first">Hanrui</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhanghao</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhijian</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ligeng</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chuang</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">HAQ: Hardware-Aware Automated Quantization With Mixed Precision</title>
+		<author>
+			<persName><forename type="first">Kuan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhijian</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yujun</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<biblScope unit="page" from="8604" to="8612" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">AsyMo: Scalable and efficient deep-learning inference on asymmetric mobile CPUs</title>
+		<author>
+			<persName><forename type="first">Manni</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaohua</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ting</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunxin</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fengyuan</forename><surname>Xu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th Annual International Conference on Mobile Computing and Networking</title>
+		<meeting>the 27th Annual International Conference on Mobile Computing and Networking</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<biblScope unit="page" from="215" to="228" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<analytic>
+		<title level="a" type="main">RecSSD: Near data processing for solid state drive based recommendation inference</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Wilkening</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Udit</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samuel</forename><surname>Hsia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Caroline</forename><surname>Trippel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carole-Jean</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Brooks</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gu-Yeon</forename><surname>Wei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<biblScope unit="page" from="717" to="729" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<monogr>
+		<title level="m" type="main">A Note on Latency Variability of Deep Neural Networks for Mobile Inference</title>
+		<author>
+			<persName><forename type="first">Luting</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bingqian</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaolei</forename><surname>Ren</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<monogr>
+		<title level="m" type="main">Understanding and optimizing deep learning cold-start latency on edge devices</title>
+		<author>
+			<persName><forename type="first">Rongjie</forename><surname>Yi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ting</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ao</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shangguang</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mengwei</forename><surname>Xu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<analytic>
+		<title level="a" type="main">Playing the lottery with rewards and multiple languages: lottery tickets in RL and NLP</title>
+		<author>
+			<persName><forename type="first">Haonan</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Edunov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuandong</forename><surname>Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ari</forename><forename type="middle">S</forename><surname>Morcos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">8th International Conference on Learning Representations</title>
+		<meeting><address><addrLine>Addis Ababa, Ethiopia</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2020">April 26-30, 2020. 2020</date>
+			<biblScope unit="volume">2020</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">GOBO: Quantizing Attention-Based NLP Models for Low Latency and Energy Efficient Inference</title>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Hadi Zadeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Isak</forename><surname>Edo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omar</forename><forename type="middle">Mohamed</forename><surname>Awad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Moshovos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<biblScope unit="page" from="811" to="824" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Ofir</forename><surname>Zafrir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guy</forename><surname>Boudoukh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Izsak</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+	<note>and Moshe Wasserblat. Q8BERT: Quantized 8Bit BERT</note>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<analytic>
+		<title level="a" type="main">Shufflenet: An extremely efficient convolutional neural network for mobile devices</title>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xinyu</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mengxiao</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE Conference on Computer Vision and Pattern Recognition</title>
+		<meeting><address><addrLine>Salt Lake City, UT, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Computer Vision Foundation / IEEE Computer Society</publisher>
+			<date type="published" when="2018">June 18-22, 2018. 2018</date>
+			<biblScope unit="page" from="6848" to="6856" />
+		</imprint>
+	</monogr>
+	<note>CVPR 2018</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

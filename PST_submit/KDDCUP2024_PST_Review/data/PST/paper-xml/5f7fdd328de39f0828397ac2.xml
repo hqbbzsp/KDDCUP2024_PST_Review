@@ -1,0 +1,1476 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">CogLTX: Applying BERT to Long Texts</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Ming</forename><surname>Ding</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Chang</forename><surname>Zhou</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Hongxia</forename><surname>Yang</surname></persName>
+							<email>yang.yhx@alibaba-inc.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Jie</forename><surname>Tang</surname></persName>
+							<email>jietang@tsinghua.edu.cn</email>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<orgName type="institution">Tsinghua University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<orgName type="institution">Tsinghua University</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">CogLTX: Applying BERT to Long Texts</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T14:09+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>BERT is incapable of processing long texts due to its quadratically increasing memory and time consumption. The most natural ways to address this problem, such as slicing the text by a sliding window or simplifying transformers, suffer from insufficient long-range attentions or need customized CUDA kernels. The maximum length limit in BERT reminds us the limited capacity (5∼ 9 chunks) of the working memory of humans --then how do human beings Cognize Long TeXts? Founded on the cognitive theory stemming from Baddeley [2], the proposed CogLTX 1 framework identifies key sentences by training a judge model, concatenates them for reasoning, and enables multi-step reasoning via rehearsal and decay. Since relevance annotations are usually unavailable, we propose to use interventions to create supervision. As a general algorithm, CogLTX outperforms or gets comparable results to SOTA models on various downstream tasks with memory overheads independent of the length of text.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>BERT (reasoner)</head><p>[CLS] Q yes no [SEP] z Start/End Span Q: Who is the director of the 2003 film which has scenes in it filmed at the Quality Cafe in Los Angeles? Long text x: The Quality Cafe (aka. Quality Diner) is a now-defunct diner … as a location featured in a number of Hollywood films, including "Training Day", "Old School"… Old School is a 2003 American comedy film released by DreamWorks and directed by Todd Phillips MemRecall ([Q], x) BERT (reasoner) [CLS] [SEP] z MLP Long text x: LOS ANGELES --The pilot flying Kobe Bryant and seven others to a youth basketball tournament did not have alcohol or drugs in his system, and all nine sustained immediately fatal injuries when their helicopter slammed into a hillside outside Los Angeles in January, according to autopsies released Friday. … MemRecall ([], x) 0.6 0.3 … Probabilty for each class BERT (reasoner) [CLS] x[i] [SEP] z Long text x MemRecall ([x[i]], x) NN IN DT Token-wise result of x[i] … x[0]:Confidence in the pound is widely expected to take another sharp dive if trade figures for September, due for release tomorrow, x[1]:fail to show a substantial improvement from July and August's near-record deficits" is considered, … Decompose into sub-sequences x[0]… x[n]</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>1 Introduction Figure <ref type="figure">1</ref>: An example from HotpotQA (distractor setting, concatenated). The key sentences to answer the question are the first and last ones, more than 512 tokens away from each other. They never appear in the same BERT input window in the sliding window method, hence we fail to answer the question.</p><p>Pretrained language models, pioneered by BERT <ref type="bibr" target="#b11">[12]</ref>, have emerged as silver bullets for many NLP tasks, such as question answering <ref type="bibr" target="#b37">[38]</ref> and text classification <ref type="bibr" target="#b21">[22]</ref>. Researchers and engineers breezily build state-of-the-art applications following the standard finetuning paradigm, while might end up in disappointment to find some texts longer than the length limit of BERT (usually 512 tokens). This situation may be rare for normalized benchmarks, for example SQuAD <ref type="bibr" target="#b37">[38]</ref> and GLUE <ref type="bibr" target="#b46">[47]</ref>, but very common for more complex tasks <ref type="bibr" target="#b52">[53]</ref> or real-world textual data.</p><p>A straightforward solution for long texts is sliding window <ref type="bibr" target="#b49">[50]</ref>, processing continuous 512-token spans by BERT. This method sacrifices the possibility that the distant tokens "pay attention" to each other, which becomes the bottleneck for BERT to show its efficacy in complex tasks (for example Figure <ref type="figure">1</ref>). Since the problem roots in the high O(L 2 ) time and space complexity in transformers <ref type="bibr" target="#b45">[46]</ref> (L is the length of the text), another line of research attempts to simplify the structure of transformers <ref type="bibr" target="#b19">[20,</ref><ref type="bibr" target="#b36">37,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b41">42]</ref>, but currently few of them have been successfully applied to BERT <ref type="bibr" target="#b34">[35,</ref><ref type="bibr" target="#b3">4]</ref>.</p><p>The maximum length limit in BERT naturally reminds us the limited capacity of Working Memory <ref type="bibr" target="#b1">[2]</ref>, a human cognitive system storing information for logical reasoning and decision-making. Experiments <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b30">31]</ref> already showed that the working memory could only hold 5∼9 items/words during reading, so how do humans actually understand long texts?</p><p>"The central executive -the core of the (working memory) system that is responsible for coordinating (multi-modal) information", and "functions like a limited-capacity attentional system capable of selecting and operating control processes and strategies", as Baddeley <ref type="bibr" target="#b1">[2]</ref> pointed out in his 1992 classic. Later research detailed that the contents in the working memory decay over time <ref type="bibr" target="#b4">[5]</ref>, unless are kept via rehearsal <ref type="bibr" target="#b2">[3]</ref>, i.e. paying attention to and refreshing the information in the mind. Then the overlooked information is constantly updated with relevant items from long-term memory by retrieval competition <ref type="bibr" target="#b51">[52]</ref>, collecting sufficient information for reasoning in the working memory.</p><p>The analogy between BERT and working memory inspires us with the CogLTX framework to Cognize Long TeXts like human. The basic philosophy behind CogLTX is rather concise -reasoning over the concatenation of key sentences (Figure <ref type="figure" target="#fig_0">2</ref>) -while compact designs are demanded to bridge the gap between the reasoning processes of machine and human.</p><p>The critical step in CogLTX is MemRecall, the process to identify relevant text blocks by treating the blocks as episodic memories. MemRecall imitates the working memory on retrieval competition, rehearsal and decay, facilitating multi-step reasoning. Another BERT, termed judge, is introduced to score the relevance of blocks and trained jointly with the original BERT reasoner. Moreover, CogLTX can transform task-oriented labels to relevance annotations by interventions to train judge.</p><p>Our experiments demonstrate that CogLTX outperforms or achieves comparable performance with the state-of-the-art results on four tasks, including NewsQA <ref type="bibr" target="#b43">[44]</ref>, HotpotQA <ref type="bibr" target="#b52">[53]</ref>, 20NewsGroups <ref type="bibr" target="#b21">[22]</ref> and Alibaba, with constant memory consumption regardless of the length of text.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Background</head><p>Challenge of long texts. The direct and superficial obstacle for long texts is that the pretrained max position embedding is usually 512 in BERT <ref type="bibr" target="#b11">[12]</ref>. However, even if the embeddings for larger positions are provided, the memory consumption is unaffordable because all the activations are stored for back-propagation during training. For instance, a 1,500-token text needs about 14.6GB memory to run BERT-large even with batch size of 1, exceeding the capacity of common GPUs (e.g. 11GB for RTX 2080ti). Moreover, the O(L 2 ) space complexity implies a fast increase with the text length L.</p><p>Related works. As mentioned in Figure <ref type="figure">1</ref>, the sliding window method suffers from the lack of long-distance attention. Previous works <ref type="bibr" target="#b48">[49,</ref><ref type="bibr" target="#b32">33]</ref> tried to aggregate results from each window by mean-pooling, max-pooling, or an additional MLP or LSTM over them; but these methods are still weak at long-distance interaction and need O(512  In the first step, x 0 and x 8 are kept in z after rehearsal. The "Old School" in x 8 will contribute to retrieve the answer block x 40 in the next step. See Appendix for details.</p><p>In the line of researches to adapt transformers for long texts, many of them just compress or reuse the results of former steps and cannot be applied to BERT, e.g., Transformer-XL <ref type="bibr" target="#b7">[8]</ref> and Compressive Transformer <ref type="bibr" target="#b36">[37]</ref>. Reformer uses locality-sensitive hashing for content-based group attention, but it is not friendly to GPU and still needs verification for BERT usage. BlockBERT <ref type="bibr" target="#b34">[35]</ref> cuts off unimportant attention heads to scale up BERT from 512 token to 1,024. The recent milestone longformer <ref type="bibr" target="#b3">[4]</ref>, customizes CUDA kernels to support window attention and global attention on special tokens. However, the efficacy of the latter are insufficiently investigated because the datasets are mostly in 4× the window size of longformer. The direction of "lightweight BERTs" is promising but orthogonal to CogLTX, meaning that they can combine CogLTX to handle longer texts, so they will not be compared or discussed anymore in this paper. A detailed survey can be found in <ref type="bibr" target="#b24">[25]</ref>.</p><p>3 Method</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">The CogLTX methodology</head><p>This basic assumption of CogLTX is that "for most NLP tasks, a few key sentences in the text store sufficient and necessary information to fulfill the task". More specifically, we assume there exists a short text z composed by some sentences from the long text x, satisfying</p><formula xml:id="formula_0">reasoner(x + ) ≈ reasoner(z + ),<label>(1)</label></formula><p>where x + and z + are inputs for the reasoner BERT w.r.t. the texts x and z as illustrated in Figure <ref type="figure" target="#fig_0">2</ref>.</p><p>We split each long text x into blocks [x 0 ... x T −1 ] by dynamic programming (see the Appendix), which restricts the block length to a maximum of B, in our implementation B = 63 if the BERT length limit L = 512. The key short text z should be composed by some blocks in x, i.e. z = [x z0 ... x zn−1 ], satisfying len(z + ) ≤ L and z 0 &lt; ... &lt; z n−1 . We denote x zi by z i . All blocks in z are automatically sorted to maintain the original relative ordering in x.</p><p>The key-blocks assumption is strongly related to latent variable models, which are usually solved by EM <ref type="bibr" target="#b10">[11]</ref> or variational bayes <ref type="bibr" target="#b18">[19]</ref>. However, these methods estimate the distribution of z and require multiple-sampling, thus not efficient enough for BERTs. We take the essence of them into the design of CogLTX, and discuss the connections in § 3.3.</p><p>Two ingredients are essential in CogLTX, MemRecall and the joint training of two BERTs. As demonstrated in Figure <ref type="figure" target="#fig_0">2</ref>, MemRecall is the algorithm utilizing the judge model to retrieve key blocks, which are fed into the reasoner to accomplish the task during inference.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">MemRecall</head><p>As the brain recalls past episodes relevant to current information in working memory, the MemRecall aims to extract key blocks z from the long text x (see Figure <ref type="figure">3</ref>).</p><p>Input. Although the aim is to extract key blocks, specific settings differ in the three types of tasks.</p><p>In Figure <ref type="figure" target="#fig_0">2</ref> (a) (c), the question Q or sub-sequence x[i] serves as query to retrieve relevant blocks. However, queries are absent in (b), and the relevance is only implicitly defined by the training data. For instance, sentences containing "Donald Trump" or "basketball" are more relevant for news topic classification than time reporting sentences. So how to seamlessly unify the cases?</p><p>MemRecall answers by accepting an initial z + as an additional input besides x. z + is the short "key text" maintained during MemRecall to simulate working memory. The query in tasks (a)(c) becomes the initial information in z + to provoke recalling. Then a judge model learns to predict task-specific relevance with the help of z + .</p><p>Model. The only model used by MemRecall is the judge mentioned above, a BERT to score the relevance for each token. Suppose</p><formula xml:id="formula_1">z + = [[CLS] Q [SEP]z 0 [SEP]... z n−1 ], judge(z + ) = sigmoid(MLP(BERT(z + ))) ∈ (0, 1) len(z + ) .<label>(2)</label></formula><p>The score of a block z i , denoted as judge(z + )[z i ], is the average of the scores of tokens in the block.</p><p>Procedure. MemRecall begins with a retrieval competition. Each block x i is assigned a coarse relevance score judge([z</p><formula xml:id="formula_2">+ [SEP]x i ])[x i ].</formula><p>The "winner" blocks with the highest scores are inserted into z as much as len(z + ) ≤ L. The superiority over vector space models <ref type="bibr" target="#b39">[40]</ref> lies in that x i fully interacts with current z + via transformers, avoiding information loss during embedding.</p><p>The following rehearsal-decay period assigns each z i a fine relevance score judge(z + )[z i ]. Only the highest scored blocks are then kept in z + , just like the rehearsal-decay phenomenon in working memory. The motivation of fine scores is that the relative sizes of coarse scores are not accurate enough without interaction and comparison between blocks, similar to the motivation of reranking <ref type="bibr" target="#b6">[7]</ref>.</p><p>MemRecall in nature enables multi-step reasoning by repeating the procedure with new z + . The importance of iterative retrieval is highlighted by CogQA <ref type="bibr" target="#b12">[13]</ref>, as the answer sentence fails to be directly retrieved by the question in multi-hop reading comprehension. It is worth noting that blocks reserved from last step can also decay, if they are proved not relevant enough (with low scores) by more information from new blocks in z + , which is neglected by previous multi-step reasoning methods <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b0">1,</ref><ref type="bibr" target="#b9">10]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Training</head><p>The diversity of downstreaming tasks pose challenges for training (finetuning) the BERTs in CogLTX. The solutions under different settings are summarized in Algorithm 1.</p><p>Supervised training for judge. The span extraction tasks (Figure <ref type="figure" target="#fig_0">2</ref>(a)) in nature suggest the answer block as relevant. Even multi-hop datasets, e.g. HotpotQA <ref type="bibr" target="#b52">[53]</ref>, usually annotate supporting sentences. In these cases, the judge is naturally trained in a supervised way:</p><formula xml:id="formula_3">loss judge (z) = CrossEntropy judge(z + ), relv_label(z + ) ,<label>(3)</label></formula><formula xml:id="formula_4">relv_label(z + ) = [1, 1, ..., 1</formula><p>for query , 0, 0, ..., 0</p><formula xml:id="formula_5">z0 is irrelevant , 1, 1, ..., 1 z1 is relevant , ...] ∈ [0, 1] len(z + ) ,<label>(4)</label></formula><p>where the training sample z is either a sequence of continous blocks z rand sampled from x (corresponding to the data distribution of retrieval competition), or a mixture of all relevant and randomly selected irrelevant blocks z relv (approximating the data distribution of rehearsal).</p><p>Supervised training for reasoner. is missed by MemRecall, the training cannot proceed. Finally, an approximation is made to send all relevant blocks and the "winner" blocks in the retrieval competition to train the reasoner.</p><p>Unsupervised training for judge. Unfortunately, many tasks (Figure <ref type="figure" target="#fig_0">2</ref> (b)(c)) do not provide relevance labels. Since CogLTX assumes all relevant blocks necessary, we infer the relevance labels by interventions: test whether a block is indispensable by removing it from z.</p><p>Suppose that z is the "oracle relevant blocks", according to our assumption,</p><formula xml:id="formula_6">loss reasoner (z −zi ) − loss reasoner (z) &gt; t, ∀z i ∈ z, (necessity) (5) loss reasoner ([z x i ]) − loss reasoner (z) ≈ 0, ∀x i / ∈ z,<label>(sufficiency) (6)</label></formula><p>where z −zi is the result of removing z i from z, and t is a threshold. After every iteration in training reasoner, we ablate each block in z, adjust its relevance label according to the increase of loss. Insignificant increase reveals the block as irrelevant, which will probably not "win the retrieval competition" again to train the reasoner in the next epoch, because it will be labeled as irrelevant to train the judge in the next epoch. Then real relevant blocks might enter z next epoch and be detected.</p><p>In practice, we split t into t up and t down , leaving a buffer zone to prevent frequent changes of labels.</p><p>We exhibit an example of unsupervised training on the 20News text classification dataset in Figure <ref type="figure" target="#fig_2">4</ref>.</p><p>Connections to latent variable models. Unsupervised CogLTX can be viewed as a generalization of (conditional) latent variable model p(y|x; θ) ∝ p(z|x)p(y|z; θ). EM <ref type="bibr" target="#b10">[11]</ref> infers the distribution of z as posterior p(z|y, x; θ) in E-step, while variational bayes methods <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b38">39]</ref> use an estimationfriendly q(z|y, x). However, in CogLTX z has a discrete distribution with up to C m n possible values, where n, m are the number of blocks and the capacity of z respectively. In some cases, sampling for hundreds of times to train BERTs might be required <ref type="bibr" target="#b18">[19]</ref>, whose expensive time consumption force us turn to point estimation for z,<ref type="foot" target="#foot_1">2</ref> e.g. our intervention-based method.</p><p>The intervention solution, maintains an z estimation for each x, and is essentially a local search specific to CogLTX. z is optimized by comparing nearby values(results after replacing irrelevant blocks) rather than Bayesian rules. The judge fits an inductive discriminative model to help infer z.  In the first epoch, the judge is nearly untrained and selects some blocks at random. Among them, <ref type="bibr" target="#b6">(7)</ref> contributes most to the correct classification, thus is marked "relevant". In the second epoch, trained judge finds (1) with strong evidence "prayers" and ( <ref type="formula" target="#formula_0">1</ref>) is marked as "relevant" at once. Then in the next epoch, <ref type="bibr" target="#b6">(7)</ref> becomes not essential for classification and is marked as "irrelevant".</p><p>4 Experiments In all experiments, the judge and reasoner are finetuned by Adam <ref type="bibr" target="#b17">[18]</ref> with learning rate 4 × 10 −5 and 10 −4 respectively. The learning rates warmup over the first 10% steps, and then linearly decay to 1/10 of the max learning rates. The common hyperparameters are batch size = 32, strides= <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b4">5]</ref>, t up = 0.2 and t down = −0.05.</p><p>In this section, we separately introduce each task with related results, analysis and ablation studies.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Reading comprehension</head><p>Dataset and settings. Given a question and a paragraph, the task is to predict the answer span in the paragraph. We evaluate the performance of CogLTX on NewsQA <ref type="bibr" target="#b43">[44]</ref>, which contains 119,633 human-generated questions posed on 12,744 long news articles. <ref type="foot" target="#foot_2">3</ref> Since previous SOTA <ref type="bibr" target="#b42">[43]</ref> is not BERT based (due to long texts) in NewsQA, to keep the similar scale of parameters for fair comparison, we finetune the base version of RoBERTa <ref type="bibr" target="#b25">[26]</ref> for 4 epochs in CogLTX. Results. Table <ref type="table" target="#tab_3">1</ref> show that CogLTX-base outperforms well-established QA models, for example BiDAF <ref type="bibr" target="#b40">[41]</ref> (+17.8% F 1 ), previous SOTA DECAPROP <ref type="bibr" target="#b42">[43]</ref>, which incorporates elaborate self-attention and RNN mechanisms (+4.8%F 1 ), and even RoBERTa-large with sliding window (+4.8%F 1 ). We hypothesize that the first sentence (the lead) and the last sentence (the conclusion) are usually the most informative parts in news articles. CogLTX can aggregate them for reasoning while sliding window cannot.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Multi-hop question answering</head><p>Dataset and settings. In complex scenarios, the answer is based on multiple paragraphs. Previous methods usually leverage the graph structure between key entities across the paragraphs <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b35">36]</ref>. However, if we can handle long texts with CogLTX, the problem can be elegantly solved by concatenating all the paragraphs as the input of BERTs.</p><p>HotpotQA <ref type="bibr" target="#b52">[53]</ref> is a multi-hop QA dataset of 112,779 questions, whose distractor setting provides 2 necessary paragraphs and 8 distractor paragraphs for each question. Both answers and supporting facts are required for evaluation. We treat each sentence as a block in CogLTX, and directly output the 2 blocks with the highest fine scores as supporting facts. Results. Table <ref type="table" target="#tab_4">2</ref> shows that CogLTX outperforms most of previous methods and all 7 BERT variants solutions on the leaderboard. <ref type="foot" target="#foot_3">4</ref> These solutions basically follow the framework of aggregating the results from sliding windows by extra neural networks, leading to bounded performances attributed to insufficient interaction across paragraphs.</p><p>The SOTA model HGN <ref type="bibr" target="#b13">[14]</ref> leverages extra hyperlink data in Wikipedia, based on which the dataset is constructed. The thought of SAE <ref type="bibr" target="#b44">[45]</ref>  Ablation studies. We also summarize the ablation studies in Table <ref type="table" target="#tab_4">2</ref>, indicating that (1) multistep reasoning does work (+3.9% Joint F 1 ) but not essential, probably because many questions themselves in HotpotQA are relevant enough with the second-hop sentences to retrieve them.</p><p>(2)</p><p>The metrics on supporting facts drop dramatically (-35.7% Sup F 1 ) without rehearsal for fine scores, because the relevance scores of top sentences are not comparable without attending to each other.</p><p>(3) As mentioned in § 3.3, the discrepancy of data distribution during training and test impairs the performance (-2.3% Joint F 1 ) if reasoner is trained by randomly selected blocks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Text classification</head><p>Dataset and settings. As one of the most general tasks in NLP, text classification is essential to analyze the topic, sentiment, intent, etc. We conduct experiments on the classic 20NewsGroups <ref type="bibr" target="#b21">[22]</ref>, which contains 18,846 documents from 20 classes. We finetune RoBERTa for 6 epochs in CogLTX.  <ref type="bibr" target="#b15">[16]</ref> 79.4 MS-CNN <ref type="bibr" target="#b31">[32]</ref> 86.1 Text GCN <ref type="bibr" target="#b53">[54]</ref> 86.3 MLP over BERT <ref type="bibr" target="#b32">[33]</ref> 85.5 LSTM over BERT <ref type="bibr" target="#b32">[33]</ref> 84.7</p><p>CogLTX (Glove init) 87.0 only long texts 87.4 − intervention (Glove init) 84.8 Bm25 init 86.1</p><p>Results. Table <ref type="table" target="#tab_6">3</ref> demonstrates that CogLTX, whose relevance labels are initialized by Glove <ref type="bibr" target="#b33">[34]</ref>, outperforms the other baselines, including previous attempts to aggregate the [CLS] pooling results from the sliding window <ref type="bibr" target="#b32">[33]</ref>. Moreover, MLP or LSTM based aggregation cannot be trained end-to-end either on long texts.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Ablation studies. (1)</head><p>Since the text lengths in 20 NewsGroups vary greatly (see Figure <ref type="figure" target="#fig_3">5</ref>), we further test the performance only on the texts longer than 512 tokens (15%), which is even above the global result.</p><p>( Results. Table <ref type="table" target="#tab_7">4</ref> shows that CogLTX outperforms common strong baselines. The word embeddings used by TextCNN <ref type="bibr" target="#b16">[17]</ref> and Bi-LSTM are from RoBERTa for fair comparison. Even CogLTX-tiny (7.5M parameters) outperforms TextCNN. However, the max-pooling results of RoBERTa-large sliding window are worse than CogLTX (7.3% Macro-F 1 ). We hypothesize this is due to the tendency to assign higher probabilities to very long texts in max-pooling, highlighting the efficacy of CogLTX.</p><formula xml:id="formula_7">)<label>2</label></formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5">Memory and time consumption</head><p>Memory. The memory consumption of CogLTX is constant during training, superior to the O(L 2 ) complexity of vanilla BERT. We also compare longformer <ref type="bibr" target="#b3">[4]</ref>, whose space complexity is roughly O(L) if the number of global attention tokens is small relative to L and independent of L. The detailed comparison is summarized in Figure <ref type="figure" target="#fig_5">6</ref> (Left).  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Conclusion and discussion</head><p>We present CogLTX, a cognition inspired framework to apply BERT to long texts. CogLTX only needs fixed memory during training and enables attentions between faraway sentences. Similar ideas were investigated on document-level in DrQA <ref type="bibr" target="#b5">[6]</ref> and ORQA <ref type="bibr" target="#b22">[23]</ref>, and there are also previous works to extract important sentences in unsupervised ways, e.g. based on the metadata about structure <ref type="bibr" target="#b23">[24]</ref>. Experiments on 4 different large datasets show its competitive performance. CogLTX is expected to become a general and strong baseline in many complex NLP tasks.</p><p>CogLTX defines a pipeline for long text understanding under the "key sentences" assumption. Extremely hard sequence-level tasks might violate it, thus efficient variational bayes methods (estimating the distribution of z) with affordable computation still worth investigations. Besides, CogLTX has a drawback to miss antecedents right before the blocks, which is alleviated by prepending the entity name to each sentence in our HotpotQA experiments, and could be solved by position-aware retrieval competition or coreference resolution in the future.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Broader Impact</head><p>Positive impact. The proposed method for understanding longer texts is inspired by the theory of working memory in the human brain. After the success of pretraining language models that learn from extremely large corpus, it still remains mysterious how human being can memorize, understand, and conduct efficient yet effective reasoning process within a small memory budget, given a very few examples. Exploring such methods in fact may help design more elegant mechanism, or architecture that connects sub-models to solve complex tasks that require rich context and information. From a societal perspective, the proposed method can be also applied to many applications, e.g., legal document analysis, public opinion monitoring and searching.</p><p>Negative impact. With the help of such methods, social platforms may get better understanding about their users by analysing their daily posts. Longer texts understanding specifically provide more accurate and coherent interpretation of who they are, which is a privacy threat.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: The CogLTX inference for main genres of BERT tasks. MemRecall is the process to extract key text blocks z from the long text x. Then z is sent to the BERT, termed reasoner, to fulfill the specific task. A (c) task is converted to multiple (b) tasks. The BERT input w.r.t. z is denoted by z + .</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Q x0 x2 x8 x13 x14 x25 x31 Q:Figure 3 :</head><label>x313</label><figDesc>Figure 3: The MemRecall illustration for question answering. The long text x is broken into blocks [x 0 ... x 40 ]. In the first step, x 0 and x 8 are kept in z after rehearsal. The "Old School" in x 8 will contribute to retrieve the answer block x 40 in the next step. See Appendix for details.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: An example about unsupervised training of CogLTX on 20News dataset. All blocks are initialized as "irrelevant" by BM25 (no common words with the label soc.religion.christian).In the first epoch, the judge is nearly untrained and selects some blocks at random. Among them,<ref type="bibr" target="#b6">(7)</ref> contributes most to the correct classification, thus is marked "relevant". In the second epoch, trained judge finds (1) with strong evidence "prayers" and (1) is marked as "relevant" at once. Then in the next epoch,<ref type="bibr" target="#b6">(7)</ref> becomes not essential for classification and is marked as "irrelevant".</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: The boxplot of the text length distribution in the datasets.</figDesc><graphic url="image-55.png" coords="6,325.80,254.74,178.19,127.08" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Time.</head><label></label><figDesc>To accelerate the training of reasoner, we can cache the scores of blocks during training judge and then each epoch only needs 2× time of single-BERT training. As the numbers of epochs until convergence are similar for CogLTX and sliding window in training, the main concern of CogLTX is the speed of inference. Figure 6 (Right) shows the time to process a 100,000-sample synthetic dataset with different text lengths. CogLTX, with O(n) time complexity, is faster than vanilla BERT after L &gt; 2,048 and approaches the speed of sliding window as the text length L grows.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Memory and Time consumption with varying text length. The data about memory are measured with batch size = 1 on a Tesla V100. The batch size is 8 in the measurement of inference time consumption, and CogLTX does 1-step reasoning.</figDesc><graphic url="image-56.png" coords="9,108.00,150.87,396.01,176.00" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>Traing set D = [(x0, y0), ..., (xn, yn)], Hyperparameters: num_epoch, mode, tup, t down . if mode is unsupervised then Initialize the relevance labels in D by Bm25 or Glove if possible. // see Appendix for details. for epoch from 1 to num_epoch do for x, y in D do Extract a short (len ≤ L) span from x at random as zrand.Aggregate all relevant blocks and some randomly chosen irrelevant blocks as z relv (len ≤ L).Update judge by descending ∇ φ (loss rand + loss relv ). // φ is the parameters of judge. for x, y in D do Aggregate all relevant blocks in x as z. for irrelevant block xi in x do 13 score[xi] = judge([z xi] + )[xi] // can be replaced by cached scores during training judge.Fill z up to length L with highest scoring blocks. // corresponding to the z from MemRecall.</figDesc><table><row><cell>loss rand = CrossEntropy(judge(z + rand ), relv_label(z + rand )).</cell></row><row><cell>loss relv = CrossEntropy(judge(z + relv ), relv_label(z + relv )).</cell></row></table><note>The challenge for reasoner is to keep the consistency of data distributions during training and inference, which is a cardinal principle of supervised learning. Ideally, the inputs of reasoner should also be generated by MemRecall during training, but not all relevant blocks are guaranteed to be retrieved. For instance in question answering, if the answer block Algorithm 1: The Training Algorithm of CogLTX Input: loss = CrossEntropy(reasoner(z + ), y). Update reasoner by descending ∇ θ loss. // θ is the parameters of reasoner. if mode is unsupervised and epoch &gt; 1 then 18 for block zi in z do 19 loss−z i = CrossEntropy(reasoner(z + −z i ), y). // gradient-free, much faster than Line 15. 20 if loss−z i − loss &gt; tup then Label zi as relevant; 21 if loss−z i − loss &lt; t down then Label zi as irrelevant;</note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head></head><label></label><figDesc>Harrassed at work, could use some prayers =CSE Dept., U.C. San… Yesterday I counted and realized that on seven different occasions… If he/she does not seem to take any action, keep going up higher ..If you feel you can not discuss this with your boss, perhaps your …It is unclear from your letter if you have done this or not. It is not … If the company indeed does seem to want to ignore the entire… People in offices tend to be more insensitive while working than … They are doing it because they are still the playground bully …In MY day, we had to make do with 5 bytes of swap... Then they will come back and wonder why I didn't want to go … No one could be bothered to call me at the other building, even … Moderator allows me this latest indulgence. Well, if you can't turn …</figDesc><table><row><cell>Score</cell><cell>Highest scoring blocks by judge</cell><cell>Score</cell><cell>Marked as irrelevant</cell><cell>Score</cell><cell>Marked as relevant</cell><cell cols="3">The ground truth label: soc.religion.christian Ep1 Ep2 Ep3 That is, someone that is supportive, comforting, etc. … healing… (7)</cell><cell>Ep1 Ep2 Ep3 0.01 0.09</cell></row><row><cell>(1)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.16</cell><cell>0.19</cell><cell>(8)</cell><cell>0.01</cell><cell>0.13</cell></row><row><cell>(2)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.16</cell><cell>0.16</cell><cell>(9)</cell><cell>0.01</cell><cell>0.12</cell><cell>0.08</cell></row><row><cell>(3)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.12</cell><cell>0.14</cell><cell>(10)</cell><cell>0.01</cell></row><row><cell>(4)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.13</cell><cell>(11)</cell><cell>0.01</cell><cell>0.14</cell></row><row><cell>(5)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.01</cell><cell>0.13</cell><cell>(12)</cell></row><row><cell>(6)</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.01</cell><cell></cell><cell>(13)</cell><cell>0.13</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 1 :</head><label>1</label><figDesc>NewsQA results (%).</figDesc><table><row><cell>Model</cell><cell>EM</cell><cell>F 1</cell></row><row><cell>Match-LSTM [48]</cell><cell cols="2">34.9 50.0</cell></row><row><cell>BiDAF [41]</cell><cell cols="2">37.1 52.3</cell></row><row><cell>FastQAExt [51]</cell><cell cols="2">42.8 56.1</cell></row><row><cell>AMANDA [21]</cell><cell cols="2">48.4 63.7</cell></row><row><cell>MINIMAL [28]</cell><cell cols="2">50.1 63.2</cell></row><row><cell>DECAPROP [43]</cell><cell cols="2">53.1 66.3</cell></row><row><cell cols="3">RoBERTa-large [26] (sliding window) 49.6 66.3</cell></row><row><cell>CogLTX</cell><cell cols="2">55.2 70.1</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2 :</head><label>2</label><figDesc>Results on HotpotQA distractor (dev). (+hyperlink) means usage of extra hyperlink data in Wikipedia. Models beginning with "−" are ablation studies without the corresponding design.ModelAns EM Ans F 1 Sup EM Sup F 1 Joint EM Joint F 1</figDesc><table><row><cell>Baseline [53]</cell><cell>45.60</cell><cell>59.02</cell><cell>20.32</cell><cell>64.49</cell><cell>10.83</cell><cell>40.16</cell></row><row><cell>DecompRC [29]</cell><cell>55.20</cell><cell>69.63</cell><cell>N/A</cell><cell>N/A</cell><cell>N/A</cell><cell>N/A</cell></row><row><cell>QFE [30]</cell><cell>53.86</cell><cell>68.06</cell><cell>57.75</cell><cell>84.49</cell><cell>34.63</cell><cell>59.61</cell></row><row><cell>DFGN [36]</cell><cell>56.31</cell><cell>69.69</cell><cell>51.50</cell><cell>81.62</cell><cell>33.62</cell><cell>59.82</cell></row><row><cell>SAE [45]</cell><cell>60.36</cell><cell>73.58</cell><cell>56.93</cell><cell>84.63</cell><cell>38.81</cell><cell>64.96</cell></row><row><cell>SAE-large</cell><cell>66.92</cell><cell>79.62</cell><cell>61.53</cell><cell>86.86</cell><cell>45.36</cell><cell>71.45</cell></row><row><cell>HGN [14] (+hyperlink)</cell><cell>66.07</cell><cell>79.36</cell><cell>60.33</cell><cell>87.33</cell><cell>43.57</cell><cell>71.03</cell></row><row><cell>HGN-large (+hyperlink)</cell><cell>69.22</cell><cell>82.19</cell><cell>62.76</cell><cell>88.47</cell><cell>47.11</cell><cell>74.21</cell></row><row><cell>BERT (sliding window) variants</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>BERT Plus</cell><cell>55.84</cell><cell>69.76</cell><cell>42.88</cell><cell>80.74</cell><cell>27.13</cell><cell>58.23</cell></row><row><cell>LQR-net + BERT</cell><cell>57.20</cell><cell>70.66</cell><cell>50.20</cell><cell>82.42</cell><cell>31.18</cell><cell>59.99</cell></row><row><cell>GRN + BERT</cell><cell>55.12</cell><cell>68.98</cell><cell>52.55</cell><cell>84.06</cell><cell>32.88</cell><cell>60.31</cell></row><row><cell>EPS + BERT</cell><cell>60.13</cell><cell>73.31</cell><cell>52.55</cell><cell>83.20</cell><cell>35.40</cell><cell>63.41</cell></row><row><cell>LQR-net 2 + BERT</cell><cell>60.20</cell><cell>73.78</cell><cell>56.21</cell><cell>84.09</cell><cell>36.56</cell><cell>63.68</cell></row><row><cell>P-BERT</cell><cell>61.18</cell><cell>74.16</cell><cell>51.38</cell><cell>82.76</cell><cell>35.42</cell><cell>63.79</cell></row><row><cell>EPS + BERT(large)</cell><cell>63.29</cell><cell>76.36</cell><cell>58.25</cell><cell>85.60</cell><cell>41.39</cell><cell>67.92</cell></row><row><cell>CogLTX</cell><cell>65.09</cell><cell>78.72</cell><cell>56.15</cell><cell>85.78</cell><cell>39.12</cell><cell>69.21</cell></row><row><cell>− multi-step reasoning</cell><cell>62.00</cell><cell>75.39</cell><cell>51.74</cell><cell>83.10</cell><cell>35.85</cell><cell>65.35</cell></row><row><cell>− rehearsal &amp; decay</cell><cell>61.44</cell><cell>74.99</cell><cell>7.74</cell><cell>47.37</cell><cell>5.36</cell><cell>37.74</cell></row><row><cell>− train-test matching</cell><cell>63.20</cell><cell>77.21</cell><cell>52.57</cell><cell>84.21</cell><cell>36.11</cell><cell>66.90</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc>is similar to CogLTX but less general. It scores paragraphs by an attention layer over BERTs, selects the highest scoring 2 paragraphs and feeds them into BERT together. The supporting facts are determined by another elaborate graph attention model. With the well-directed designs, SAE fits HotpotQA better than CogLTX (2.2% Joint F 1 ), but does not solve the memory problem for longer paragraphs. CogLTX directly solves the multi-hop QA problem as ordinary QA, gets SOTA-comparable results and explains the supporting facts without extra efforts.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 3</head><label>3</label><figDesc></figDesc><table><row><cell cols="2">: 20NewsGroups results (%).</cell></row><row><cell>Model</cell><cell>Accuracy</cell></row><row><cell>BoW + SVM</cell><cell>63.0</cell></row><row><cell>Bi-LSTM</cell><cell>73.2</cell></row><row><cell>fastText</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 4 :</head><label>4</label><figDesc>The initialization based on Glove provides good relevance labels, but the lack of adjustments by interventions still leads to 2.2% decrease in accuracy. (3) The Bm25 initialization is based on common words, which only initializes 14.2% training samples due to the short label names, e.g., sports.baseball. The relevant sentences are inferred by interventions and the gradually trained reasoner, achieving an accuracy of 86.1%. In many practical problems, each text can belong to multiple classes at the same time. The multi-label classification is usually transformed into binary classification by training an individual classifier for each label. Owing to the large capacity of BERT, we share the model for all the labels by prepending the label name at the beginning of the documents as input, i.e., [[CLS] label [SEP] doc], for binary classification. Alibaba is a dataset of 30,000 articles extracted from an industry scenario in a large e-commerce platform. Each article advertises for several items from 67 categories. The detection of mentioned categories are perfectly modeled as multi-label classification. To accelerate the experiment, we respectively sampled 80,000 and 20,000 label-article pairs for training and testing. For this task, we finetune RoBERTa for 10 epochs in CogLTX. Alibaba result (%).</figDesc><table><row><cell>4.4 Multi-label classification</cell><cell></cell><cell></cell><cell></cell></row><row><cell>Dataset and settings. Model</cell><cell cols="3">Accuracy Micro-F1 Macro-F1</cell></row><row><cell>BoW+SVM</cell><cell>89.9</cell><cell>85.8</cell><cell>55.3</cell></row><row><cell>Bi-LSTM</cell><cell>70.7</cell><cell>62.1</cell><cell>48.2</cell></row><row><cell>TextCNN</cell><cell>95.3</cell><cell>94.1</cell><cell>91.3</cell></row><row><cell>sliding window</cell><cell>94.5</cell><cell>92.7</cell><cell>89.9</cell></row><row><cell>CogLTX(tiny)</cell><cell>95.5</cell><cell>94.4</cell><cell>92.4</cell></row><row><cell>CogLTX(large)</cell><cell>98.2</cell><cell>97.8</cell><cell>97.2</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">Codes are available at https://github.com/Sleepychord/CogLTX.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">analogous to K-means, which can be seen as EM for Gaussian mixture model with infinitesimal variances. Then the posterior of z, mixture belonging, degenerates into the nearest cluster (the deterministic MLE value).</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">We use the original version instead of the simplified version in MRQA<ref type="bibr" target="#b14">[15]</ref>, which removed long texts.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3">https://hotpotqa.github.io</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>The work is supported by NSFC for Distinguished Young Scholar (61825602), NSFC (61836013), and a research fund supported by Alibaba. The authors would like to thank Danqi Chen and Zhilin Yang for their insightful discussion, and responsible reviewers of NeurIPS 2020 for their valuable suggestions.</p></div>
+			</div>
+
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Appendix</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">MemRecall</head><p>As described in § 3, the MemRecall is the process to extract the key blocks. We also need "strides" as input to indicate how many new blocks will be kept in each step. Details are showed as follows: </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Block Split</head><p>We predefine a cost for each punctuation and a basic cost for "hard truncation". The dynamic programming algorithm are showed as follows:</p><p>Return blocks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Initialization</head><p>In unsupervised training of CogLTX, an elaborate rather than random initialization for relevance labels could accelerate the convergence by large. Both query and textual label (e.g. label names for classification) can be used for initialization.</p><p>BM25 is a famous TF-IDF-like information retrieval method. Each block is scored based on the common words with query or textual label. However, the semantic relevance are neglected. For example, BM25 fails to find the relevance between label name "sports" with "baseball player".</p><p>Glove is a group of pretrained word representation. Suppose the query or textual label is q, and we score the relevance of a block b by averaging the len(q) × len(b) inner products of their words. Top two blocks are initialized as relevant.</p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Learning to retrieve reasoning paths over wikipedia graph for question answering</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Asai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Hashimoto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Hajishirzi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Xiong</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Working memory</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Baddeley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Science</title>
+		<imprint>
+			<biblScope unit="volume">255</biblScope>
+			<biblScope unit="issue">5044</biblScope>
+			<biblScope unit="page" from="556" to="559" />
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Time constraints and resource sharing in adults&apos; working memory spans</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barrouillet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bernardin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Camos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Experimental Psychology: General</title>
+		<imprint>
+			<biblScope unit="volume">133</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page">83</biblScope>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">Longformer: The long-document transformer</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Beltagy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">E</forename><surname>Peters</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Cohan</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2004.05150</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Some tests of the decay theory of immediate memory</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Brown</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Quarterly Journal of Experimental Psychology</title>
+		<imprint>
+			<biblScope unit="volume">10</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="12" to="21" />
+			<date type="published" when="1958">1958</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Reading wikipedia to answer open-domain questions</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fisch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Weston</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bordes</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 55th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1870" to="1879" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Discriminative reranking for natural language parsing</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Collins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Koo</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computational Linguistics</title>
+		<imprint>
+			<biblScope unit="volume">31</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="25" to="70" />
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Transformer-xl: Attentive language models beyond a fixed-length context</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Carbonell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1901.02860</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Individual differences in working memory and reading</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Daneman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">A</forename><surname>Carpenter</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Memory and Language</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page">450</biblScope>
+			<date type="published" when="1980">1980</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">Multi-step retriever-reader interaction for scalable open-domain question answering</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Das</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Dhuliawala</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaheer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mccallum</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Maximum likelihood from incomplete data via the em algorithm</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">P</forename><surname>Dempster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">M</forename><surname>Laird</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">B</forename><surname>Rubin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of the Royal Statistical Society: Series B (Methodological)</title>
+		<imprint>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="1" to="22" />
+			<date type="published" when="1977">1977</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Bert: Pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M.-W</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Toutanova</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 Conference of the North American Chapter</title>
+		<title level="s">Long and Short Papers</title>
+		<meeting>the 2019 Conference of the North American Chapter</meeting>
+		<imprint>
+			<publisher>Human Language Technologies</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="4171" to="4186" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Cognitive graph for multi-hop reading comprehension at scale</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 57th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="2694" to="2703" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Fang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pillai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Liu</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1911.03631</idno>
+		<title level="m">Hierarchical graph network for multi-hop question answering</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Mrqa 2019 shared task: Evaluating generalization in reading comprehension</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fisch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Talmor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Seo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EMNLP 2019 MRQA Workshop</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page">1</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Bag of tricks for efficient text classification</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Joulin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Grave</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bojanowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Mikolov</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1607.01759</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Convolutional neural networks for sentence classification</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Kim</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP)</title>
+				<meeting>the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP)</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="1746" to="1751" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">P</forename><surname>Kingma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ba</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1412.6980</idno>
+		<title level="m">Adam: A method for stochastic optimization</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Auto-encoding variational bayes</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">P</forename><surname>Kingma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Welling</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<publisher>ICLR</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<title level="m" type="main">Reformer: The efficient transformer</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Kitaev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ł</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Levskaya</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2001.04451</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">A question-focused multi-factor attention network for question answering</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kundu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">T</forename><surname>Ng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Thirty-Second AAAI Conference on Artificial Intelligence</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Newsweeder: Learning to filter netnews</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twelfth International Conference on Machine Learning</title>
+				<meeting>the Twelfth International Conference on Machine Learning</meeting>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="page" from="331" to="339" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Latent retrieval for weakly supervised open domain question answering</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M.-W</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Toutanova</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 57th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="6086" to="6096" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Unsupervised sentence embedding using document structure-based context</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Park</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Joint European Conference on Machine Learning and Knowledge Discovery in Databases</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="633" to="647" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Self-supervised learning: Generative or contrastive</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Hou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Mian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2006.08218</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Joshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Roberta</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1907.11692</idno>
+		<title level="m">A robustly optimized bert pretraining approach</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">The magical number seven, plus or minus two: Some limits on our capacity for processing information</title>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">A</forename><surname>Miller</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Psychological review</title>
+		<imprint>
+			<biblScope unit="volume">63</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page">81</biblScope>
+			<date type="published" when="1956">1956</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m" type="main">Efficient and robust question answering from minimal context over documents</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Min</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Zhong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Xiong</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.08092</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">Multi-hop reading comprehension through question decomposition and rescoring</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Min</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Zhong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Hajishirzi</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1906.02916</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">Answering while summarizing: Multi-task learning for multi-hop qa with evidence extraction</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Nishida</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Nishida</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Nagata</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Otsuka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Saito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Asano</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tomita</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1905.08511</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Working memory capacity-facets of a cognitive ability construct</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Oberauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-M</forename><surname>Süß</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Schulze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Wilhelm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">W</forename><surname>Wittmann</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Personality and individual differences</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="1017" to="1045" />
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Joint verification-identification in end-to-end multiscale cnn framework for topic identification</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pappagari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Villalba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Dehak</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="6199" to="6203" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">Hierarchical transformers for long document classification</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pappagari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Żelasko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Villalba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Carmiel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Dehak</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1910.10781</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Glove: Global vectors for word representation</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Pennington</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Socher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">D</forename><surname>Manning</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2014 conference on empirical methods in natural language processing (EMNLP)</title>
+				<meeting>the 2014 conference on empirical methods in natural language processing (EMNLP)</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="1532" to="1543" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Blockwise self-attention for long document understanding</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Qiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>.-T. Yih</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Findings of EMNLP&apos;20</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Dynamically fused graph network for multi-hop reasoning</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Qiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Qu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 57th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="6140" to="6150" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">W</forename><surname>Rae</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Potapenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">M</forename><surname>Jayakumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">P</forename><surname>Lillicrap</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1911.05507</idno>
+		<title level="m">Compressive transformers for long-range sequence modelling</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Squad: 100,000+ questions for machine comprehension of text</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Rajpurkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lopyrev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing</title>
+				<meeting>the 2016 Conference on Empirical Methods in Natural Language Processing</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="2383" to="2392" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Variational inference with normalizing flows</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Rezende</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mohamed</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Machine Learning</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1530" to="1538" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">A vector space model for automatic indexing</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Salton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C.-S</forename><surname>Yang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<biblScope unit="page" from="613" to="620" />
+			<date type="published" when="1975">1975</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Bidirectional attention flow for machine comprehension</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Seo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kembhavi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Farhadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Hajishirzi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Adaptive attention span in transformers</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sukhbaatar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">É</forename><surname>Grave</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bojanowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Joulin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics</title>
+				<meeting>the 57th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="331" to="335" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Densely connected attention propagation for reading comprehension</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Tay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">T</forename><surname>Luu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">C</forename><surname>Hui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Su</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="4906" to="4917" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Newsqa: A machine comprehension dataset</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Trischler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Yuan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Harris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Sordoni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bachman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Suleman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2nd Workshop on Representation Learning for NLP</title>
+				<meeting>the 2nd Workshop on Representation Learning for NLP</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="191" to="200" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zhou</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1911.00484</idno>
+		<title level="m">Select, answer and explain: Interpretable multi-hop reading comprehension over multiple documents</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ł</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Polosukhin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="5998" to="6008" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">GLUE: A multi-task benchmark and analysis platform for natural language understanding</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bowman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 EMNLP Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP</title>
+				<meeting>the 2018 EMNLP Workshop BlackboxNLP: Analyzing and Interpreting Neural Networks for NLP<address><addrLine>Brussels, Belgium</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2018-11">Nov. 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Jiang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1608.07905</idno>
+		<title level="m">Machine comprehension using match-lstm and answer pointer</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Multi-granularity hierarchical attention fusion networks for reading comprehension and question answering</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 56th Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 56th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1705" to="1714" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<monogr>
+		<title level="m" type="main">Multi-passage bert: A globally normalized bert model for open-domain question answering</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Nallapati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Xiang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1908.08167</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<monogr>
+		<author>
+			<persName><forename type="first">D</forename><surname>Weissenborn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Wiese</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Seiffe</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1703.04816</idno>
+		<title level="m">Making neural qa as simple as possible but not simpler</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Below the surface: Analogical similarity and retrieval competition in reminding</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">M</forename><surname>Wharton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">J</forename><surname>Holyoak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">E</forename><surname>Downing</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">E</forename><surname>Lange</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">D</forename><surname>Wickens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">R</forename><surname>Melz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Cognitive Psychology</title>
+		<imprint>
+			<biblScope unit="volume">26</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="64" to="101" />
+			<date type="published" when="1994">1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Hotpotqa: A dataset for diverse, explainable multi-hop question answering</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Qi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">D</forename><surname>Manning</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing</title>
+				<meeting>the 2018 Conference on Empirical Methods in Natural Language Processing</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="2369" to="2380" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Graph convolutional networks for text classification</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Luo</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the AAAI Conference on Artificial Intelligence</title>
+				<meeting>the AAAI Conference on Artificial Intelligence</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">33</biblScope>
+			<biblScope unit="page" from="7370" to="7377" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

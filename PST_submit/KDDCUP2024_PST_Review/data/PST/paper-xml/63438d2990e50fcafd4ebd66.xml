@@ -1,0 +1,2223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Demystifying Map Space Exploration for NPUs</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2022-10-07">7 Oct 2022</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Sheng-Chun</forename><surname>Kao</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Georgia Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Angshuman</forename><surname>Parashar</surname></persName>
+							<email>aparashar@nvidia.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Georgia Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Po-An</forename><surname>Tsai</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Georgia Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Tushar</forename><surname>Krishna</surname></persName>
+							<email>tushar@ece.gatech.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Georgia Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Demystifying Map Space Exploration for NPUs</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2022-10-07">7 Oct 2022</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2210.03731v1[cs.LG]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:28+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Map Space Exploration is the problem of finding optimized mappings of a Deep Neural Network (DNN) model on an accelerator. It is known to be extremely computationally expensive, and there has been active research looking at both heuristics and learning-based methods to make the problem computationally tractable. However, while there are dozens of mappers out there (all empirically claiming to find better mappings than others), the research community lacks systematic insights on how different search techniques navigate the map-space and how different mapping axes contribute to the accelerator's performance and efficiency. Such insights are crucial to developing mapping frameworks for emerging DNNs that are increasingly irregular (due to neural architecture search) and sparse, making the corresponding map spaces much more complex. In this work, rather than proposing yet another mapper, we do a first-ofits-kind apples-to-apples comparison of search techniques leveraged by different mappers. Next, we extract the learnings from our study and propose two new techniques that can augment existing mapperswarm-start and sparsity-awarethat demonstrate speedups, scalability, and robustness across diverse DNN models 1 .</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Deep Neural Network (DNNs) have become an indispensable tool in the solution toolbox for a variety of complex problems such as object detection, machine translation, language understanding, autonomous driving, and so on. There is growing demand for specialized DNN accelerators (also called Neural Processing Units or NPUs) 2 pursuing high performance with high energy, power, and area efficiency.</p><p>The performance and energy-efficiency of a NPU depends on how a DNN is mapped over the accelerator's hardware (compute and memory) resources <ref type="bibr" target="#b34">[35,</ref><ref type="bibr" target="#b43">44]</ref>. Specifically, a mapping (aka schedule) includes the computation order, parallelization strategy and tile sizes <ref type="bibr" target="#b34">[35,</ref><ref type="bibr" target="#b43">44]</ref>, as shown in Fig. <ref type="figure">1</ref>. In order to achieve high efficiency across a wide range of DNNs that include diverse layer shapes and sizes, state-of-the-art DNN accelerators are often designed with flexibility to support different mapping strategies <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b35">36,</ref><ref type="bibr" target="#b47">48]</ref>. This flexibility imposes a unique challenge for deployment: finding a high-quality mapping between a DNN and the flexible accelerator from the space of all legal mappings (i.e., the map space) during compile time. This is crucial to unlock the full potential of the DNN accelerator.</p><p>As a result, prior work has clearly defined map space exploration (MSE) <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b22">23,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b43">44]</ref>, as a critical problem for NPU design and/or deployment, cleanly separating it from the hardware architecture design space exploration (DSE) problem. DSE includes identifying the right compute and memory configurations for the NPU within constraints such as total FLOPS, area, and power. MSE, meanwhile, takes the hardware configuration and DNN workload as input and finds optimized mappings, optimizing some objective (e.g., latency or energy-efficiency). To perform MSE, various search algorithms (i.e., mappers) have been proposed within the past few years <ref type="bibr">[2, 3, 7, 12-15, 23, 25, 41, 44, 49, 50, 54, 55, 57-60, 63, 64, 66, 67, 70, 73, 75, 76, 79]</ref>.</p><p>Despite the success achieved by these prior efforts, MSE remains a computationally challenging problem. This is because the search space for legal mappings for even a single layer of a modern DNN (e.g., ResNet-50) on a typical edge class accelerator <ref type="bibr" target="#b8">[9]</ref> is ∼ O(10 24 ) <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b27">28]</ref> which would require more time than the age of the earth to search exhaustively (assuming 1ms to evaluate each mapping sample). This gets exacerbated as newer and ever larger DNN models are being created with increasing frequency, especially thanks to the success of neural architecture search techniques <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b4">5,</ref><ref type="bibr" target="#b38">39,</ref><ref type="bibr" target="#b46">47,</ref><ref type="bibr" target="#b60">61]</ref>. Furthermore, the advent of compressed-sparse DNNs <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b39">40,</ref><ref type="bibr" target="#b50">51,</ref><ref type="bibr" target="#b67">68,</ref><ref type="bibr" target="#b68">69,</ref><ref type="bibr" target="#b79">80]</ref>, whose mappings are not performance-portable across sparsity levels (a key finding in this paper), further increases MSE burden.</p><p>Researching more sophisticated scalable and sparsityaware MSE techniques is at least partially hampered by the fact that even though prior approaches have empirically shown that their techniques work, none of them demonstrate why they work and the insight behind their optimization techniques.</p><p>It is these very insights that we wish to extract in this paper, and in the process demystify MSE as a problem. We cover both heuristics and learning-based optimization approaches, analyze their behavior, and learn from their best traits. We then use these learnings to scale MSE to more complex workloads. Fig. <ref type="figure">1</ref>: The overview of DNN Workload, Accelerator, and a (NVDLA-like <ref type="bibr" target="#b0">[1]</ref>) Mapping. Specifically, our contributions are two-fold.</p><p>(1) This is the first work, to the best of our knowledge, to quantitatively compare three wide categories of mappers: random-based <ref type="bibr" target="#b43">[44]</ref> (i.e., heuristic pruning), feedbackbased <ref type="bibr" target="#b27">[28]</ref> (i.e., blackbox optimization and reinforcement learning), and gradient-based <ref type="bibr" target="#b18">[19]</ref> (i.e., surrogate models), and analyze their trade-offs. We conduct a sensitivity analysis of different mapping axes to understand the contribution of each axis. We then perform case studies that reveal distinguishing characteristics of good and bad mappings. Our analysis reveals that: (i) random search is inefficient, (ii) gradient-based search converges fast but requires prior knowledge of the accelerator architecture, and (ii) feedbackbased search is more adaptable and sample-efficient, but requires higher cost to acquire each sample. Our analysis also shows that optimality of a dense DNN mapping does not port over to a sparse DNN.</p><p>(2) Based on our findings, we propose two novel heuristic techniques to advance the state-of-the-art in MSE: (i) We propose a warm-start technique to initialize the MSE with prior optimal solutions from previous layers in a replay buffer based on a similarity metric, enabling the mapper to start at a better point and converge faster. In our evaluations, we find that warm-start can help the mapper converge to a similar performance point 3.3x-7.3x faster. (ii) We also propose a sparsity-aware technique to search for a mapping that can perform well across a range of target activation sparsities. A fixed mapping found by our sparsity-aware approach can achieve 99.7% of the performance of each of the mappings specifically tailored to the various density levels.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Background: DNN Accelerators</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1.">DNN Workloads</head><p>In this work, we use individual DNN layers/operators as our target workload. The workloads vary across different DNN models because of different types of operations such as CONV2D, Depth-wise CONV, Point-wise CONV, Attention, Fully-Connected (FC), and so on, and different tensor shapes for the layers (i.e., batch, input, weight kernel sizes), as shown in Fig. <ref type="figure">1</ref>. All these operations can be represented with a loop-nest of computations. For example, a CONV2D can be represented as 7 for-loops, and GEMM can be represented as 3 for-loops.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2.">Accelerator Hardware Configuration</head><p>A canonical NPU often houses a spatial array of Processing Elements (PEs), as shown in Fig. <ref type="figure">1</ref>. Each PE has one to several ALU units to compute partial sums, and private local (aka "L1") buffers to store weights, input activations and partial sums. The accelerator also houses a global shared (aka "L2") buffer to prefetch activations and weights from DRAM for the next tile of computation that will be mapped over the PEs and L1 buffers. Networks-on-Chip are used to distribute operands from the global L2 buffer to the L1 buffers in the PEs, collect the partial or full outputs, and write them back to the L2 buffer.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3.">Accelerator Map-Space</head><p>Given a DNN workload, there exist several choices for mapping it on the accelerator's PEs and buffer hierarchy over space and time. The mapping includes the following components <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b43">44]</ref>, shown in Fig. <ref type="figure">1</ref>:</p><p>(1) Tile sizes: The ability to change bounds and aspect ratios of data tiles from one or more operand tensors per level of the buffer hierarchy <ref type="bibr" target="#b45">[46]</ref>.</p><p>(2) Loop order: The ability to change the loop orders iterated per tiling level.</p><p>(3) Loop parallelization: The ability to change which tensor dimensions are parallelized per tiling level. This represents the spatial partitioning of data (i.e., across PEs).</p><p>Fig. <ref type="figure">1</ref> shows an example of the mapping used by the NVDLA <ref type="bibr" target="#b0">[1]</ref> accelerator. Choices for (2) and (3) together are often referred to as dataflow <ref type="bibr" target="#b33">[34]</ref> which has been informally classified by prior work into weight-stationary, output stationary and input-stationary <ref type="bibr" target="#b7">[8]</ref>. The design-space of all possible mappings (i.e., dataflows + tile-sizes) that an accelerator can support is called its Map-Space <ref type="bibr" target="#b43">[44]</ref>.</p><p>Flexible DNN accelerators <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b35">36]</ref> allow a mapping optimizer within a compiler to explore tile sizes, loop orders and parallelization independently for each layer. This mapping flexibility is crucial for accelerators to adapt to growing diversity in DNNs <ref type="bibr" target="#b33">[34]</ref>. The overall runtime and energy-efficiency of an accelerator depends on both the hardware configuration and the mapping, making it crucial to find an optimized mapping<ref type="foot" target="#foot_0">3</ref> , <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b74">75]</ref>, as we discuss next.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Map Space Exploration (MSE)</head><p>A canonical MSE framework is shown in Fig. <ref type="figure">2</ref>. MSE takes the NPU's HW configuration ( §2.2) and target DNN workloads (size, shape, and additional features such as sparsity level of weight and/or activations) as input and finds optimized mappings given an objective (e.g., latency, throughput, energy, energy-delay-product (EDP), and so on). MSE may be run at compile time within a mapping optimizer <ref type="bibr" target="#b5">[6]</ref> after the NPU is deployed, or at design-time in conjunction with DSE for co-optimizing the mapping and HW configuration <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b72">73]</ref>.</p><p>The MSE process often includes three parts: Representation of search space, Evaluation method, and Exploration method. The representation will define the scope of the searching problem and the size of the search space. An optimization loop that includes exploration and evaluation performs the actual search. The optimization continues till the MSE converges, or reaches a given sampling budget or wall-clock run time budget.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.">Representation of Map Space</head><p>While recent work has proposed various representations (MAESTRO <ref type="bibr" target="#b34">[35]</ref>, UNION <ref type="bibr" target="#b23">[24]</ref>, and Ruby <ref type="bibr" target="#b21">[22]</ref>) to increase mapping diversity in the map space, in this work we leverage the canonical Timeloop representation, which is loop-nests to represent each tiling level (e.g., NVDLA-like mapping in Fig. <ref type="figure">1</ref>). We ensure that all the candidate mappings generated by various mappers during MSE are legal.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.">Evaluation Method (Cost Model)</head><p>MSE relies on a DNN accelerator cost model to estimate the performance of a certain mapping on a given accelerator for a given workload. These cost models are typically analytical, enabling rapid evaluation of different designpoints in a matter of ms. Some widely used cost models include Timeloop <ref type="bibr" target="#b43">[44]</ref>, MAESTRO <ref type="bibr" target="#b33">[34]</ref>, dMazeRunner <ref type="bibr" target="#b11">[12]</ref>, Interstellar <ref type="bibr" target="#b74">[75]</ref>, SCALE-sim <ref type="bibr" target="#b51">[52]</ref> and others <ref type="bibr" target="#b31">[32,</ref><ref type="bibr" target="#b41">42]</ref>. These cost models can model different kinds of accelerators (systolic arrays <ref type="bibr" target="#b51">[52]</ref>, flexible spatial arrays <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b33">34,</ref><ref type="bibr" target="#b43">44]</ref>, sparse accelerators <ref type="bibr" target="#b70">[71]</ref>, and so on) and capture each accelerator's map space in different formats. In this work, we use Timeloop <ref type="bibr" target="#b43">[44]</ref> as our cost model <ref type="foot" target="#foot_1">4</ref> which is validated against real chips <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b53">54]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.">Exploration Method (Mapper)</head><p>The exploration algorithm in MSE (Fig. <ref type="figure">2</ref>) is called a mapper. Dozens of different DNN mappers have been proposed, which we categorize into random search based <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b53">54,</ref><ref type="bibr" target="#b62">63,</ref><ref type="bibr" target="#b74">75]</ref>, feedback-based (including reinforcement learning and black-box optimization) <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b72">73,</ref><ref type="bibr" target="#b78">79]</ref>, gradientbased <ref type="bibr" target="#b18">[19]</ref>, and others (including mathematical optimization, MCMC, polyhedral transformations, and heuristics) <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b22">23,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b48">49,</ref><ref type="bibr" target="#b63">64]</ref> (Fig. <ref type="figure">2</ref>). The random search-based either apply random sampling on the search space or apply pruned random search <ref type="bibr" target="#b5">[6,</ref><ref type="bibr" target="#b43">44]</ref>, which prunes off the redundant search space to increase the sampling efficiency. The feedback-based use a learning algorithm to interact with the cost model and keep improving its solution. The run time of both random searchbased and feedback-based depend heavily on the run time of the cost model, potentially becoming the bottleneck of the MSE run time. Gradient-based methods uses a differentiable surrogate model, which eliminates this bottleneck and can update the solution directly by the gradient of the loss. We do a deeper dive within these three types in §4.3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.">Why MSE Matters</head><p>MSE bridges the gap between two active trends: (1) efficient DNN model design <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b52">53,</ref><ref type="bibr" target="#b61">62]</ref> (which has led to a huge diversity in layer shapes/sizes and emergence of sparsity in state-of-the-art DNN models) and (2) flexible hardware accelerators that support diverse mappings (dataflows + tile sizes) via configurable buffer hierarchies <ref type="bibr" target="#b45">[46]</ref> and on-chip interconnect topologies <ref type="bibr" target="#b35">[36,</ref><ref type="bibr" target="#b47">48]</ref> as an answer to the first trend. MSE is crucial for extracting performance and energyefficiency from the accelerator as there can be multiple orders of of difference in performance and energy-efficiency between good and bad mappings, as prior works have demonstrated <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b43">44]</ref>.</p><p>While several mappers are being actively developed <ref type="bibr">[2, 3, 7, 12-15, 23, 25, 41, 44, 49, 50, 54, 55, 57-60, 63, 64, 66, 67, 70, 73, 75, 76, 79]</ref>, there is no work, to the best of our knowledge, that has focused on understanding how different mappers navigate the map-space, how different mapping axes contribute to the performance, and trade-offs between search approaches, which is the focus of this work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Quantitative MSE Analysis</head><p>In this section, we perform a quantitative analysis of the three classes of mappers described in §3.3 to identify when and why one works better than the other. The goal of this analysis is to educate the DNN accelerator research community on Mapper design, rather than propose yet another mapper.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.">Methodology</head><p>Workload. We consider workloads from different models: Resnet <ref type="bibr" target="#b17">[18]</ref>, VGG <ref type="bibr" target="#b55">[56]</ref>, Mnasnet <ref type="bibr" target="#b60">[61]</ref>, Mobilenet <ref type="bibr" target="#b52">[53]</ref>, and Bert-large <ref type="bibr" target="#b64">[65]</ref>. Some frequently referenced workloads across different experiments are described in Table <ref type="table" target="#tab_1">1</ref>.</p><p>Hardware Accelerator. We model the NPU using Timeloop <ref type="bibr" target="#b43">[44]</ref>. We assume three-levels of buffer hierarchies: DRAM, a 64KB shared global buffer, and 256B private local buffer for each of the 256 PE. Each PE houses 4 ALU units (Accel-B in Table <ref type="table" target="#tab_1">1</ref>). We also model the NPU the Mind Mappings paper <ref type="bibr" target="#b18">[19]</ref> uses (Accel-A), whose configuration is similar but with different sizing as shown in Table <ref type="table" target="#tab_1">1</ref>.</p><p>For analyzing sparse mappings ( §4.5), we use TimeloopV2, aka Sparseloop <ref type="bibr" target="#b70">[71,</ref><ref type="bibr" target="#b71">72]</ref>, as the cost model to explore the map space in a flexible sparse accelerator, and leverage Gamma as the mapper. Besides tiling, orderering and parallelism, Sparseloop also models hardware and software optimizations (e.g., power gating and compressed tensors) in sparse DNN accelerators.</p><p>Objective. We use multi-objective -Energy and Latency (Delay), throughout the optimization process. When optimization finishes, we select the solution with the highest Energy-Delay-Product (EDP) on the Pareto frontier. We use EDP as the performance criteria of found mapping. Note that any formulation of the objective can also be used such as power, area, performance-per-watt, performance-per-mm 2 , and so on. Experiment Platform. We run experiments using a desktop with a 12-core Intel I7-6800K CPU and a Nvidia GTX1080 to train the surrogate model in Mind Mappings.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.">Size of Map Space</head><p>The size of the map space heavily depends on representation. In this paper, we follow the efficient representation used by Timeloop to represent the three mapping axes. We use CONV2D (7 for-loop) as workload and 3-level of buffer hierarchy (DRAM, L2, L1) as architecture configuration as an example to guide the discussion of map space.</p><p>Tile sizes. Buffers at each level of the scratchpad memory hierarchy will have a dedicated tile size for each of the dimensions, as shown by the different tile sizes within the 7 for-loops of the L2 mapping in Fig. <ref type="figure">1</ref> The total possible combination depends on the tensor shape of each workload and increases exponentially with the number of buffer hierarchies.</p><p>Loop Order. Each buffer level would have a dedicated permutation of loop order. E.g., in Fig. <ref type="figure">1</ref>, the loop order in L2 mapping from outer to inner loop is (B,K,C,R,S,Y,X). The total combinations become (7!) 3 (we have 3 buffer levels in our example).</p><p>Parallelism. Parallelism happens across levels of compute units (2-level of compute units in Fig. <ref type="figure">1</ref>, i.e., across PEs and ALUs). At each level of the compute unit, we can choose to parallelize from 0 (no parallelism) to 7 (all parallelism) dimensions. The total combination becomes 2 7×2 .</p><p>Map-Space. The Cartesian product of these sub-spaces leads to the size of the entire map space, which is at the level of O(10 21 ) for the workloads discussed in §4.1.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.">Understanding Mapper Sampling Efficiency</head><p>Recall from §3.3 that we categorize state-of-the-art mappers into three major techniques (Fig. <ref type="figure">2</ref>). We select state-of-the-art mappers out of each category -Timeloop's Random-Pruned <ref type="bibr" target="#b43">[44]</ref> from random-based, Gamma <ref type="bibr" target="#b27">[28]</ref> from feedback-based, and Mind Mappings <ref type="bibr" target="#b18">[19]</ref> from gradientbased methods 5 . -and compare their characteristics with respect to search speed and sampling efficiency 6 .</p><p>5. Random-Pruned and Mind Mappings both natively work with the Timeloop cost model. Gamma was originally demonstrated with MAESTRO, and we extended it to use the Timeloop cost model. We leave the task of porting representative mappers from the others category ( §3.3 to a common cost model and analyzing them as future work.</p><p>6. The performance improvement over number of sampled points.   • Random-Pruned (random-based): Random-Pruned <ref type="bibr" target="#b43">[44]</ref> uses random sampling on a pruned search space. The pruning strategies are based on heuristics, e.g., permutations do not matter for the innermost tiling level and for tile sizes that are one <ref type="bibr" target="#b43">[44]</ref>.</p><p>• Gamma (feedback-based): Gamma In the following evaluation case study, we show two sets of NPU configurations (Table <ref type="table" target="#tab_1">1</ref>) : Accel-A, on which the surrogate model is trained for MindMappings, and Accel-B, an unseen accelerator configuration for the surrogate model. <ref type="figure">-A</ref>). Isosampling points Comparisons. We set the sampling budget to 5,000 points and compare the sampling efficiency of algorithms in the top figures of Fig. <ref type="figure" target="#fig_1">3</ref>(a)(b). The randombased method progresses the slowest over number of samples. Among the gradient-based and feedback-based, the gradientbased method progresses faster at the start owing to its direct gradient feedback. However, with more number of samples, the feedback-based method starts to perform better. It is because the gradient-based method is more prone to fall into local optimum (discussed later) while the feedbackbased methods typically work well for global optimization problems.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.1.">Trained Accelerator Configuration (Accel</head><p>Iso-time Comparisons. We set a tight time budget, 20 seconds, and track the performance to wall clock time in the bottom figures of Fig. <ref type="figure" target="#fig_1">3</ref>(a)(b). Despite their better sampling efficiency, the feedback-based and gradient-based methods do not show a clear edge over the random-based method within tight wall-clock run time budget. Random-based methods do not have costly built-in learning algorithms as the other two and hence can run more number of samples given the same time budget, which is essential when the run time budget is strictly tight. Specifically, the run time of the searching algorithm in Gamma and Mind Mappings is about 10x larger than Random-Pruned.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.2.">Accelerator configuration not in the Training</head><p>Dataset (Accel-B). We use the same set of workloads as in Fig. <ref type="figure" target="#fig_1">3(a)(b</ref>), but change the accelerator configuration to Accel-B, which is not in the training dataset of the surrogate model of the gradient-based method. As shown in Fig. <ref type="figure" target="#fig_1">3(c)(d)</ref>, the gradient-based method cannot perform as well as it did for the trained accelerator configuration, Accel-A. It demonstrates that the trained surrogate model does not generalize across accelerator configurations. Note that we can also re-train the surrogate model for the new accelerator configuration, which will recover the performance. However, it will require another full-fledged DNN training. Besides, we also need to collect 1 -5 million of new training data to achieve quality results <ref type="bibr" target="#b18">[19]</ref>.</p><p>Variance of Accelerator Configurations. The randombased and feedback-based method take workloads and accelerator configurations as inputs and therefore are agnostic to variance in accelerator configurations. In contrast, the gradient-based method train its surrogate model based on Fig. <ref type="figure">6</ref>: Crossover (blending two mappings) sensitivity analysis using operators in Gamma <ref type="bibr" target="#b27">[28]</ref>. Standard-GA uses the standard mutation and crossover (without domain-specific operators along each mapping axes designed in Gamma <ref type="bibr" target="#b27">[28]</ref>).</p><p>a collected training dataset. The training dataset includes collected workloads and collected accelerator configurations. While surrogate model can generalize the workload encoding across different DNNs models <ref type="bibr" target="#b18">[19]</ref>, the generalization of accelerator configurations is more challenging since arbitrary buffer levels, buffer sizes, PE sizes, and other details (Fig. <ref type="figure">2</ref>) can be made. Thus the surrogate model is tied to one or few accelerator configurations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.3.">Visualization of the Sampling Points.</head><p>To better understand how different algorithms behave in the map space, we plot their sampling points in Fig. <ref type="figure" target="#fig_2">4</ref> using the workload and accelerator configuration in Fig. <ref type="figure" target="#fig_1">3</ref>(a). Fig. <ref type="figure" target="#fig_2">4(a)</ref> shows the entire map space while dark red represent higherperformance points. There is a large low-performing region at the center while some small clusters of the high-performing points (green circle) scatter across the space. Fig. <ref type="figure" target="#fig_2">4</ref>(b) shows the points different algorithms actually sampled. Given the limited 5,000 sampling budget, The Random-Pruned method only samples around the lower-performing region because most of the design points sit here. Mind Mappings starts with the lower-performing region and gradient-updates to the higher-performing regions at the right. However, it sits at the local optimum. Gamma also starts with a lower-performing region but can explore a wider region faster because of its population-based method (which is common in many feedback-based algorithms <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b32">33]</ref>). Gamma reached one of the high-performance regions, as shown in Fig. <ref type="figure" target="#fig_2">4</ref> We pick Gamma, the feedback-based method, as our main mapper for the rest of the discussion in this paper.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4.">Understanding Mapper Search Operators</head><p>Recall that there are three mapping axes in the map space, tile, order, and parallelism. Gamma has dedicated genetic operators to explore along these axes, i.e., mutatetile, mutate-order, and mutate-parallelism. It also houses a crossover operator to blend two high-performant mappings to create the next candidate mapping samples. Note that each genetic operator is specifically tuned to adapt to this map space as shown in the Gamma paper <ref type="bibr" target="#b27">[28]</ref>, which is the key source of sampling efficiency over other black-box optimizers, including RL and standard GA. As Fig. <ref type="figure">6</ref> shows, full-fledged Gamma (dotted orange line) performs an order of magnitude better than standard GA across the three evaluated workloads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>4.4.1.</head><p>Mapping Axis Sensitivity Analysis. In Fig. <ref type="figure" target="#fig_4">5</ref>, we explore each mapping axis individually (keeping the other two fixed) via the mutation operator in Gamma <ref type="bibr" target="#b27">[28]</ref> such as mutate-tile for tile exploration, mutate-order for order exploration and so on. We find mutate-tile to have the highest impact on EDP compared to the other components.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4.2.">Crossover Sensitivity</head><p>Analysis. Gamma has crossover operator which blends two mapping points to create the next candidate mapping points. We execute a sensitivity analysis of crossover in Fig. <ref type="figure">6</ref>. We find that Order group:</p><p>Order group: Fig. <ref type="figure">7</ref>: The EDP difference of the same mapping with different loop order. We sweep through all 7! order combinations assuming all the buffer level utilize the same order. The 7! different mapping leads to 16 different EDP performance, with the best and the worst EDP differs by 14.4x times (under Resnet Conv_4, Accel-B).</p><p>disabling crossover (light green) can hugely impact the potential performance compared to full-fledged Gamma (dotted orange). However, crossover-only without other operators (dark blue) is also not adequate. Crossover working with all the dedicated mutation operators for the three maxing axes (dotted orange) can maximize the sampling efficiency of the mapper (Gamma) and ends up giving the most optimized performance.</p><p>Takeaway of comparing operators in a mapper: • If one were to incrementally implement different exploration functions along the mapping axes, starting with the tile exploration would be the most cost-effective option. • Blending two high-performance mappings (crossover) can effectively create another high-performance mapping. • The ability to explore different order and parallelism dimensions choices is not as critical as tile size exploration to optimize EDP performance. • Note that even when fixing the order or parallelism throughout the optimization process, at the initialization stage, we still randomly initialized order and parallelism for the initial populations (a groups of initial sampling points). It implies that few explorations of order and parallelism are often adequate to give competitive mapping. It is owing to the fact that many combinations of order or parallelism will lead to similar latency or energy performance, as we discuss later in §4.4.3. • The performance difference of two mapping for the same problem can be as large as 3 orders of magnitude difference, consistent with prior works <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b33">34,</ref><ref type="bibr" target="#b43">44]</ref>.</p><p>4.4.3. Loop Order Sensitivity Analysis. We perform a sweep of loop order permutations to demonstrate our observation that many order permutations lead to similar performance as observed above. We use the found mapping in the experiment setting in Fig. <ref type="figure">6</ref>(a) and swap out the order permutation by enumerating through all the possibilities. The search space is as large as (7!) 3 =1.28E+11. We add a constraint that each level of the buffer will use the same order TABLE 2: MSE for workload with weight sparsity. In each columns, the blue cell shows the performance of the optimized mapping for the sparse workload; the rest of the cells shows the performnace of the same mapping tested with the workload with different sparsity. We highlight the bestperforming cell of each row by green text. We can observe that the blue cells overlap with green texts, indicating that different workload with different sparsity levels do require different mapping to optimize the performance.  to relax the complexity, which becomes 7!=5,040 choices. Fig. <ref type="figure">7</ref> shows that there are only 16 different EDP values out of 5,040 different mappings. We can observe some patterns in each of the same performance mapping groups, as shown in Fig. <ref type="figure">7</ref>. For example, "XY.." means the permutation starting with XY. The loop order at the DRAM buffer level of the original mapping found by Gamma (XB..) also falls in the high-performance order group.</p><p>Takeaway. Many order permutations will lead to similar energy or latency performance. This is why various loop orders can be placed into large "stationarity" buckets (such as weight/ input/ output/ row) <ref type="bibr" target="#b7">[8,</ref><ref type="bibr" target="#b33">34,</ref><ref type="bibr" target="#b43">44]</ref> or inner/ outer product <ref type="bibr" target="#b70">[71]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5.">Understanding Sparse Accelerator Mappings</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5.1.">Need of MSE for Flexible Sparse Accelerator.</head><p>There is a series of research proposing ways to prune DNN models <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b39">40,</ref><ref type="bibr" target="#b50">51,</ref><ref type="bibr" target="#b67">68,</ref><ref type="bibr" target="#b68">69,</ref><ref type="bibr" target="#b79">80]</ref>. However, the pruned models often cannot achieve as much performance gain in hardware as proven by the algorithmic analysis because of the increase complexity to find efficient mapping. There are several sparse accelerators <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b28">29,</ref><ref type="bibr" target="#b36">37,</ref><ref type="bibr" target="#b44">45,</ref><ref type="bibr" target="#b47">48,</ref><ref type="bibr" target="#b73">74,</ref><ref type="bibr" target="#b76">77,</ref><ref type="bibr" target="#b77">78]</ref> for efficiently running sparse workloads, skipping zeros in the weights and/or activations. However, they often employ a fixed mapping (or a limited set of mappings). Given the nascent domain, MSE for flexible sparse accelerators is relatively unexplored, with one study looking into it <ref type="bibr" target="#b70">[71]</ref> in contrast to several MSE studies for flexible dense accelerators <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b6">7,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b22">23,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b48">49,</ref><ref type="bibr" target="#b63">64,</ref><ref type="bibr" target="#b72">73,</ref><ref type="bibr" target="#b78">79]</ref>. This leaves MSE for sparse accelerators and workloads an area with plenty of opportunity to explore.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5.2.">Mapping Search for Sparse Weights.</head><p>For model pruning, we often focus on pruning out the weight of the models, essentially some weight becomes zero. Density 1.0 means dense weight, and density 0.5 means 50% of the weights are zero. In Table <ref type="table">2</ref>, we use workloads with different weight densities and use MSE to search for optimized mappings. The performance of found mappings are recorded in the blue cell. For example, the mapping found for Resnet CONV_3 with 0.5 density has EDP performance Do we need different mappings for different sparsity? We take the optimized mapping targeting a specific workload with a specific density (blue cell) and test it with the same workload with different densities. For e.g., at the top-left blue cell (Table <ref type="table">2</ref>), we have an optimized mapping for the dense workload (density 1.0). Then we use the same mapping and test its performance under 0.5, 0.1, 0.01 density degrees, whose performance is recorded in the bottom cells. We perform the same experiment for the other three columns. We mark the best-performing cell across each row with green text. We can observe that the best-performing ones always located in the blue cell, meaning to optimize mapping for specific sparsity of the workload is needed to pursue the best performance. Takeaway. A dense mapping cannot generalize across sparsity workloads. Different sparsity levels of the workload require different mappings to maximize the performance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5.3.">Sparse Inner and Outer</head><p>Product. An observation that many sparse accelerators papers have made is that inner product accelerators often perform better for low sparsity workloads and outer product accelerators perform better at high amounts of sparsity <ref type="bibr" target="#b42">[43,</ref><ref type="bibr" target="#b44">45]</ref>. We study this general observation using the MSE framework. We assume the underlying sparse accelerator is flexible to support both inner and outer product style mapping. Inner and outer products are essentially affecting the loop order. Therefore, we fix the loop order and perform MSE for the other two axes (parallelism and tile sizes). Table <ref type="table" target="#tab_3">3</ref> shows that the inner product style with optimized mapping consistently outperforms the outer product counterparts for workload density larger than 0.5, while the outer product style has an edge over the inner product style at densities smaller than 0.1. Takeaway. From the viewpoint of MSE, we are able to validate the observation that inner product style mappings are better for denser workloads while outer product style works better at high sparsity.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.6.">Lessons Learnt</head><p>We summarize two key takeaways from our analysis:</p><p>• The feedback based mapper has the highest sampling efficiency and can directly work for any workload and accelerator configurations. However, it has the highest wall-clock time to acquire one sample (10x more costly than random-based mappers, e.g., Random-Pruned <ref type="bibr" target="#b43">[44]</ref>). Neural architecture search is leading to new DNN models coming out frequently with highly irregular tensor shapes, increasing the demand for sampleefficient MSE. • MSE needs to consider sparsity. While the sparsity of the weight is often fixed for a trained DNN models, the sparsity of activations is dynamic. When facing activation sparsity, we would either under-utilize the hardware because of inefficient mapping or would need to re-launch the MSE again and again for every input-activation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Improving MSE</head><p>From our analysis and takeaways from §4, we focus on the two open-challenges identified above for next-generation mappers: search speed and sparsity. We propose two heuristics -"warm start" and "sparsity-aware" to address these.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1.">Warm-start</head><p>5.1.1. Motivation. We introduce warm-start to reduce the search time. This method is inspired by two observations. (1) Informed by the study in §4.4 and §4.4.3, we know that order and parallelism are often less sensitive from workload to workload. ( <ref type="formula">2</ref>) Because of the nature of the DNN operations (CONV, FC, and others), consecutive layers often have some dimensions the same or similar to each other. Therefore potentially the mapping of the later layers can be inspired by the found mapping of the previous layer. 5.1.2. Proposed Warm-start Search Mechanism. Fig. <ref type="figure" target="#fig_8">8</ref> shows our warm-start flow. We introduce a replay buffer within the MSE framework which stores the optimized mapping of each workload (i.e., DNN layer) that has been run so far. We initialize the algorithm with the solution of the highest-similarity workload in the replay buffer.</p><p>MSE Flow. Warm-start works via the following flow.</p><p>Step-1: When the new workload comes, we compare the workload similarity to the workloads in the replay buffer. We use editing distance as the similarity metric. Step-2: Initialize     the algorithm with the mapping with the highest-similarity by (i) Inherit the order and parallelism parts of the solution, and (ii) Scale the tile sizes to match the tensor dimensions of the current workload.</p><p>Step-3: Run the search algorithm.</p><p>Walk-Through Example. In Fig. <ref type="figure" target="#fig_8">8</ref> as an example, there are two workloads that are finished with their final optimized mapping stored in the replay buffer. The next workload, workload-3, comes and will go through warm-start block before entering optimization loop. In the warm-start block, we use editing distance to compare the similarity between the current workload and the workloads in the replay buffer. E.g., workload-3 is only differ from workload-1 in the Cdimension, leading to editing distance of 1; similarity, editing distance with workload-2 is 3 (K, Y, X). Therefore, we pick the stored optimized mapping for workload-1 (Map1), scale it to match the tensor shape of workload-3 (i.e., multiply C tile size by 2 at the outer-most tiling level (L3 mapping)), and use it as the initialized mapping for the optimization.</p><p>Similarity. Typically, for most DNNs we find that previous layer has the highest-similarity score. However, there are some exceptions: 1) the layers can come out-of-order because Warm-start is an initialization technique. In Fig. <ref type="figure">9</ref>, we show the performance of the initialized mapping of warm-start by similarity (yellow bar), warm-start by previous layers (red bar), and the default random initialization (blue bar). We evaluate workloads from two DNN models, VGG <ref type="bibr" target="#b55">[56]</ref> and Mnasnet <ref type="bibr" target="#b60">[61]</ref>. Many DNN models are made by human experts, where the shape of each layer are often designed with high regularity such as VGG <ref type="bibr" target="#b55">[56]</ref> and Resnet <ref type="bibr" target="#b17">[18]</ref>. In these models, warm-start by previous layers and warm-start by similarity make no difference, since the highest-similarity layers are almost always the previous layers, as shown in workload ID 1 -4. However, the shape of the workloads in the Mnasnet, a network found by neural architecture search, are more irregular. Therefore warm-start by similarity becomes essential, providing 2x better performance than warm-start by previous layers. However, both warm-start strategies are effective and are 2.1x and 4.3x better than random initialization.</p><p>Impact of Warm-start Search. Warm-start reduces the time to converge. Fig. <ref type="figure">10</ref> shows the converge curve of the first layer and a later layer to perform MSE on VGG16 <ref type="bibr" target="#b55">[56]</ref>. For the first layers (VGG Conv_1), there are no previous solution in the replay buffer. Therefore, searching with random initialization or with warm-start initialization has no difference. However, for the later layers (VGG Conv_13), searching with warm-start initialized with better points and converges faster.</p><p>We perform MSE for all layers in 4 DNN models with and without warm-start. Fig. <ref type="figure" target="#fig_11">11(a)</ref> shows that searching with warm-start does not affect the quality of the found solutions, i.e., the EDP values are as low as the default algorithm. Meanwhile, warm-start can converge 3.3x-7.3x faster (we define time-to-converge as the time to reach 99.5% of performance improvement. In the figure we use the number of generation-to-converge, an equivalent index of time-to-converge.). We observe that Mnasnet <ref type="bibr" target="#b60">[61]</ref> enjoys the least speedup. It is because Mnasnet is a result of neural architecture search, with irregular tensor shapes in each layer. Therefore scaling from previously-seen solutions will perform not as close to the optimized as in regular networks such as Resnet <ref type="bibr" target="#b17">[18]</ref>, VGG <ref type="bibr" target="#b55">[56]</ref>, Mobilenet <ref type="bibr" target="#b52">[53]</ref>, which are manual designed. Nonetheless, warm-start for Mnasnet can still converge 3.3x faster.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.">Sparsity-aware MSE</head><p>5.2.1. Motivation. In §4.5.2 we identified the need different mappings for different sparsity of workloads. While tackling weight sparsity is straightforward because weight sparsity is often fixed at model deploy time, tackling activation sparsity is challenging. Since the activation sparsity is not known a priori before runtime, and it differs per each input data, rather than asking MSE to search for the optimal mappings for all layers and all runtime dynamic sparsity levels, we ask MSE to search for "a sparsity-aware mapping" that is efficient across a range of sparsity levels. The only information the MSE relies on is what is the typical "range" of sparsity level for a given workload, e.g., 1.0 -0.1 for a typical DNN workload.</p><p>It is not practical to search for an optimal mapping for each new input-activation. We want to seek out if we can discover a mapping that can generalize across a range of sparsity levels to tackle the dynamic sparsity in activations? 5.2.2. Proposed Sparsity-aware Search Mechanism. We propose sparsity-aware mapping search, which works as follows. When executing MSE, we don't look at the actual density level of each activation (since it is dynamic). Instead, we assume and impose sparsity in the workload when executing MSE. We impose the activation to have a density from 1.0 to 0.1, which is the typical range of activation density in DNN <ref type="bibr" target="#b36">[37,</ref><ref type="bibr" target="#b44">45,</ref><ref type="bibr" target="#b47">48,</ref><ref type="bibr" target="#b73">74,</ref><ref type="bibr" target="#b76">77,</ref><ref type="bibr" target="#b77">78]</ref>. Next, when executing MSE, we score the mapping by the performance of this mapping on workload across the sweep of density levels (Fig. <ref type="figure" target="#fig_8">8</ref>).</p><p>Scoring a Mapping. We score a mapping by the weighted sum of the performance. We use a heuristic that "the hardware performance (e.g., latency, energy) is with positive correlation to the density of the workload" to decide the TABLE 4: Comparisons of sparsity-aware technique and static-density heuristic when tackling the activation sparsity. The static-density heuristic searches mapping for a fixed density level (1.0, 0.5, or 0.1). At search time, the sparsityaware technique are enabled to see the performance of a mapping on a limited sets of density levels, which are randomly picked, e.g., 1.0, 0.8, 0.5, 0.2, and 0.1 in this experiments (marked as blue cells). We highlight the bestperforming one in each row with green text. Sparsity-aware will find one fixed mapping solution. We test the found mapping with a range of density (1.0 -0.05) and record their performance. Note that many of the density levels (in 1.0 -0.05) are never seen by MSE at search time. The result indicates that sparsity-aware technique can find mapping with comparable performance to the static-density ones across a range of sparsity. weighting. We pick the weighting by the factor of density <ref type="foot" target="#foot_2">7</ref>For example, assuming we have two density levels, 0.5 and 1.0, with hardware performance Perf 0.5 and Perf 1.0 , then the (weighted sum) score is: Perf 0.5 0.5 + Perf 1.0 1.0 .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.3.">Evaluation.</head><p>We compare the "sparsity-aware" ( §5.2.1) with "static-density" in Table <ref type="table">4</ref>. Both "sparsity-aware"and "static-density" are agnostic to the actual workload density. "Static-density 1.0" always assumes the workload is dense when searching. "Static-density 0.5" searches the mapping assuming the workload has 0.5 density, and "Static-density 0.1" assumes 0.1 density. "Sparsity-aware" searches the mapping assuming the workload density range from 1.0 -0.1. Specifically, we use 5 density levels: 1.0, 0.8, 0.5, 0.2, and 0.1 (blue cells in the first column), which are picked by heuristics. That is, when evaluating the mapping in the optimization loop, we scored the mapping by the performance of this mapping under workload density levels of 1.0, 0.8, 0.5, 0.2, and 0.1, and used the weighted sum of the performance as the final scores for the mapping. The scores are used to select which mappings proceed to the next iteration of the optimization loop. We test the found mappings of the four strategies (columns) in Table <ref type="table">4</ref> by workload with density from 1.0 to 0.05. The performance of each is recorded in the corresponding rows. We make two observations: 1) The "sparsityaware" can reach comparable performance to the "staticdensity" ones at the density levels, for which the "staticdensities" are specifically optimized. For example, "staticdensity 1.0" found a mapping with EDP 2.39E+13 (cycles uJ) at density level 1.0. The mapping found by "sparsity-aware" can perform at a comparable EDP of 2.40E+13 (cycles uJ).</p><p>2) Aware of a range of sparsity (1.0 -0.1), "sparsity-aware" can successfully find a mapping that can generalize across a range of sparsity. A fixed mapping found by "sparsity-aware" can achieve (in geomean) 99.7% of performance to the performance of each of the mappings specifically searched for different density levels.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Related works</head><p>Map Space Exploration. Many mappers (search algorithms) with different algorithmic techniques are proposed to tackle the MSE problem. Timeloop-mapper <ref type="bibr" target="#b43">[44]</ref>, Simba <ref type="bibr" target="#b53">[54]</ref>, dmazeRunner <ref type="bibr" target="#b11">[12]</ref>, Interstellar <ref type="bibr" target="#b74">[75]</ref>, and others <ref type="bibr">[13, 14, 41, 55, 57-60, 63, 66, 67, 70, 76]</ref> use random sampling on a raw or pruned search space. Gamma <ref type="bibr" target="#b27">[28]</ref>, Autotvm <ref type="bibr" target="#b6">[7]</ref>, and others <ref type="bibr" target="#b29">[30,</ref><ref type="bibr" target="#b59">60,</ref><ref type="bibr" target="#b63">64]</ref> use genetic algorithms. Tiramisu <ref type="bibr" target="#b2">[3]</ref> and Tensor Comprehensions <ref type="bibr" target="#b63">[64]</ref> use constrained optimization. HASCO <ref type="bibr" target="#b72">[73]</ref> and Reagen et. al <ref type="bibr" target="#b49">[50]</ref> uses Bayesian optimization, RELEASE <ref type="bibr" target="#b1">[2]</ref>, ConfuciuX <ref type="bibr" target="#b26">[27]</ref>, and FlexTensor <ref type="bibr" target="#b78">[79]</ref> uses reinforcement learning. Mind Mappings <ref type="bibr" target="#b18">[19]</ref> uses a neural network-based surrogate model to replace the cost model and directly uses backpropagation to learn a solution that maximizes the objective. There are also other techniques such as mixed-integer programming in CoSA <ref type="bibr" target="#b22">[23]</ref>, MCMC search in FlexFlow <ref type="bibr" target="#b24">[25]</ref>, and others <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b48">49,</ref><ref type="bibr" target="#b63">64]</ref>. While there have been plenty of mappers proposed, a deeper analysis of how the MSE works and how different mapping axes contribute to the performance is often lacking, which this work performs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Conclusion</head><p>MSE for NPUs is a computationally expensive problem with active ongoing research. There is, however, no work, to the best of our knowledge, that has focused on understanding how different state-of-the-art mappers navigate the mapspace across different axes. This work performs a deepdive analysis on MSE using heuristic and learning-based mappers and identifies their strengths and weaknesses. We also propose two new techniques -warm-start and sparsityaware -to enable scalability to emerging large, irregular and sparse DNNs. We hope that by our analysis, we can make MSE more approachable and understandable to a broader community, and propel the invention of advanced mapping search techniques.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Fig. 3 :</head><label>3</label><figDesc>Fig. 3: Comparisons of different types of mappers. Top figures show the converge curve across number of samples. Bottom figures show the converge curve across wall clock time.</figDesc><graphic url="image-6.png" coords="5,188.33,152.07,121.50,63.33" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Fig. 4 :</head><label>4</label><figDesc>Fig. 4: (a) shows the sampled points by exhaustively sampling the search space of (Resnet Conv_4, Accel-A). The 3D visualization is projected by PCA dimension reduction. (b) shows the sampled points of different types of mappers in this search space.</figDesc><graphic url="image-10.png" coords="5,54.00,253.66,243.01,81.47" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head></head><label></label><figDesc><ref type="bibr" target="#b27">[28]</ref>, a genetic algorithm (GA) based method, keeps a population of candidate solutions, uses specifically designed mutation operators to perturb populations to explore different mapping axes (tile, order, parallelism), and uses crossover to create next generations of populations. Gamma has been shown to beat other optimization techniques, including reinforcement learning<ref type="bibr" target="#b27">[28,</ref><ref type="bibr" target="#b29">30]</ref>. • Mind Mappings (gradient-based): Mind Mappings [19] trains a neural-network-based surrogate model via offline sampling of millions of data points collected from the cost model. It uses the loss gradient to update its solution. During MSE, it utilizes gradientdescent on this surrogate model to find mappings, instead of searching.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Fig. 5 :</head><label>5</label><figDesc>Fig.5: Mapping axes sensitivity analysis using the mutation operators in Gamma<ref type="bibr" target="#b27">[28]</ref>. E.g., Tile (blue): means mutating tile only, i.e, only tile is explored, and other mapping axes are fixed, similarly for (mutate-)Order and (mutate-)Parallelism.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head></head><label></label><figDesc>(b). Takeaway of comparing different mappers: • Learning-based methods, including gradient-based and feedback-based, can keep improving the quality of the sampling function over searching iterations, leading to better sampling efficiency. • When the time constraint is strictly tight so that the learning-based methods cannot yet gather adequate data to improve their sampling function (i.e., still at explo-ration phase instead of exploitation), the random-based method is the most cost-effective choice. • The surrogate model of the gradient-based method is trained on a collected training dataset, where the accelerator configuration is often fixed. The trained surrogate model cannot generalize across different accelerator configurations.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head></head><label></label><figDesc>XY..,XB..,XR..,XS..,SX.. C.., RC.., SC.. Level Order Parallel dims Tile Size (B,K,C,Y,X,R,S) Optimized mapping: EDP: 3.0E+10 (cycles uJ), Latency:1.8E+6 (cycles), Energy: 1.7E+4 (uJ)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Fig. 8 :</head><label>8</label><figDesc>Fig. 8: The workflow of proposed Warm-start and Sparsity-aware techniques in MSE.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head></head><label></label><figDesc>K,C,Y,X,R,S)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Fig. 9 :Fig. 10 :</head><label>910</label><figDesc>Fig. 9: Performance comparisons of initialized solution by Random Init and two types of warm-start Init comparing to the final optimized performance (after search). The EDP values are normalized by final optimized EDP (green bars).</figDesc><graphic url="image-20.png" coords="9,74.53,381.77,102.79,52.41" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Fig. 11 :</head><label>11</label><figDesc>Fig. 11: The benefit of warm-start (by similarity) when executing MSE. Warm-start MSE achieves comparable EDP performance to default MSE, but converges 3.3-7.3x faster. Different colors represent different layers of the DNN models. of other compiler decisions or 2) irregular tensor shapes of the workloads created by neural architecture search. 5.1.3. Evaluation. Impact of Warm-start Initialization.Warm-start is an initialization technique. In Fig.9, we show the performance of the initialized mapping of warm-start by similarity (yellow bar), warm-start by previous layers (red bar), and the default random initialization (blue bar). We evaluate workloads from two DNN models, VGG<ref type="bibr" target="#b55">[56]</ref> and Mnasnet<ref type="bibr" target="#b60">[61]</ref>. Many DNN models are made by human experts, where the shape of each layer are often designed with high regularity such as VGG<ref type="bibr" target="#b55">[56]</ref> and Resnet<ref type="bibr" target="#b17">[18]</ref>. In these models, warm-start by previous layers and warm-start by similarity make no difference, since the highest-similarity layers are almost always the previous layers, as shown in workload ID 1 -4. However, the shape of the workloads in the Mnasnet, a network found by neural architecture search, are more irregular. Therefore warm-start by similarity becomes essential, providing 2x better performance than warm-start by previous layers. However, both warm-start strategies are effective and are 2.1x and 4.3x better than random initialization.Impact of Warm-start Search. Warm-start reduces the time to converge. Fig.10shows the converge curve of the first layer and a later layer to perform MSE on VGG16<ref type="bibr" target="#b55">[56]</ref>. For the first layers (VGG Conv_1), there are no previous</figDesc><graphic url="image-18.png" coords="9,176.96,382.50,107.17,51.60" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>TABLE 1 :</head><label>1</label><figDesc>The description of the relevant workloads and accelerator configurations used across evaluations.</figDesc><table><row><cell>Workload</cell><cell>(B,K,C,Y,X,R,S)</cell><cell></cell><cell>Accelerator</cell></row><row><cell>Resnet Conv_3</cell><cell>(16,128,128,28,28,3,3)</cell><cell></cell><cell>Configuration</cell></row><row><cell>Resnet Conv_4</cell><cell>(16,256,256,14,14,3,3)</cell><cell>Accel</cell><cell>512 KB shared buffer, 64 KB private buffer</cell></row><row><cell cols="2">Inception Conv_2 (16,192,192,27,27,5,5)</cell><cell>A</cell><cell>per PE, 256 PEs, 1</cell></row><row><cell>Workload</cell><cell>(B,M,K,N)</cell><cell></cell><cell>ALUs per PE</cell></row><row><cell>Bert-Large KQV</cell><cell>(16,1024,1024,512)</cell><cell></cell><cell>64 KB shared buffer,</cell></row><row><cell></cell><cell></cell><cell>Accel</cell><cell>256 B private buffer</cell></row><row><cell>Bert-Large Attn</cell><cell>(16,512,1024,512)</cell><cell>B</cell><cell>per PE, 256 PEs, 4</cell></row><row><cell>Bert-Large FF</cell><cell>(16,4096,1024,512)</cell><cell></cell><cell>ALUs per PE</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>TABLE 3 :</head><label>3</label><figDesc></figDesc><table><row><cell></cell><cell></cell><cell cols="2">EDP (cycles uJ)</cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell cols="2">Bert-large KQV</cell><cell cols="2">Bert-large Attn</cell><cell cols="2">Bert-large FC</cell></row><row><cell>Workload</cell><cell>Inner</cell><cell>Outer</cell><cell>Inner</cell><cell>Outer</cell><cell>Inner</cell><cell>Outer</cell></row><row><cell>Density</cell><cell>Product</cell><cell>Product</cell><cell>Product</cell><cell>Product</cell><cell>Product</cell><cell>Product</cell></row><row><cell>1.0</cell><cell cols="6">7.6E+11 9.8E+11 1.9E+11 2.5E+11 7.8E+14 9.1E+14</cell></row><row><cell>0.5</cell><cell cols="6">1.1E+11 1.4E+11 2.8E+10 3.6E+10 1.5E+14 1.5E+14</cell></row><row><cell>0.1</cell><cell cols="6">9.0E+08 1.6E+05 3.4E+08 3.6E+08 1.4E+12 1.1E+08</cell></row><row><cell>0.01</cell><cell cols="6">1.9E+05 1.6E+05 2.0E+05 8.0E+04 1.8E+08 1.1E+08</cell></row></table><note>The optimized EDP performance of inner and outer product style mapping on sparse-dense GEMM workloads in Bert-large model<ref type="bibr" target="#b64">[65]</ref>. The workload density indicates the density of the sparse matrix. Bert-large KQV: the key/ query/ value projection operations. Bert-large Attn: the attention operation, Bert-large FC: the FC operations at the end of attention blocks.</note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc><ref type="bibr" target="#b15">(16,</ref> 120,<ref type="bibr" target="#b39">40,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b27">28</ref>, 1, 1) 9 (16, 1152, 192, 7, 7, 1, 1) 10<ref type="bibr" target="#b15">(16,</ref> 128, 128, 112, 112,<ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b2">3)</ref> </figDesc><table><row><cell>Random</cell><cell>Warm-start by</cell><cell>Warm-start by</cell></row><row><cell>Init</cell><cell>previous layer</cell><cell>similarity</cell></row><row><cell cols="3">Final optimized mapping VGG Mnasnet</cell><cell>VGG</cell><cell>1 (16, 128, 128, 112, 112, 3, 3) 2 (16, 256, 256, 56, 56, 3, 3) 3 (16, 512, 256, 28, 28, 3, 3)</cell></row><row><cell></cell><cell></cell><cell></cell><cell>4 (16, 512, 512, 14, 14, 3, 3)</cell></row><row><cell></cell><cell></cell><cell></cell><cell>5</cell><cell>(16, 72, 24, 56, 56, 1, 1)</cell></row><row><cell cols="4">6 7 8 1 Mnasnet</cell><cell>(16, 24, 72, 56, 56, 1, 1) (16, 40, 72, 28, 28, 1, 1)</cell></row><row><cell>In geomean,</cell><cell cols="2">5.0x higher, 2.3x higher,</cell><cell>1.2x higher , compared to</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_0">. In this paper, we focus on finding optimized mapping for individual DNN layers/operators, which has been the target of most Map-Space Exploration tools. We leave Inter-layer mappings via operator-fusion as future work.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_1">. Timeloop includes both a cost model and mappers. Throughout this paper, we refer to the former as Timeloop and the latter as Timeloop-mapper. Timeloop-mapper itself supports a variety of search heuristics, with the default being Random-Pruned which we use. We also run other mappers using Timeloop as the cost model.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="7" xml:id="foot_2">. We pick the weighting linear to density, since we experiment only with activation sparsity (not weight) in our evaluation.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>We thank Yannan Wu for the advice and support on Sparseloop setup. This work was supported in-part by NSF Award #1909900.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Nvdla deep learning accelerator</title>
+		<ptr target="http://nvdla.org" />
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Reinforcement learning and adaptive sampling for optimized dnn compilation</title>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">H</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Pilligundla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Esmaeilzadeh</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1905.12799</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Tiramisu: A polyhedral compiler for expressing fast and portable code</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Baghdadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">B</forename><surname>Romdhane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Del Sozzo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Akkas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Suriana</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kamil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="193" to="205" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">Once-for-all: Train one network and specialize it for efficient deployment</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1908.09791</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">Proxylessnas: Direct neural architecture search on target task and hardware</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1812.00332</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Marvel: A data-centric compiler for dnn operators on spatial accelerators</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Chatarasi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Raina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Malik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Haridas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Pellauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sarkar</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2002.07752</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Learning to optimize tensor programs</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Moreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Guestrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="3389" to="3400" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Eyeriss: An energy-efficient reconfigurable accelerator for deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Y.-H</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">JSSC</title>
+		<imprint>
+			<biblScope unit="volume">52</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="127" to="138" />
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Eyeriss v2: A flexible accelerator for emerging deep neural networks on mobile devices</title>
+		<author>
+			<persName><forename type="first">Y.-H</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T.-J</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Journal on Emerging and Selected Topics in Circuits and Systems</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="292" to="308" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Eyeriss: An Energy-Efficient Reconfigurable Accelerator for Deep Convolutional Neural Networks</title>
+		<author>
+			<persName><forename type="first">Yu-Hsin</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krishna</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tushar</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><surname>Sze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vivienne</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Solid-State Circuits Conference, ISSCC 2016</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="262" to="263" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Generating long sequences with sparse transformers</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1904.10509</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Dmazerunner: Executing perfectly nested loops on dataflow accelerators</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Dave</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Avancha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Shrivastava</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Embedded Computing Systems (TECS)</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">5s</biblScope>
+			<biblScope unit="page" from="1" to="27" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Tangram: Optimized coarse-grained dataflow for scalable nn accelerators</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Gao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="807" to="820" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Tetris: Scalable and efficient neural network acceleration with 3d memory</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Pu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Horowitz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Second International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting>the Twenty-Second International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="751" to="764" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Polly-polyhedral optimization in llvm</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Grosser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Aloor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Simbürger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Größlinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L.-N</forename><surname>Pouchet</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the First International Workshop on Polyhedral Compilation Techniques (IMPACT)</title>
+				<meeting>the First International Workshop on Polyhedral Compilation Techniques (IMPACT)</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="volume">2011</biblScope>
+			<biblScope unit="page">1</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Reweighted proximal pruning for large-scale language representation</title>
+		<author>
+			<persName><forename type="first">F.-M</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><forename type="middle">S</forename><surname>Mungall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1909.12486</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">The cma evolution strategy: a comparing review</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Hansen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Towards a new evolutionary computation</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="75" to="102" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Deep residual learning for image recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE conference on computer vision and pattern recognition</title>
+				<meeting>the IEEE conference on computer vision and pattern recognition</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="770" to="778" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Mind mappings: enabling efficient algorithm-accelerator mapping space search</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Hegde</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Chandra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">W</forename><surname>Fletcher</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting>the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="943" to="958" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Evolution under strong noise: A self-adaptive evolution strategy can reach the lower performance bound-the pccmsaes</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hellwig</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on PPSN3</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="26" to="36" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Genetic algorithms</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">H</forename><surname>Holland</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Scientific american</title>
+		<imprint>
+			<biblScope unit="volume">267</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="66" to="73" />
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Ruby: Improving hardware efficiency for tensor algebra accelerators through imperfect factorization</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Horeni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Taheri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Joshi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2022 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Cosa: Scheduling by constrained optimization for spatial accelerators</title>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kalaiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Demmel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dinh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Wawrzynek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Norell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Shao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="554" to="566" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Union: A unified hwsw co-design ecosystem in mlir for evaluating tensor operations on spatial accelerators</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Jeong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Kestor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Chatarasi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Rajamanickam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Gioiosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2021 30th International Conference on Parallel Architectures and Compilation Techniques (PACT)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="30" to="44" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Beyond data and model parallelism for deep neural networks</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Aiken</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1807.05358</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Smash: Codesigning software compression and hardware-accelerated indexing for efficient sparse matrix operations</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kanellopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vijaykumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Giannoula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Azizi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Koppula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">M</forename><surname>Ghiasi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Shahroodi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">G</forename><surname>Luna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd annual IEEE/ACM international symposium on microarchitecture</title>
+				<meeting>the 52nd annual IEEE/ACM international symposium on microarchitecture</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="600" to="614" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Confuciux: Autonomous hardware resource assignment for dnn accelerators using reinforcement learning</title>
+		<author>
+			<persName><forename type="first">S.-C</forename><surname>Kao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Jeong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="622" to="636" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Gamma: Automating the hw mapping of dnn models on accelerators via genetic algorithm</title>
+		<author>
+			<persName><forename type="first">S.-C</forename><surname>Kao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICCAD</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">E3: A hw/sw co-design neuroevolution platform for autonomous learning in edge device</title>
+	</analytic>
+	<monogr>
+		<title level="m">2021 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Magma: An optimization framework for mapping multiple dnns on multiple accelerator cores</title>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE International Symposium on High-Performance Computer Architecture (HPCA-28)</title>
+				<imprint>
+			<biblScope unit="page">2022</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Digamma: Domain-aware genetic algorithm for hw-mapping co-optimization for dnn accelerators</title>
+		<author>
+			<persName><forename type="first">S.-C</forename><surname>Kao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Pellauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Design, Automation and Test in Europe Conference (DATE)</title>
+				<imprint>
+			<biblScope unit="page">2022</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">An optimized dataflow for mitigating attention performance bottlenecks</title>
+		<author>
+			<persName><forename type="first">S.-C</forename><surname>Kao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Subramanian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Agrawal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2107.06419</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Particle swarm optimization</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kennedy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICNN</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="volume">4</biblScope>
+			<biblScope unit="page" from="1942" to="1948" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Understanding reuse, performance, and hardware cost of dnn dataflow: A data-centric approach</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Chatarasi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Pellauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sarkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture</title>
+				<meeting>the 52nd Annual IEEE/ACM International Symposium on Microarchitecture</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="754" to="768" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Maestro: A data-centric approach to understand reuse, performance, and hardware cost of dnn mappings</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Chatarasi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sarkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Pellauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">40</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="20" to="29" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Maeri: Enabling flexible dataflow mapping over dnn accelerators via reconfigurable interconnects</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Samajdar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">53</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="461" to="475" />
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Stitch-x: An accelerator architecture for exploiting unstructured sparsity in deep neural networks</title>
+		<author>
+			<persName><forename type="first">C.-E</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Shao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-F</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SysML Conference</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">120</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">Pruning filters for efficient convnets</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kadav</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Durdanovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Samet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">P</forename><surname>Graf</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1608.08710</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Progressive neural architecture search</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Neumann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Hua</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L.-J</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Fei-Fei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Yuille</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Murphy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the European conference on computer vision (ECCV)</title>
+				<meeting>the European conference on computer vision (ECCV)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="19" to="34" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Rethinking the value of network pruning</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Darrell</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1810.05270</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Flexflow: A flexible dataflow accelerator architecture for convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">W</forename><surname>Lu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="553" to="564" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Zigzag: Enlarging joint architecture-mapping design space exploration for dnn accelerators</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Mei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Houshmand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Giraldo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Verhelst</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Computers</title>
+		<imprint>
+			<biblScope unit="volume">70</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<biblScope unit="page" from="1160" to="1174" />
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Outerspace: An outer product based sparse matrix multiplication accelerator</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Pal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Beaumont</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D.-H</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Amarnath</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Chakrabarti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-S</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Blaauw</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Mudge</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Dreslinski</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Symposium on High Performance Computer Architecture (HPCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="724" to="736" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Timeloop: A systematic approach to dnn accelerator evaluation</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Raina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Shao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y.-H</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">A</forename><surname>Ying</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mukkara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Venkatesan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Khailany</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="304" to="315" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Scnn: An accelerator for compressed-sparse convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Rhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mukkara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Puglielli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Venkatesan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Khailany</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGARCH Computer Architecture News</title>
+		<imprint>
+			<biblScope unit="volume">45</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="27" to="40" />
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Buffets: An efficient and composable storage idiom for explicit decoupled data orchestration</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Pellauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Shao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Clemons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Crago</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Hegde</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Venkatesan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">W</forename><surname>Fletcher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting>the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="137" to="151" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<monogr>
+		<title level="m" type="main">Efficient neural architecture search via parameter sharing</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">Y</forename><surname>Guan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1802.03268</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<monogr>
+		<title level="m" type="main">Sigma: A sparse and irregular gemm accelerator with flexible interconnects for dnn training</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Samajdar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Nadella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Das</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kaul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Halide: a language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ragan-Kelley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Barnes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Paris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Durand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Acm Sigplan Notices</title>
+		<imprint>
+			<biblScope unit="volume">48</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="519" to="530" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">A case for efficient accelerator design space exploration via bayesian optimization</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Reagen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Hernández-Lobato</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Adolf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Gelbart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Whatmough</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G.-Y</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Brooks</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2017 IEEE/ACM International Symposium on Low Power Electronics and Design (ISLPED)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="1" to="6" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<monogr>
+		<title level="m" type="main">Poor man&apos;s bert: Smaller and faster transformer models</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Sajjad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Dalvi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Durrani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Nakov</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2004.03844</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><surname>Samajdar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Whatmough</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mattina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1811.02883</idno>
+		<title level="m">Scale-sim: Systolic cnn accelerator simulator</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Mo-bilenetv2: Inverted residuals and linear bottlenecks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zhmoginov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L.-C</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE conference on computer vision and pattern recognition</title>
+				<meeting>the IEEE conference on computer vision and pattern recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="4510" to="4520" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<title level="m" type="main">Simba: Scaling deep-learning inference with multichip-module-based architecture</title>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Shao</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<publisher>MICRO</publisher>
+			<biblScope unit="page" from="14" to="27" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Maximizing cnn accelerator efficiency through resource partitioning</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ferdman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Milder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2017 ACM/IEEE 44th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<monogr>
+		<title level="m" type="main">Very deep convolutional networks for large-scale image recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zisserman</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1409.1556</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">Hypar: Towards hybrid parallelism for deep learning accelerator array</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Song</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="56" to="68" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">Towards efficient microarchitectural design for accelerating unsupervised gan-based deep learning</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Song</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="66" to="77" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<title level="m" type="main">Optimally scheduling cnn convolutions for efficient memory access</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Stoutchinin</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1902.01492</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">Throughput-optimized opencl-based fpga accelerator for large-scale convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Suda</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">FPGA&apos;16</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="16" to="25" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Mnasnet: Platform-aware neural architecture search for mobile</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition</title>
+				<meeting>the IEEE Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="2820" to="2828" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<monogr>
+		<title level="m" type="main">Efficientnet: Rethinking model scaling for convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1905.11946</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<analytic>
+		<title level="a" type="main">Triton: an intermediate language and compiler for tiled neural network computations</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tillet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-T</forename><surname>Kung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Cox</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages</title>
+				<meeting>the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="10" to="19" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<monogr>
+		<title level="m" type="main">Tensor comprehensions: Framework-agnostic high-performance machine learning abstractions</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Vasilache</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Zinenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Theodoridis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Devito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">S</forename><surname>Moses</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Verdoolaege</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Cohen</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1802.04730</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<analytic>
+		<title level="a" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ł</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Polosukhin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="5998" to="6008" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<monogr>
+		<title level="m" type="main">Scaledeep: A scalable compute architecture for learning and evaluating deep networks</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Venkataramani</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<publisher>MICRO</publisher>
+			<biblScope unit="page" from="13" to="26" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<analytic>
+		<title level="a" type="main">Deeptools: Compiler and execution runtime extensions for rapid ai accelerator</title>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="102" to="111" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<monogr>
+		<title level="m" type="main">Spatten: Efficient sparse attention architecture with cascade token and head pruning</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2012.09852</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b68">
+	<monogr>
+		<title level="m" type="main">Structured pruning of large language models</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Wohlwend</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Lei</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1910.04732</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b69">
+	<analytic>
+		<title level="a" type="main">Automated systolic array architecture synthesis for high throughput cnn inference on fpgas</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Wei</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">DAC</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="1" to="6" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b70">
+	<analytic>
+		<title level="a" type="main">Sparseloop: An analytical, energy-focused design space exploration methodology for sparse tensor accelerators</title>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">N</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">S</forename><surname>Emer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2021 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="232" to="234" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b71">
+	<analytic>
+		<title level="a" type="main">Sparseloop: An Analytical Approach To Sparse Tensor Accelerator Modeling</title>
+	</analytic>
+	<monogr>
+		<title level="m">ACM/IEEE International Symposium on Microarchitecture (MICRO)</title>
+				<imprint>
+			<biblScope unit="page">2022</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b72">
+	<analytic>
+		<title level="a" type="main">Hasco: Towards agile hardware and software co-design for tensor computation</title>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1055" to="1068" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b73">
+	<analytic>
+		<title level="a" type="main">Sparse reram engine: Joint exploration of activation and weight sparsity in compressed neural networks</title>
+		<author>
+			<persName><forename type="first">T.-H</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-Y</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C.-L</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I.-C</forename><surname>Tseng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-W</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-S</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H.-P</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th International Symposium on Computer Architecture</title>
+				<meeting>the 46th International Symposium on Computer Architecture</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="236" to="249" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b74">
+	<analytic>
+		<title level="a" type="main">Interstellar: Using halide&apos;s scheduling language to analyze dnn accelerators</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Yang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="369" to="383" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b75">
+	<analytic>
+		<title level="a" type="main">Optimizing fpga-based accelerator design for deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Guan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Cong</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2015 ACM/SIGDA International Symposium on Field-Programmable Gate Arrays</title>
+				<meeting>the 2015 ACM/SIGDA International Symposium on Field-Programmable Gate Arrays</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="161" to="170" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b76">
+	<analytic>
+		<title level="a" type="main">Snap: An efficient sparse neural acceleration processor for unstructured sparse deep neural network inference</title>
+		<author>
+			<persName><forename type="first">J.-F</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C.-E</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">S</forename><surname>Shao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Journal of Solid-State Circuits</title>
+		<imprint>
+			<biblScope unit="volume">56</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="636" to="647" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b77">
+	<analytic>
+		<title level="a" type="main">Cambricon-x: An accelerator for sparse neural networks</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 49th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b78">
+	<analytic>
+		<title level="a" type="main">Flextensor: An automatic schedule exploration and optimization framework for tensor computation on heterogeneous system</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Sheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting>the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="859" to="873" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b79">
+	<monogr>
+		<title level="m" type="main">To prune, or not to prune: exploring the efficacy of pruning for model compression</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gupta</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1710.01878</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

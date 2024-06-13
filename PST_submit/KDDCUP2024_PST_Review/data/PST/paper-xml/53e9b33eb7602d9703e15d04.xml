@@ -1,0 +1,761 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Memory Resource Management in VMware ESX Server</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author role="corresp">
+							<persName><forename type="first">Carl</forename><forename type="middle">A</forename><surname>Waldspurger</surname></persName>
+							<email>carl@vmware.com</email>
+							<affiliation key="aff0">
+								<orgName type="institution">VMware, Inc</orgName>
+								<address>
+									<postCode>94304</postCode>
+									<settlement>Palo Alto</settlement>
+									<region>CA</region>
+									<country key="US">USA</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Memory Resource Management in VMware ESX Server</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="MD5">325ABA5ADD9050DABF8C69FCB25414C6</idno>
+					<note type="submission">Received best paper award.</note>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.3" ident="GROBID" when="2023-07-28T04:24+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>VMware ESX Server is a thin software layer designed to multiplex hardware resources efficiently among virtual machines running unmodified commodity operating systems. This paper introduces several novel ESX Server mechanisms and policies for managing memory. A ballooning technique reclaims the pages considered least valuable by the operating system running in a virtual machine. An idle memory tax achieves efficient memory utilization while maintaining performance isolation guarantees. Content-based page sharing and hot I/O page remapping exploit transparent page remapping to eliminate redundancy and reduce copying overheads. These techniques are combined to efficiently support virtual machine workloads that overcommit memory.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Recent industry trends, such as server consolidation and the proliferation of inexpensive shared-memory multiprocessors, have fueled a resurgence of interest in server virtualization techniques. Virtual machines are particularly attractive for server virtualization. Each virtual machine (VM) is given the illusion of being a dedicated physical machine that is fully protected and isolated from other virtual machines. Virtual machines are also convenient abstractions of server workloads, since they cleanly encapsulate the entire state of a running system, including both user-level applications and kernelmode operating system services.</p><p>In many computing environments, individual servers are underutilized, allowing them to be consolidated as virtual machines on a single physical server with little or no performance penalty. Similarly, many small servers can be consolidated onto fewer larger machines to simplify management and reduce costs. Ideally, system administrators should be able to flexibly overcommit memory, processor, and other resources in order to reap the benefits of statistical multiplexing, while still providing resource guarantees to VMs of varying importance.</p><p>Virtual machines have been used for decades to allow multiple copies of potentially different operating systems to run concurrently on a single hardware platform <ref type="bibr" target="#b7">[8]</ref>. A virtual machine monitor (VMM) is a software layer that virtualizes hardware resources, exporting a virtual hardware interface that reflects the underlying machine architecture. For example, the influential VM/370 virtual machine system <ref type="bibr" target="#b5">[6]</ref> supported multiple concurrent virtual machines, each of which believed it was running natively on the IBM System/370 hardware architecture <ref type="bibr" target="#b9">[10]</ref>. More recent research, exemplified by Disco <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b8">9]</ref>, has focused on using virtual machines to provide scalability and fault containment for commodity operating systems running on large-scale sharedmemory multiprocessors.</p><p>VMware ESX Server is a thin software layer designed to multiplex hardware resources efficiently among virtual machines. The current system virtualizes the Intel IA-32 architecture <ref type="bibr" target="#b12">[13]</ref>. It is in production use on servers running multiple instances of unmodified operating systems such as Microsoft Windows 2000 Advanced Server and Red Hat Linux 7.2. The design of ESX Server differs significantly from VMware Workstation, which uses a hosted virtual machine architecture <ref type="bibr" target="#b22">[23]</ref> that takes advantage of a pre-existing operating system for portable I/O device support. For example, a Linux-hosted VMM intercepts attempts by a VM to read sectors from its virtual disk, and issues a read() system call to the underlying Linux host OS to retrieve the corresponding data. In contrast, ESX Server manages system hardware directly, providing significantly higher I/O performance and complete control over resource management.</p><p>The need to run existing operating systems without modification presented a number of interesting challenges. Unlike IBM's mainframe division, we were unable to influence the design of the guest operating systems running within virtual machines. Even the Disco prototypes <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b8">9]</ref>, designed to run unmodified operating systems, resorted to minor modifications in the IRIX kernel sources.</p><p>This paper introduces several novel mechanisms and policies that ESX Server 1.5 <ref type="bibr" target="#b28">[29]</ref> uses to manage memory. High-level resource management policies compute a target memory allocation for each VM based on specified parameters and system load. These allocations are achieved by invoking lower-level mechanisms to reclaim memory from virtual machines. In addition, a background activity exploits opportunities to share identical pages between VMs, reducing overall memory pressure on the system.</p><p>In the following sections, we present the key aspects of memory resource management using a bottom-up approach, describing low-level mechanisms before discussing the high-level algorithms and policies that coordinate them. Section 2 describes low-level memory virtualization. Section 3 discusses mechanisms for reclaiming memory to support dynamic resizing of virtual machines. A general technique for conserving memory by sharing identical pages between VMs is presented in Section 4. Section 5 discusses the integration of working-set estimates into a proportional-share allocation algorithm. Section 6 describes the high-level allocation policy that coordinates these techniques. Section 7 presents a remapping optimization that reduces I/O copying overheads in large-memory systems. Section 8 examines related work. Finally, we summarize our conclusions and highlight opportunities for future work in Section 9.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Memory Virtualization</head><p>A guest operating system that executes within a virtual machine expects a zero-based physical address space, as provided by real hardware. ESX Server gives each VM this illusion, virtualizing physical memory by adding an extra level of address translation. Borrowing terminology from Disco <ref type="bibr" target="#b2">[3]</ref>, a machine address refers to actual hardware memory, while a physical address is a software abstraction used to provide the illusion of hardware memory to a virtual machine. We will often use "physical" in quotes to highlight this deviation from its usual meaning.</p><p>ESX Server maintains a pmap data structure for each VM to translate "physical" page numbers (PPNs) to machine page numbers (MPNs). VM instructions that manipulate guest OS page tables or TLB contents are intercepted, preventing updates to actual MMU state. Separate shadow page tables, which contain virtual-tomachine page mappings, are maintained for use by the processor and are kept consistent with the physical-to-machine mappings in the pmap. <ref type="foot" target="#foot_0">1</ref> This approach permits ordinary memory references to execute without additional overhead, since the hardware TLB will cache direct virtual-to-machine address translations read from the shadow page table . 
+
+The extra level of indirection in the memory system is extremely powerful. The server can remap a "physical" page by changing its PPN-to-MPN mapping, in a manner that is completely transparent to the VM. The server may also monitor or interpose on guest memory accesses.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Reclamation Mechanisms</head><p>ESX Server supports overcommitment of memory to facilitate a higher degree of server consolidation than would be possible with simple static partitioning. Overcommitment means that the total size configured for all running virtual machines exceeds the total amount of actual machine memory. The system manages the allocation of memory to VMs automatically based on configuration parameters and system load.</p><p>Each virtual machine is given the illusion of having a fixed amount of physical memory. This max size is a configuration parameter that represents the maximum amount of machine memory it can be allocated. Since commodity operating systems do not yet support dynamic changes to physical memory sizes, this size remains constant after booting a guest OS. A VM will be allocated its maximum size when memory is not overcommitted.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Page Replacement Issues</head><p>When memory is overcommitted, ESX Server must employ some mechanism to reclaim space from one or more virtual machines. The standard approach used by earlier virtual machine systems is to introduce another level of paging <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b19">20]</ref>, moving some VM "physical" pages to a swap area on disk. Unfortunately, an extra level of paging requires a meta-level page replacement policy: the virtual machine system must choose not only the VM from which to revoke memory, but also which of its particular pages to reclaim.</p><p>In general, a meta-level page replacement policy must make relatively uninformed resource management decisions. The best information about which pages are least valuable is known only by the guest operating system within each VM. Although there is no shortage of clever page replacement algorithms <ref type="bibr" target="#b25">[26]</ref>, this is actually the crux of the problem. A sophisticated meta-level policy is likely to introduce performance anomalies due to unintended interactions with native memory management policies in guest operating systems. This situation is exacerbated by diverse and often undocumented guest OS policies <ref type="bibr" target="#b0">[1]</ref>, which may vary across OS versions and may even depend on performance hints from applications <ref type="bibr" target="#b3">[4]</ref>.</p><p>The fact that paging is transparent to the guest OS can also result in a double paging problem, even when the meta-level policy is able to select the same page that the native guest OS policy would choose <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b19">20]</ref>. Suppose the meta-level policy selects a page to reclaim and pages it out. If the guest OS is under memory pressure, it may choose the very same page to write to its own virtual paging device. This will cause the page contents to be faulted in from the system paging device, only to be immediately written out to the virtual paging device.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Ballooning</head><p>Ideally, a VM from which memory has been reclaimed should perform as if it had been configured with less memory. ESX Server uses a ballooning technique to achieve such predictable performance by coaxing the guest OS into cooperating with it when possible. This process is depicted in Figure <ref type="figure">1</ref>.</p><p>A small balloon module is loaded into the guest OS as a pseudo-device driver or kernel service. It has no external interface within the guest, and communicates with ESX Server via a private channel. When the server wants to reclaim memory, it instructs the driver to "inflate" by allocating pinned physical pages within the VM, using appropriate native interfaces. Similarly, the server may "deflate" the balloon by instructing it to deallocate previously-allocated pages.</p><p>Inflating the balloon increases memory pressure in the guest OS, causing it to invoke its own native memory management algorithms. When memory is plentiful, the guest OS will return memory from its free list. When memory is scarce, it must reclaim space to satisfy the driver allocation request. The guest OS decides which particular pages to reclaim and, if necessary, pages them out to its own virtual disk. The balloon driver communicates the physical page number for each allocated page to ESX Server, which may then reclaim the corresponding machine page. Deflating the balloon frees up Although a guest OS should not touch any physical memory it allocates to a driver, ESX Server does not depend on this property for correctness. When a guest PPN is ballooned, the system annotates its pmap entry and deallocates the associated MPN. Any subsequent attempt to access the PPN will generate a fault that is handled by the server; this situation is rare, and most likely the result of complete guest failure, such as a reboot or crash. The server effectively "pops" the balloon, so that the next interaction with (any instance of) the guest driver will first reset its state. The fault is then handled by allocating a new MPN to back the PPN, just as if the page was touched for the first time. <ref type="foot" target="#foot_1">2</ref>Our balloon drivers for the Linux, FreeBSD, and Windows operating systems poll the server once per second to obtain a target balloon size, and they limit their allocation rates adaptively to avoid stressing the guest OS. Standard kernel interfaces are used to allocate physical pages, such as get free page() in Linux, and MmAllocatePagesForMdl() or MmProbeAndLock-Pages() in Windows.</p><p>Future guest OS support for hot-pluggable memory cards would enable an additional form of coarse-grained ballooning. Virtual memory cards could be inserted into or removed from a VM in order to rapidly adjust its physical memory size.</p><p>To demonstrate the effectiveness of ballooning, we used the synthetic dbench benchmark <ref type="bibr" target="#b27">[28]</ref> to simulate fileserver performance under load from 40 clients. This workload benefits significantly from additional memory, since a larger buffer cache can absorb more disk traffic. For this experiment, ESX Server was running on a dualprocessor Dell Precision 420, configured to execute one VM running Red Hat Linux 7.2 on a single 800 MHz Pentium III CPU.</p><p>Figure <ref type="figure" target="#fig_0">2</ref> presents dbench throughput as a function of VM size, using the average of three consecutive runs for each data point. The ballooned VM tracks nonballooned performance closely, with an observed overhead ranging from 4.4% at 128 MB (128 MB balloon) down to 1.4% at 224 MB <ref type="bibr">(32 MB balloon)</ref>. This overhead is primarily due to guest OS data structures that are sized based on the amount of "physical" memory; the Linux kernel uses more space in a 256 MB system than in a 128 MB system. Thus, a 256 MB VM ballooned down to 128 MB has slightly less free space than a VM configured with exactly 128 MB.</p><p>Despite its advantages, ballooning does have limitations. The balloon driver may be uninstalled, disabled explicitly, unavailable while a guest OS is booting, or temporarily unable to reclaim memory quickly enough to satisfy current system demands. Also, upper bounds on reasonable balloon sizes may be imposed by various guest OS limitations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Demand Paging</head><p>ESX Server preferentially uses ballooning to reclaim memory, treating it as a common-case optimization. When ballooning is not possible or insufficient, the system falls back to a paging mechanism. Memory is reclaimed by paging out to an ESX Server swap area on disk, without any guest involvement.</p><p>The ESX Server swap daemon receives information about target swap levels for each VM from a higherlevel policy module. It manages the selection of candidate pages and coordinates asynchronous page outs to a swap area on disk. Conventional optimizations are used to maintain free slots and cluster disk writes.</p><p>A randomized page replacement policy is used to prevent the types of pathological interference with native guest OS memory management algorithms described in Section 3.1. This choice was also guided by the expectation that paging will be a fairly uncommon operation. Nevertheless, we are investigating more sophisticated page replacement algorithms, as well policies that may be customized on a per-VM basis.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Sharing Memory</head><p>Server consolidation presents numerous opportunities for sharing memory between virtual machines. For example, several VMs may be running instances of the same guest OS, have the same applications or components loaded, or contain common data. ESX Server exploits these sharing opportunities, so that server workloads running in VMs on a single machine often consume less memory than they would running on separate physical machines. As a result, higher levels of overcommitment can be supported efficiently.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Transparent Page Sharing</head><p>Disco <ref type="bibr" target="#b2">[3]</ref> introduced transparent page sharing as a method for eliminating redundant copies of pages, such as code or read-only data, across virtual machines. Once copies are identified, multiple guest "physical" pages are mapped to the same machine page, and marked copyon-write. Writing to a shared page causes a fault that generates a private copy.</p><p>Unfortunately, Disco required several guest OS modifications to identify redundant copies as they were created. For example, the bcopy() routine was hooked to enable file buffer cache sharing across virtual machines. Some sharing also required the use of non-standard or restricted interfaces. A special network interface with support for large packets facilitated sharing data communicated between VMs on a virtual subnet. Interposition on disk accesses allowed data from shared, nonpersistent disks to be shared across multiple guests.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Content-Based Page Sharing</head><p>Because modifications to guest operating system internals are not possible in our environment, and changes to application programming interfaces are not acceptable, ESX Server takes a completely different approach to page sharing. The basic idea is to identify page copies by their contents. Pages with identical contents can be shared regardless of when, where, or how those contents were generated. This general-purpose approach has two key advantages. First, it eliminates the need to modify, hook, or even understand guest OS code. Second, it can identify more opportunities for sharing; by definition, all potentially shareable pages can be identified by their contents.</p><p>The cost for this unobtrusive generality is that work must be performed to scan for sharing opportunities. Clearly, comparing the contents of each page with every other page in the system would be prohibitively expensive; naive matching would require O( ¢¡ ) page com- parisons. Instead, hashing is used to identify pages with potentially-identical contents efficiently.</p><p>A hash value that summarizes a page's contents is used as a lookup key into a hash table containing entries for other pages that have already been marked copy-onwrite (COW). If the hash value for the new page matches an existing entry, it is very likely that the pages are identical, although false matches are possible. A successful match is followed by a full comparison of the page contents to verify that the pages are identical.</p><p>Once a match has been found with an existing shared page, a standard copy-on-write technique can be used to share the pages, and the redundant copy can be reclaimed. Any subsequent attempt to write to the shared page will generate a fault, transparently creating a private copy of the page for the writer.</p><p>If no match is found, one option is to mark the page COW in anticipation of some future match. However, this simplistic approach has the undesirable side-effect of marking every scanned page copy-on-write, incurring unnecessary overhead on subsequent writes. As an op- timization, an unshared page is not marked COW, but instead tagged as a special hint entry. On any future match with another page, the contents of the hint page are rehashed. If the hash has changed, then the hint page has been modified, and the stale hint is removed. If the hash is still valid, a full comparison is performed, and the pages are shared if it succeeds.</p><p>Higher-level page sharing policies control when and where to scan for copies. One simple option is to scan pages incrementally at some fixed rate. Pages could be considered sequentially, randomly, or using heuristics to focus on the most promising candidates, such as pages marked read-only by the guest OS, or pages from which code has been executed. Various policies can be used to limit CPU overhead, such as scanning only during otherwise-wasted idle cycles.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Implementation</head><p>The ESX Server implementation of content-based page sharing is illustrated in Figure <ref type="figure">3</ref>. A single global hash table contains frames for all scanned pages, and chaining is used to handle collisions. Each frame is encoded compactly in 16 bytes. A shared frame consists of a hash value, the machine page number (MPN) for the shared page, a reference count, and a link for chaining. A hint frame is similar, but encodes a truncated hash value to make room for a reference back to the corresponding guest page, consisting of a VM identifier and a physical page number (PPN). The total space overhead for page sharing is less than 0.5% of system memory.</p><p>Unlike the Disco page sharing implementation, which maintained a backmap for each shared page, ESX Server uses a simple reference count. A small 16-bit count is stored in each frame, and a separate overflow table is used to store any extended frames with larger counts. This allows highly-shared pages to be represented compactly. For example, the empty zero page filled completely with zero bytes is typically shared with a large reference count. A similar overflow technique for large reference counts was used to save space in the early OOZE virtual memory system <ref type="bibr" target="#b14">[15]</ref>.</p><p>A fast, high-quality hash function <ref type="bibr" target="#b13">[14]</ref> is used to generate a 64-bit hash value for each scanned page. Since the chance of encountering a false match due to hash aliasing is incredibly small 3 the system can make the simplifying assumption that all shared pages have unique hash values. Any page that happens to yield a false match is considered ineligible for sharing.</p><p>The current ESX Server page sharing implementation scans guest pages randomly. Although more sophisticated approaches are possible, this policy is simple and effective. Configuration options control maximum per-VM and system-wide page scanning rates. Typically, these values are set to ensure that page sharing incurs negligible CPU overhead. As an additional optimization, the system always attempts to share a page before paging it out to disk.</p><p>To evaluate the ESX Server page sharing implementation, we conducted experiments to quantify its effectiveness at reclaiming memory and its overhead on system performance. We first analyze a "best case" workload consisting of many homogeneous VMs, in order to demonstrate that ESX Server is able to reclaim a large fraction of memory when the potential for sharing exists. We then present additional data collected from production deployments serving real users.</p><p>We performed a series of controlled experiments using identically-configured virtual machines, each running Red Hat Linux 7.2 with 40 MB of "physical" memory. Each experiment consisted of between one and ten 3 Assuming page contents are randomly mapped to 64-bit hash values, the probability of a single collision doesn't exceed 50% until approximately ¡ £¢ ¥¤ §¦ ¨¡ £© distinct pages are hashed <ref type="bibr" target="#b13">[14]</ref>. For a static snapshot of the largest possible IA-32 memory configuration with ¡ ¤ pages (64 GB), the collision probability is less than 0.01%.  Figure <ref type="figure" target="#fig_1">4</ref> presents several sharing metrics plotted as a function of the number of concurrent VMs. Surprisingly, some sharing is achieved with only a single VM. Nearly 5 MB of memory was reclaimed from a single VM, of which about 55% was due to shared copies of the zero page. The top graph shows that after an initial jump in sharing between the first and second VMs, the total amount of memory shared increases linearly with the number of VMs, as expected. Little sharing is attributed to zero pages, indicating that most sharing is due to redundant code and read-only data pages. The bottom graph plots these metrics as a percentage of aggregate VM memory. As the number of VMs increases, the sharing level approaches 67%, revealing an overlap of approximately two-thirds of all memory between the VMs. The amount of memory required to contain the single copy of each common shared page (labelled Shared -Reclaimed), remains nearly constant, decreasing as a percentage of overall VM memory.  The CPU overhead due to page sharing was negligible. We ran an identical set of experiments with page sharing disabled, and measured no significant difference in the aggregate throughput reported by the CPU-bound benchmarks running in the VMs. Over all runs, the aggregate throughput was actually 0.5% higher with page sharing enabled, and ranged from 1.6% lower to 1.8% higher. Although the effect is generally small, page sharing does improve memory locality, and may therefore increase hit rates in physically-indexed caches.</p><p>These experiments demonstrate that ESX Server is able to exploit sharing opportunities effectively. Of course, more diverse workloads will typically exhibit lower degrees of sharing. Nevertheless, many real-world server consolidation workloads do consist of numerous VMs running the same guest OS with similar applications. Since the amount of memory reclaimed by page sharing is very workload-dependent, we collected memory sharing statistics from several ESX Server systems in production use.</p><p>Figure <ref type="figure" target="#fig_2">5</ref> presents page sharing metrics collected from three different production deployments of ESX Server. Workload , from a corporate IT department at a Fortune 50 company, consists of ten Windows NT 4.0 VMs running a wide variety of database, web, and other servers. Page sharing reclaimed nearly a third of all VM memory, saving 673 MB. Workload ¡ , from a nonprofit organization's Internet server, consists of nine Linux VMs ranging in size from 64 MB to 768 MB, running a mix of mail, web, and other servers. In this case, page sharing was able to reclaim 18.7% of VM memory, saving 345 MB, of which 70 MB was attributed to zero pages. Finally, workload ¢ is from VMware's own IT department, and provides web proxy, mail, and remote access services to our employees using five Linux VMs ranging in size from 32 MB to 512 MB. Page sharing reclaimed about 7% of VM memory, for a savings of 120 MB, of which 25 MB was due to zero pages.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Shares vs. Working Sets</head><p>Traditional operating systems adjust memory allocations to improve some aggregate, system-wide performance metric. While this is usually a desirable goal, it often conflicts with the need to provide quality-ofservice guarantees to clients of varying importance. Such guarantees are critical for server consolidation, where each VM may be entitled to different amounts of resources based on factors such as importance, ownership, administrative domains, or even the amount of money paid to a service provider for executing the VM. In such cases, it can be preferable to penalize a less important VM, even when that VM would derive the largest performance benefit from additional memory.</p><p>ESX Server employs a new allocation algorithm that is able to achieve efficient memory utilization while maintaining memory performance isolation guarantees. In addition, an explicit parameter is introduced that allows system administrators to control the relative importance of these conflicting goals.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Share-Based Allocation</head><p>In proportional-share frameworks, resource rights are encapsulated by shares, which are owned by clients that consume resources. <ref type="foot" target="#foot_2">4</ref> A client is entitled to consume resources proportional to its share allocation; it is guaranteed a minimum resource fraction equal to its fraction of the total shares in the system. Shares represent relative resource rights that depend on the total number of shares contending for a resource. Client allocations degrade gracefully in overload situations, and clients proportionally benefit from extra resources when some allocations are underutilized.</p><p>Both randomized and deterministic algorithms have been proposed for proportional-share allocation of space-shared resources. The dynamic min-funding revocation algorithm <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b31">32]</ref> is simple and effective. When one client demands more space, a replacement algorithm selects a victim client that relinquishes some of its previously-allocated space. Memory is revoked from the client that owns the fewest shares per allocated page. Using an economic analogy, the shares-per-page ratio can be interpreted as a price; revocation reallocates memory away from clients paying a lower price to those willing to pay a higher price.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Reclaiming Idle Memory</head><p>A significant limitation of pure proportional-share algorithms is that they do not incorporate any information about active memory usage or working sets. Memory is effectively partitioned to maintain specified ratios. However, idle clients with many shares can hoard memory unproductively, while active clients with few shares suffer under severe memory pressure. In general, the goals of performance isolation and efficient memory utilization often conflict. Previous attempts to cross-apply techniques from proportional-share CPU resource management to compensate for idleness have not been successful <ref type="bibr" target="#b24">[25]</ref>.</p><p>ESX Server resolves this problem by introducing an idle memory tax. The basic idea is to charge a client more for an idle page than for one it is actively using. When memory is scarce, pages will be reclaimed preferentially from clients that are not actively using their full allocations. The tax rate specifies the maximum fraction of idle pages that may be reclaimed from a client. If the client later starts using a larger portion of its allocated memory, its allocation will increase, up to its full share.</p><p>Min-funding revocation is extended to use an adjusted shares-per-page ratio. For a client with shares and an allocation of ¡ pages, of which a fraction ¢ are active, the adjusted shares-per-page ratio £ is £ ¥¤ ¡ §¦ ©¢ ¥ ¦ ¢ "! #!</p><p>where the idle page cost $¤ % '&amp; ( ) 0 1! for a given tax rate 2 ¥3 40 65 7 .</p><p>The tax rate 0 provides explicit control over the de- sired policy for reclaiming idle memory. At one extreme, 0 §¤ 82 specifies pure share-based isolation. At the other, 0 @9 A specifies a policy that allows all of a client's idle memory to be reclaimed for more productive uses.</p><p>The ESX Server idle memory tax rate is a configurable parameter that defaults to 75%. This allows most idle memory in the system to be reclaimed, while still providing a buffer against rapid working set increases, masking the latency of system reclamation activity such as ballooning and swapping. <ref type="foot" target="#foot_3">5</ref></p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Measuring Idle Memory</head><p>For the idle memory tax to be effective, the server needs an efficient mechanism to estimate the fraction of memory in active use by each virtual machine. However, specific active and idle pages need not be identified individually.</p><p>One option is to extract information using native interfaces within each guest OS. However, this is impractical, since diverse activity metrics are used across various guests, and those metrics tend to focus on per-process working sets. Also, guest OS monitoring typically relies on access bits associated with page table entries, which are bypassed by DMA for device I/O. ESX Server uses a statistical sampling approach to obtain aggregate VM working set estimates directly, without any guest involvement. Each VM is sampled independently, using a configurable sampling period defined in units of VM execution time. At the start of each sampling period, a small number of the virtual machine's "physical" pages are selected randomly using a uniform distribution. Each sampled page is tracked by invalidating any cached mappings associated with its PPN, such as hardware TLB entries and virtualized MMU state. The next guest access to a sampled page will be intercepted to re-establish these mappings, at which time a touched page count B is incremented. At the end of the sampling period, a statistical estimate of the fraction ¢ of memory actively accessed by the VM is ¢ 6¤ CB D&amp; .</p><p>The sampling rate may be controlled to tradeoff overhead and accuracy. By default, ESX Server samples 100 pages for each 30 second period. This results in at most 100 minor page faults per period, incurring negligible overhead while still producing reasonably accurate working set estimates.</p><p>Estimates are smoothed across multiple sampling periods. Inspired by work on balancing stability and agility from the networking domain <ref type="bibr" target="#b15">[16]</ref>, we maintain separate exponentially-weighted moving averages with different gain parameters. A slow moving average is used to produce a smooth, stable estimate. A fast moving average  adapts quickly to working set changes. Finally, a version of the fast average that incorporates counts from the current sampling period is updated incrementally to reflect rapid intra-period changes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Memory (MB)</head><note type="other">Slow Fast Max Toucher ZPT Figure 6</note><p>The server uses the maximum of these three values to estimate the amount of memory being actively used by the guest. This causes the system to respond rapidly to increases in memory usage and more gradually to decreases in memory usage, which is the desired behavior. A VM that had been idle and starts using memory is allowed to ramp up to its share-based allocation quickly, while a VM that had been active and decreases its working set has its idle memory reclaimed slowly via the idle memory tax.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Experimental Results</head><p>This section presents quantitative experiments that demonstrate the effectiveness of memory sampling and idle memory taxation. Memory sampling is used to estimate the fraction of memory actively used by each VM. These estimates are then incorporated into the idle memory tax computations performed by the share-based memory allocation algorithm.  share allocations are each configured with 256 MB in an overcommitted system. VM1 (gray) runs Windows, and remains idle after booting. VM2 (black) executes a memory-intensive Linux workload. For each VM, ESX Server allocations are plotted as solid lines, and estimated memory usage is indicated by dotted lines. With an initial tax rate of 0%, the VMs each converge on the same 179 MB allocation. When the tax rate is increased to 75%, idle memory is reclaimed from VM1 and reallocated to VM2, boosting its performance by over 30%.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VM running Windows 2000 Advanced Server on a single 800 MHz Pentium III CPU.</head><p>A user-level toucher application allocates and repeatedly accesses a controlled amount of memory that is varied between 50 MB and 250 MB. An additional 10-20 MB is accessed by standard Windows background activities. As expected, the statistical estimate of active memory usage responds quickly as more memory is touched, tracking the fast moving average, and more slowly as less memory is touched, tracking the slow moving average. We were originally surprised by the unexpected spike immediately after the toucher application terminates, an effect that does not occur when the same experiment is run under Linux. This is caused by the Windows "zero page thread" that runs only when no other threads are runnable, clearing the contents of pages it moves from the free page list to the zeroed page list <ref type="bibr" target="#b21">[22]</ref>.</p><p>Figure <ref type="figure" target="#fig_5">7</ref> presents experimental results that demonstrate the effectiveness of imposing a tax on idle memory. For this experiment, ESX Server was running on a Dell Precision 420 multiprocessor with two 800 MHz Pentium III CPUs and 512 MB RAM, of which approximately 360 MB was available for executing VMs. <ref type="foot" target="#foot_4">6</ref>Two VMs with identical share allocations are each configured with 256 MB "physical" memory. The first VM that powers on runs Windows 2000 Advanced Server, and remains idle after booting. A few minutes later, a second VM is started, running a memoryintensive dbench workload <ref type="bibr" target="#b27">[28]</ref> under Red Hat Linux 7.2. The initial tax rate is set to 0 C¤ 2 , resulting in a pure share-based allocation. Despite the large difference in actual memory usage, each VM receives the same 179 MB allocation from ESX Server. In the middle of the experiment, the tax rate is increased to 0 7¤ A2 ¡ ¢ ¤£ , causing memory to be reclaimed from the idle Windows VM and reallocated to the active Linux VM running dbench. The dbench workload benefits significantly from the additional memory, increasing throughput by over 30% after the tax rate change.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Allocation Policies</head><p>ESX Server computes a target memory allocation for each VM based on both its share-based entitlement and an estimate of its working set, using the algorithm presented in Section 5. These targets are achieved via the ballooning and paging mechanisms presented in Section 3. Page sharing runs as an additional background activity that reduces overall memory pressure on the system. This section describes how these various mechanisms are coordinated in response to specified allocation parameters and system load.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Parameters</head><p>System administrators use three basic parameters to control the allocation of memory to each VM: a min size, a max size, and memory shares. The min size is a guaranteed lower bound on the amount of memory that will be allocated to the VM, even when memory is overcommitted. The max size is the amount of "physical" memory configured for use by the guest OS running in the VM. Unless memory is overcommitted, VMs will be allocated their max size.</p><p>Memory shares entitle a VM to a fraction of physical memory, based on a proportional-share allocation policy. For example, a VM that has twice as many shares as another is generally entitled to consume twice as much memory, subject to their respective min and max constraints, provided they are both actively using their allocated memory.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Admission Control</head><p>An admission control policy ensures that sufficient unreserved memory and server swap space is available before a VM is allowed to power on. Machine memory must be reserved for the guaranteed min size, as well as additional overhead memory required for virtualization, for a total of min + overhead. Overhead memory includes space for the VM graphics frame buffer and various virtualization data structures such as the pmap and shadow page tables (see Section 2). Typical VMs reserve 32 MB for overhead, of which 4 to 8 MB is devoted to the frame buffer, and the remainder contains implementation-specific data structures. Additional memory is required for VMs larger than 1 GB.</p><p>Disk swap space must be reserved for the remaining VM memory; i.e. max min. This reservation ensures the system is able to preserve VM memory under any circumstances; in practice, only a small fraction of this disk space is typically used. Similarly, while memory reservations are used for admission control, actual memory allocations vary dynamically, and unused reservations are not wasted.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Dynamic Reallocation</head><p>ESX Server recomputes memory allocations dynamically in response to various events: changes to systemwide or per-VM allocation parameters by a system administrator, the addition or removal of a VM from the system, and changes in the amount of free memory that cross predefined thresholds. Additional rebalancing is performed periodically to reflect changes in idle memory estimates for each VM.</p><p>Most operating systems attempt to maintain a minimum amount of free memory. For example, BSD Unix normally starts reclaiming memory when the percentage of free memory drops below 5% and continues reclaiming until the free memory percentage reaches 7% <ref type="bibr" target="#b17">[18]</ref>. ESX Server employs a similar approach, but uses four thresholds to reflect different reclamation states: high, soft, hard, and low, which default to 6%, 4%, 2%, and 1% of system memory, respectively.</p><p>In the the high state, free memory is sufficient and no reclamation is performed. In the soft state, the system reclaims memory using ballooning, and resorts to paging only in cases where ballooning is not possible. In the hard state, the system relies on paging to forcibly reclaim memory. In the rare event that free memory transiently falls below the low threshold, the system con-tinues to reclaim memory via paging, and additionally blocks the execution of all VMs that are above their target allocations.</p><p>In all memory reclamation states, the system computes target allocations for VMs to drive the aggregate amount of free space above the high threshold. A transition to a lower reclamation state occurs when the amount of free memory drops below the lower threshold. After reclaiming memory, the system transitions back to the next higher state only after significantly exceeding the higher threshold; this hysteresis prevents rapid state fluctuations.</p><p>To The Exchange VMs were each configured with 256 MB memory; the other three VMs were each configured with 320 MB. The min size for each VM was set to half of its configured max size, and memory shares were allocated proportional to the max size of each VM.</p><p>For this experiment, ESX Server was running on an IBM Netfinity 8500R multiprocessor with eight 550 MHz Pentium III CPUs. To facilitate demonstrating the effects of memory pressure, machine memory was deliberately limited so that only 1 GB was available for executing VMs. The aggregate VM workload was configured to use a total of 1472 MB; with the additional 160 MB required for overhead memory, memory was overcommitted by more than 60%.  When the experiment is started, all five VMs boot concurrently. Windows zeroes the contents of all pages in "physical" memory while booting. This causes the system to become overcommitted almost immediately, as each VM accesses all of its memory. Since the Windows balloon drivers are not started until late in the boot sequence, ESX Server is forced to start paging to disk. Fortunately, the "share before swap" optimization described in Section 4.3 is very effective: 325 MB of zero pages are reclaimed via page sharing, while only 35 MB of non-zero data is actually written to disk. <ref type="foot" target="#foot_5">7</ref> As a result of sharing, the aggregate allocation to all VMs approaches 1200 MB, exceeding the total amount of machine memory. Soon after booting, the VMs start executing their application benchmarks, the amount of shared memory drops rapidly, and ESX Server compensates by using ballooning to reclaim memory. Page sharing continues to exploit sharing opportunities over the run, saving approximately 200 MB.</p><p>Figures <ref type="figure" target="#fig_8">8(c</ref>) and 8(d) show the same memory allocation data for the Citrix MetaFrame Server VM and the Microsoft SQL Server VM, respectively. The MetaFrame Server allocation tracks its active memory usage, and also grows slowly over time as page sharing reduces overall memory pressure. The SQL Server allocation starts high as it processes queries, then drops to 160 MB as it idles, the lower bound imposed by its min size. When a long-running query is issued later, its active memory increases rapidly, and memory is quickly reallocated from other VMs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">I/O Page Remapping</head><p>Modern IA-32 processors support a physical address extension (PAE) mode that allows the hardware to address up to 64 GB of memory with 36-bit addresses <ref type="bibr" target="#b12">[13]</ref>. However, many devices that use DMA for I/O transfers can address only a subset of this memory. For example, some network interface cards with 32-bit PCI interfaces can address only the lowest 4 GB of memory. Some high-end systems provide hardware support that can be used to remap memory for data transfers using a separate I/O MMU. More commonly, support for I/O involving "high" memory above the 4 GB boundary involves copying the data through a temporary bounce buffer in "low" memory. Unfortunately, copying can impose significant overhead resulting in increased latency, reduced throughput, or increased CPU load. This problem is exacerbated by virtualization, since even pages from virtual machines configured with less than 4 GB of "physical" memory may be mapped to machine pages residing in high memory. Fortunately, this same level of indirection in the virtualized memory system can be exploited to transparently remap guest pages between high and low memory.</p><p>ESX Server maintains statistics to track "hot" pages in high memory that are involved in repeated I/O operations. For example, a software cache of physicalto-machine page mappings (PPN-to-MPN) associated with network transmits is augmented to count the number of times each page has been copied. When the count exceeds a specified threshold, the page is transparently remapped into low memory. This scheme has proved very effective with guest operating systems that use a limited number of pages as network buffers. For some network-intensive workloads, the number of pages copied is reduced by several orders of magnitude.</p><p>The decision to remap a page into low memory increases the demand for low pages, which may become a scarce resource. It may be desirable to remap some low pages into high memory, in order to free up sufficient low pages for remapping I/O pages that are currently "hot." We are currently exploring various techniques, ranging from simple random replacement to adaptive approaches based on cost-benefit tradeoffs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">Related Work</head><p>Virtual machines have been used in numerous research projects <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b6">7,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b8">9]</ref> and commercial products <ref type="bibr" target="#b19">[20,</ref><ref type="bibr" target="#b22">23]</ref> over the past several decades. ESX Server was inspired by recent work on Disco <ref type="bibr" target="#b2">[3]</ref> and Cellular Disco <ref type="bibr" target="#b8">[9]</ref>, which virtualized shared-memory multiprocessor servers to run multiple instances of IRIX.</p><p>ESX Server uses many of the same virtualization techniques as other VMware products. One key distinction is that VMware Workstation uses a hosted architecture for maximum portability across diverse desktop systems <ref type="bibr" target="#b22">[23]</ref>, while ESX Server manages server hardware directly for complete control over resource management and improved I/O performance.</p><p>Many of the mechanisms and policies we developed were motivated by the need to run existing commodity operating systems without any modifications. This enables ESX Server to run proprietary operating systems such as Microsoft Windows and standard distributions of open-source systems such as Linux.</p><p>Ballooning implicitly coaxes a guest OS into reclaiming memory using its own native page replacement algorithms. It has some similarity to the "self-paging" technique used in the Nemesis system <ref type="bibr" target="#b10">[11]</ref>, which requires applications to handle their own virtual memory operations, including revocation. However, few applications are capable of making their own page replacement decisions, and applications must be modified to participate in an explicit revocation protocol. In contrast, guest operating systems already implement page replacement algorithms and are oblivious to ballooning details. Since they operate at different levels, ballooning and self-paging could be used together, allowing applications to make their own decisions in response to reclamation requests that originate at a much higher level.</p><p>Content-based page sharing was directly influenced by the transparent page sharing work in Disco <ref type="bibr" target="#b2">[3]</ref>. However, the content-based approach used in ESX Server avoids the need to modify, hook, or even understand guest OS code. It also exploits many opportunities for sharing missed by both Disco and the standard copy-onwrite techniques used in conventional operating systems. IBM's MXT memory compression technology <ref type="bibr" target="#b26">[27]</ref>, which achieves substantial memory savings on server workloads, provided additional motivation for page sharing. Although this hardware approach eliminates redundancy at a sub-page granularity, its gains from compression of large zero-filled regions and other patterns can also be achieved via page sharing.</p><p>ESX Server exploits the ability to transparently remap "physical" pages for both page sharing and I/O page remapping. Disco employed similar techniques for replication and migration to improve locality and fault containment in NUMA multiprocessors <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b8">9]</ref>. In general, page remapping is a well-known approach that is commonly used to change virtual-to-physical mappings in systems that do not have an extra level of "virtualized physical" addressing. For example, remapping and page coloring have been used to improve cache performance and isolation <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b20">21]</ref>.</p><p>The ESX Server mechanism for working-set estimation is related to earlier uses of page faults to maintain per-page reference bits in software on architectures lacking direct hardware support <ref type="bibr" target="#b1">[2]</ref>. However, we combine this technique with a unique statistical sampling approach. Instead of tracking references to all pages individually, an aggregate estimate of idleness is computed by sampling a small subset.</p><p>Our allocation algorithm extends previous research on proportional-share allocation of space-shared resources <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b31">32]</ref>. The introduction of a "tax" on idle memory solves a significant known problem with pure sharebased approaches <ref type="bibr" target="#b24">[25]</ref>, enabling efficient memory utilization while still maintaining share-based isolation. The use of economic metaphors is also related to more explicit market-based approaches designed to facilitate decentralized application-level optimization <ref type="bibr" target="#b11">[12]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9">Conclusions</head><p>We have presented the core mechanisms and policies used to manage memory resources in ESX Server <ref type="bibr" target="#b28">[29]</ref>, a commercially-available product. Our contributions include several novel techniques and algorithms for allocating memory across virtual machines running unmodified commodity operating systems.</p><p>A new ballooning technique reclaims memory from a VM by implicitly causing the guest OS to invoke its own memory management routines. An idle memory tax was introduced to solve an open problem in share-based management of space-shared resources, enabling both performance isolation and efficient memory utilization. Idleness is measured via a statistical working set estimator. Content-based transparent page sharing exploits sharing opportunities within and between VMs without any guest OS involvement. Page remapping is also leveraged to reduce I/O copying overheads in large-memory systems. A higher-level dynamic reallocation policy coordinates these diverse techniques to efficiently support virtual machine workloads that overcommit memory.</p><p>We are currently exploring a variety of issues related to memory management in virtual machine systems. Transparent page remapping can be exploited to improve locality and fault containment on NUMA hardware <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b8">9]</ref> and to manage the allocation of cache memory to VMs by controlling page colors <ref type="bibr" target="#b16">[17]</ref>. Additional work is focused on higher-level grouping abstractions <ref type="bibr" target="#b29">[30,</ref><ref type="bibr" target="#b30">31]</ref>, multi-resource tradeoffs <ref type="bibr" target="#b23">[24,</ref><ref type="bibr" target="#b30">31]</ref>, and adaptive feedback-driven workload management techniques <ref type="bibr" target="#b4">[5]</ref>.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Balloon Performance. Throughput of single Linux VM running dbench with 40 clients. The black bars plot the performance when the VM is configured with main memory sizes ranging from 128 MB to 256 MB. The gray bars plot the performance of the same VM configured with 256 MB, ballooned down to the specified size.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Page Sharing Performance. Sharing metrics</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Real-World Page Sharing. Sharing metrics from production deployments of ESX Server. (a) Ten Windows NT VMs serving users at a Fortune 50 company, running a variety of database (Oracle, SQL Server), web (IIS, Websphere), development (Java, VB), and other applications. (b) Nine Linux VMs serving a large user community for a nonprofit organization, executing a mix of web (Apache), mail (Majordomo, Postfix, POP/IMAP, MailArmor), and other servers. (c) Five Linux VMs providing web proxy (Squid), mail (Postfix, RAV), and remote access (ssh) services to VMware employees.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 6</head><label>6</label><figDesc>Figure 6  presents the results of an experiment designed to illustrate the memory sampling technique. For this experiment, ESX Server was running on a dualprocessor Dell Precision 420, configured to execute one</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Idle Memory Tax. Two VMs with identical</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 8 (</head><label>8</label><figDesc>Figure 8(a) presents ESX Server allocation states during the experiment. Except for brief transitions early in the run, nearly all time is spent in the high and soft states.Figure 8(b) plots several allocation metrics over time.When the experiment is started, all five VMs boot concurrently. Windows zeroes the contents of all pages in "physical" memory while booting. This causes the system to become overcommitted almost immediately, as each VM accesses all of its memory. Since the Windows balloon drivers are not started until late in the boot sequence, ESX Server is forced to start paging to disk. Fortunately, the "share before swap" optimization described in Section 4.3 is very effective: 325 MB of zero pages</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 8 (</head><label>8</label><figDesc>Figure 8(a) presents ESX Server allocation states during the experiment. Except for brief transitions early in the run, nearly all time is spent in the high and soft states.Figure 8(b) plots several allocation metrics over time.When the experiment is started, all five VMs boot concurrently. Windows zeroes the contents of all pages in "physical" memory while booting. This causes the system to become overcommitted almost immediately, as each VM accesses all of its memory. Since the Windows balloon drivers are not started until late in the boot sequence, ESX Server is forced to start paging to disk. Fortunately, the "share before swap" optimization described in Section 4.3 is very effective: 325 MB of zero pages</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Dynamic Reallocation. Memory allocation metrics over time for a consolidated workload consisting of five Windows VMs: Microsoft Exchange (separate server and client load generator VMs), Citrix MetaFrame (separate server and client load generator VMs), and Microsoft SQL Server. (a) ESX Server allocation state transitions. (b) Aggregate allocation metrics summed over all five VMs. (c) Allocation metrics for MetaFrame Server VM. (d) Allocation metrics for SQL Server VM.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>balloon Guest Memory Guest Memory inflate deflate may page out may page in</head><label></label><figDesc></figDesc><table><row><cell></cell><cell>...... ...... balloon</cell></row><row><cell>Guest Memory</cell><cell>......</cell></row><row><cell>....</cell><cell></cell></row><row><cell>....</cell><cell></cell></row><row><cell></cell><cell>. balloon</cell></row><row><cell cols="2">Figure 1: Ballooning. ESX Server controls a balloon mod-</cell></row><row><cell cols="2">ule running within the guest, directing it to allocate guest pages</cell></row><row><cell cols="2">and pin them in "physical" memory. The machine pages back-</cell></row><row><cell cols="2">ing this memory can then be reclaimed by ESX Server. Inflat-</cell></row><row><cell cols="2">ing the balloon increases memory pressure, forcing the guest</cell></row><row><cell cols="2">OS to invoke its own memory management algorithms. The</cell></row><row><cell cols="2">guest OS may page out to its virtual disk when memory is</cell></row><row><cell cols="2">scarce. Deflating the balloon decreases pressure, freeing guest</cell></row><row><cell>memory.</cell><cell></cell></row><row><cell cols="2">memory for general use within the guest OS.</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head></head><label></label><figDesc>Sharing metrics for a series of experiments consisting of identical Linux VMs running SPEC95 benchmarks. The top graph indicates the absolute amounts of memory shared and saved increase smoothly with the number of concurrent VMs. The bottom graph plots these metrics as a percentage of aggregate VM memory. For large numbers of VMs, sharing approaches 67% and nearly 60% of all VM memory is reclaimed.</figDesc><table><row><cell>concurrent VMs running SPEC95 benchmarks for thirty</cell></row><row><cell>minutes. For these experiments, ESX Server was run-</cell></row><row><cell>ning on a Dell PowerEdge 1400SC multiprocessor with</cell></row><row><cell>two 933 MHz Pentium III CPUs.</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>:</head><label></label><figDesc>Active Memory Sampling. A Windows VM executes a simple memory toucher application. The solid black line indicates the amount of memory repeatedly touched, which is varied over time. The dotted black line is the sampling-based statistical estimate of overall VM memory usage, including background Windows activities. The estimate is computed as the max of fast (gray dashed line) and slow (gray dotted line) moving averages. The spike labelled ZPT is due to the Windows "zero page thread."</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc>demonstrate dynamic reallocation we ran a workload consisting of five virtual machines. A pair of VMs executed a Microsoft Exchange benchmark; one VM ran an Exchange Server under Windows 2000 Server, and a second VM ran a load generator client under Windows 2000 Professional. A different pair executed a Citrix MetaFrame benchmark; one VM ran a MetaFrame Server under Windows 2000 Advanced Server, and a second VM ran a load generator client under Windows 2000 Server. A final VM executed database queries with Microsoft SQL Server under Windows 2000 Advanced Server.</figDesc><table /></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>The IA-32 architecture has hardware mechanisms that walk inmemory page tables and reload the TLB<ref type="bibr" target="#b12">[13]</ref>.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>ESX Server zeroes the contents of newly-allocated machine pages to avoid leaking information between VMs. Allocation also respects cache coloring by the guest OS; when possible, distinct PPN colors are mapped to distinct MPN colors.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_2"><p>Shares are alternatively referred to as tickets or weights in the literature. The term clients is used to abstractly refer to entities such as threads, processes, VMs, users, or groups.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_3"><p>The configured tax rate applies uniformly to all VMs. While the underlying implementation supports separate, per-VM tax rates, this capability is not currently exposed to users. Customized or graduated tax rates may be useful for more sophisticated control over relative allocations and responsiveness.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="6" xml:id="foot_4"><p>Some memory is required for per-VM virtualization overheads, which are discussed in Section 6.2. Additional memory is required for ESX Server itself; the smallest recommended configuration is 512 MB.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="7" xml:id="foot_5"><p>This is the peak amount of memory paged to disk over the entire run. To avoid clutter, paging metrics were omitted from the graphs; the amount of data swapped to disk was less than 20 MB for the remainder of the experiment.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>Mahesh Patil designed and implemented the ESX Server paging mechanism. Mike Nelson and Kinshuk Govil helped develop the hot I/O page remapping technique. Vikram Makhija and Mahesh Patil provided invaluable assistance with quantitative experiments. We would also like to thank Keith Adams, Ole Agesen, Jennifer Anderson, Ed Bugnion, Andrew Lambeth, Beng-Hong Lim, Tim Mann, Michael Mullany, Paige Parsons, Mendel Rosenblum, Jeff Slusher, John Spragens, Pratap Subrahmanyam, Chandu Thekkath, Satyam Vaghani, Debby Wallach, John Zedlewski, and the anonymous reviewers for their comments and helpful suggestions. VMware and ESX Server are trademarks of VMware, Inc. Windows and Windows NT are trademarks of Microsoft Corp. Pentium is a trademark of Intel Corp. All other marks and names mentioned in this paper may be trademarks of their respective companies.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Information and Control in Gray-Box Systems</title>
+		<author>
+			<persName><forename type="first">Andrea</forename><forename type="middle">C</forename><surname>Arpaci-Dusseau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Remzi</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Arpaci-Dusseau</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Principles</title>
+		<meeting>Symposium on Operating System Principles</meeting>
+		<imprint>
+			<date type="published" when="2001-10">October 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Converting a Swap-Based System to do Paging in an Architecture Lacking Page-Reference Bits</title>
+		<author>
+			<persName><forename type="first">Ozalp</forename><surname>Babaoglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><surname>Joy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Principles</title>
+		<meeting>Symposium on Operating System Principles</meeting>
+		<imprint>
+			<date type="published" when="1981-12">December 1981</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Disco: Running Commodity Operating Systems on Scalable Multiprocessors</title>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Bugnion</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Devine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kinshuk</forename><surname>Govil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mendel</forename><surname>Rosenblum</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Computer Systems</title>
+		<imprint>
+			<biblScope unit="volume">15</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<date type="published" when="1997-11">November 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Implementation and Performance of Application-Controlled File Caching</title>
+		<author>
+			<persName><forename type="first">Pei</forename><surname>Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edward</forename><forename type="middle">W</forename><surname>Felten</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Design and Implementation</title>
+		<meeting>Symposium on Operating System Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="1994-11">November 1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Managing Energy and Server Resources in Hosting Centers</title>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><forename type="middle">S</forename><surname>Chase</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Darrell</forename><forename type="middle">C</forename><surname>Anderson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prachi</forename><forename type="middle">N</forename><surname>Thakar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amin</forename><forename type="middle">M</forename><surname>Vahdat</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Principles</title>
+		<meeting>Symposium on Operating System Principles</meeting>
+		<imprint>
+			<date type="published" when="2001-10">October 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">The Origin of the VM/370 Time-Sharing System</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">J</forename><surname>Creasy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IBM Journal of Research and Development</title>
+		<imprint>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<date type="published" when="1981-09">September 1981</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Microkernels Meet Recursive Virtual Machines</title>
+		<author>
+			<persName><forename type="first">Bryan</forename><surname>Ford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Hibler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jay</forename><surname>Lepreau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Patrick</forename><surname>Tullman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Godmar</forename><surname>Back</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Clawson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Design and Implementation</title>
+		<meeting>Symposium on Operating System Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="1996-10">October 1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Survey of Virtual Machine Research</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Robert</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Goldberg</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer</title>
+		<imprint>
+			<biblScope unit="volume">7</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<date type="published" when="1974-06">June 1974</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Cellular Disco: Resource Management Using Virtual Clusters on Shared-Memory Multiprocessors</title>
+		<author>
+			<persName><forename type="first">Kinshuk</forename><surname>Govil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Teodosiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yongqiang</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mendel</forename><surname>Rosenblum</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Principles</title>
+		<meeting>Symposium on Operating System Principles</meeting>
+		<imprint>
+			<date type="published" when="1999-12">December 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">System/370 Extended Architecture: Facilities for Virtual Machines</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Peter</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gum</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IBM Journal of Research and Development</title>
+		<imprint>
+			<biblScope unit="volume">27</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<date type="published" when="1983-11">November 1983</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Self-Paging in the Nemesis Operating System</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Steven</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Hand</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating Systems Design and Implementation</title>
+		<meeting>Symposium on Operating Systems Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="1999-02">February 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Application-Controlled Physical Memory using External Page-Cache Management</title>
+		<author>
+			<persName><forename type="first">Kieran</forename><surname>Harty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>Cheriton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="1992-10">October 1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">IA-32 Intel Architecture Software Developer&apos;s Manual. Volumes I, II, and III</title>
+		<imprint>
+			<date type="published" when="2001">2001</date>
+		</imprint>
+		<respStmt>
+			<orgName>Intel Corporation</orgName>
+		</respStmt>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Algorithm Alley</title>
+		<author>
+			<persName><forename type="first">Bob</forename><surname>Jenkins</surname></persName>
+		</author>
+		<ptr target="http://burtleburtle.net/bob/hash/" />
+	</analytic>
+	<monogr>
+		<title level="m">Dr. Dobbs Journal</title>
+		<imprint>
+			<date type="published" when="1997-09">September 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Virtual Memory for an Object-Oriented Language</title>
+		<author>
+			<persName><forename type="first">Ted</forename><surname>Kaehler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Byte</title>
+		<imprint>
+			<date type="published" when="1981-08">August 1981</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Mobile Network Estimation</title>
+		<author>
+			<persName><forename type="first">Minkyong</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><surname>Noble</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Seventh Annual International Conference on Mobile Computing and Networking</title>
+		<meeting>Seventh Annual International Conference on Mobile Computing and Networking</meeting>
+		<imprint>
+			<date type="published" when="2001-07">July 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">OS-Controlled Cache Predictability for Real-Time Systems</title>
+		<author>
+			<persName><forename type="first">Jochen</forename><surname>Liedtke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hermann</forename><surname>Hartig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Hohmuth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Third IEEE Real-Time Technology and Applications Symposium</title>
+		<meeting>Third IEEE Real-Time Technology and Applications Symposium</meeting>
+		<imprint>
+			<date type="published" when="1997-06">June 1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">The Design and Implementation of the 4.4 BSD Operating System</title>
+		<author>
+			<persName><forename type="first">Marshall</forename><forename type="middle">K</forename><surname>Mckusick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Keith</forename><surname>Bostic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">J</forename><surname>Karels</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">S</forename><surname>Quaterman</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1996">1996</date>
+			<publisher>Addison-Wesley</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Dynamic Page Mapping Policies for Cache Conflict Resolution on Standard Hardware</title>
+		<author>
+			<persName><forename type="first">Theodore</forename><forename type="middle">H</forename><surname>Romer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dennis</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><forename type="middle">N</forename><surname>Bershad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradley Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Design and Implementation</title>
+		<meeting>Symposium on Operating System Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="1994-11">November 1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">VM/370: A Study of Multiplicity and Usefulness</title>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">H</forename><surname>Seawright</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">A</forename><surname>Mckinnon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IBM Systems Journal</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="1979">1979</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Reducing Cache Misses Using Hardware and Software Page Placement</title>
+		<author>
+			<persName><forename type="first">Timothy</forename><surname>Sherwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brad</forename><surname>Calder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><forename type="middle">S</forename><surname>Emer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. International Conference on Supercomputing</title>
+		<meeting>International Conference on Supercomputing</meeting>
+		<imprint>
+			<date type="published" when="1999-06">June 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">Inside Microsoft Windows</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Solomon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Russinovich</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2000">2000. 2001</date>
+			<publisher>Microsoft Press</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Virtualizing I/O Devices on VMware Workstation&apos;s Hosted Virtual Machine Monitor</title>
+		<author>
+			<persName><forename type="first">Jeremy</forename><surname>Sugerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ganesh</forename><surname>Venkitachalam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Beng-Hong</forename><surname>Lim</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Usenix Annual Technical Conference</title>
+		<meeting>Usenix Annual Technical Conference</meeting>
+		<imprint>
+			<date type="published" when="2001-06">June 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Tickets and Currencies Revisited: Extensions to Multi-Resource Lottery Scheduling</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename><surname>Sullivan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Haas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Margo</forename><forename type="middle">I</forename><surname>Seltzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Seventh Workshop on Hot Topics in Operating Systems</title>
+		<meeting>Seventh Workshop on Hot Topics in Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="1999-03">March 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Isolation with Flexibility: A Resource Management Framework for Central Servers</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename><surname>Sullivan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Margo</forename><forename type="middle">I</forename><surname>Seltzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Usenix Annual Technical Conference</title>
+		<meeting>Usenix Annual Technical Conference</meeting>
+		<imprint>
+			<date type="published" when="2000-06">June 2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">S</forename><surname>Tanenbaum</surname></persName>
+		</author>
+		<title level="m">Modern Operating Systems</title>
+		<imprint>
+			<publisher>Prentice Hall</publisher>
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">IBM Memory Expansion Technology (MXT)</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Tremaine</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Franaszek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Robinson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Schulz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wazlowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bland</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IBM Journal of Research and Development</title>
+		<imprint>
+			<biblScope unit="volume">45</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="2001-03">March 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Tridgell</surname></persName>
+		</author>
+		<ptr target="ftp://samba.org/pub/tridge/dbench/,Septem-ber" />
+		<imprint>
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<title level="m" type="main">Inc. VMware ESX Server User&apos;s Manual Version 1</title>
+		<author>
+			<persName><surname>Vmware</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2002-04">April 2002</date>
+			<pubPlace>Palo Alto, CA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Lottery Scheduling: Flexible Proportional-Share Resource Management</title>
+		<author>
+			<persName><forename type="first">Carl</forename><forename type="middle">A</forename><surname>Waldspurger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">E</forename><surname>Weihl</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Symposium on Operating System Design and Implementation</title>
+		<meeting>Symposium on Operating System Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="1994-11">November 1994</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<monogr>
+		<author>
+			<persName><forename type="first">Carl</forename><forename type="middle">A</forename><surname>Waldspurger</surname></persName>
+		</author>
+		<idno>MIT/LCS/TR-667</idno>
+		<title level="m">Lottery and Stride Scheduling: Flexible Proportional-Share Resource Management</title>
+		<imprint>
+			<date type="published" when="1995-09">September 1995</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">Technical Report</note>
+	<note>Ph.D. thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">An Object-Oriented Framework for Modular Resource Management</title>
+		<author>
+			<persName><forename type="first">Carl</forename><forename type="middle">A</forename><surname>Waldspurger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">E</forename><surname>Weihl</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. Fifth Workshop on Object-Orientation in Operating Systems</title>
+		<meeting>Fifth Workshop on Object-Orientation in Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="1996-10">October 1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

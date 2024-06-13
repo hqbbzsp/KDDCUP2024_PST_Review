@@ -1,0 +1,658 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">The Cost of Speculation: Revisiting Overheads in the V8 JavaScript Engine</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author role="corresp">
+							<persName><forename type="first">Alberto</forename><surname>Parravicini</surname></persName>
+							<email>alberto.parravicini@polimi.it</email>
+							<affiliation key="aff0">
+								<orgName type="department">DEIB</orgName>
+								<orgName type="institution">Politecnico di Milano Milano</orgName>
+								<address>
+									<country key="IT">Italy</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">The Cost of Speculation: Revisiting Overheads in the V8 JavaScript Engine</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1109/IISWC53511.2021.00013</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T09:07+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>JIT Compilation</term>
+					<term>JavaScript</term>
+					<term>Performance Evaluation</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>JavaScript, while already widely used in web applications, is also gaining popularity beyond the web, such as on the server as part of Node.js or on the desktop with the Electron framework (e.g., in the Slack application). However, executing code written in this weakly and dynamically typed language efficiently, requires sophisticated Just-in-time (JIT) compilation. In this paper, we revisit the execution overheads of JavaScript. We perform a detailed analysis of the JetStream2 benchmark suite on Google's modern V8 JavaScript engine. We identify microarchitectural bottlenecks and runtime overheads that result from the speculations made by the JIT compiler when it generates machine code from JavaScript. We find that checks that verify assumptions made by the compiler have an average execution overhead of 8 %, 2-4x of what an earlier study reported on an older version of V8. For the check for Small Integers (SMI), we observe that the conditional branches are not the underlying cause but rather the computation of the condition itself. This indicates that these checks provide an attractive avenue for a HW/SW codesign solution. We present an extension for the ARMv8 instruction set that optimizes SMI load instructions and checks. We can improve execution time on SMI-heavy computations by up to 10 % ona prototype implementation of the new instructions in the gem5 simulator.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>I. INTRODUCTION</head><p>According to reports [1], <ref type="bibr">[2]</ref>, there are 1.8 billion websites and more than 97% use JavaScript as the client-side programming language. However, JavaScript is not only running inside the browser but is also used for server-side applications, e.g., in Node.js and Deno runtimes. Furthermore, JavaScript is also getting increasingly popular in desktop applications. Applications written in JavaScript, HTML, and CSS-built on top of the Electron framework-can run across different desktop platforms. The most prominent Electron applications are Microsoft Visual Studio Code and the Slack app.</p><p>JavaScript, officially standardized as ECMAScript ECMA-262, is a dynamically and weakly typed object-oriented programming language. Although this type system provides the flexibility of writing generic code, as shown in this function, } it also adds to the complexity of the language runtime, specifically, the Just-In-Time (JIT) compilation to machine code. The function can be called with a and b of any type. The ECMAScript specification defines double-precision floating-point as number format. However, if a and b are both 32-bit integers, there is no need to use doubleprecision floating-point addition. The operation can be performed as a 32-bit add. On a Cortex A76 core, for example, an integer addition has half the latency of a floating point addition. If a and b are strings, the addition is a string concatenation. The weak typing semantics in JavaScript increases the complexity further. For example, if a 978-1-6654-4173-5/21/$31.00 ?2021 IEEE DOT 10.1109/TSWC53511.2021.00013</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Rene Mueller</head><p>Computing Systems Laboratory Ziirich Research Center, Huawei Technologies Switzerland rene.mueller@huawei.com is an array [1, 2, 3] and b is the integer 7, the ECMAScript specification states that the array object and the number are first to be coerced into strings "1,2,3" and "7", respectively, and then concatenated, yielding the result string "1,2, 37". JavaScript engines, such as V8 (Google), JavaScriptCore in WebKit (Apple), or SpiderMonkey <ref type="bibr">(Mozilla)</ref>, execute JavaScript code through a series of tiered compilation steps. Code is initially executed by an interpreter. The interpreter collects dynamic type information for object accesses and operations, such as a+b in the previous example. This type information is later used during compilation to generate efficient machine code. For example, if a and b were always found to be integers during interpretation, the JIT speculates that this will also be the case in the future and generate machine code for integer addition. Of course, this assumption may not hold. The JIT therefore needs to insert checks that verify the assumption. If they are no longer valid, the execution of the JIT-compiled code needs to stop and may fall back to the interpreter (also called deoptimization or bailout). The code segment needs to be re-compiled. These dynamic checks are called deoptimization checks in the following. The checks are not free: 4-5 % of instructions in compiled code, both on x86_64 (we refer to it as X64) and ARM64, are deoptimization checks (Figure <ref type="figure">1</ref>).</p><p>In this work, we analyze the impact of these checks on the overall runtime overhead and the implications on the micro-architectural state of the processor. Previous studies on this topic <ref type="bibr">[3]</ref>, which estimated a 2-4 % overhead, are likely outdated, given the continuous evolution of V8 and the increasing popularity of ARM64 CPUs, which were not considered before. We also observe an increasing interest in HW/SW codesign optimizations for dynamic languages <ref type="bibr">[4]</ref>, <ref type="bibr">[5]</ref>. On this topic, SPMV-CSR-SMI-Fig. <ref type="figure">1</ref>: JIT-compiled code generated by the V8 JavaScript engine shows 4 deoptimization checks every 100 instructions, with little variance across 51 benchmarks.</p><p>SpiderMonkey) share similar principles, such as multi-tier JIT and speculative compilers. We categorize V8's deoptimization checks (Section II-B) and detail the extended JetStream2 benchmark suite and the experimental setup in (Sections I-C and II-D).</p><p>A. The V8 JavaScript Engine</p><p>The V8 engine has significantly evolved and grown in complexity since its creation in 2008. A significant change occurred in 2017, with the introduction of a new compiler pipeline: the Full-codegen baseline compiler and the Crankshaft optimizing compiler were replaced by Ignition interpreter and the TurboFan compiler. Existing research that analyses V8 but predates the current compiler pipeline [3], [6], [4] might no longer adequately reflect JavaScript execution. We believe that a re-evaluation is necessary. Currently, the JIT compilation process of V8 is composed of multiple stages, whose interaction is illustrated in Figure <ref type="figure">2a</ref>, and consists of multiple code representations (Figure <ref type="figure">2b</ref>). JavaScript source code is translated into bytecode by a parser and executed by the Ignition interpreter @). Ignition collects type information through type-feedback vectors, which later allows speculative optimizations in the JIT compilation of frequently executed functions. The baseline compiler of V8 is the recently introduced SparkPlug ?, a non-optimizing compiler that directly translates linearized bytecode into lower-level representations and machine code <ref type="bibr">[7]</ref>. The real workhorse of the V8 compiler pipeline is TurboFan, which converts bytecode into a sea-of-nodes graph [8] ?. This graph is transformed through multiple optimization passes into an architecture-dependent macro-assembler representation (shared with SparkPlug), followed by low-level assembly code ?). V8 also offers a mid-tier compiler called TurboProp, which is simply TurboFan with fewer optimization passes. SparkPlug and TurboProp are experimental features in Node.js and Deno and are not enabled by default. SparkPlug is enabled in Chrome since version 91 <ref type="bibr">[7]</ref>.</p><p>Since these compilers make speculative assumptions, compiled code must contain many deoptimization checks that guarantee that the generated code is only the executed if assumptions are valid. If a check fails, a deoptimization event occurs (deopt, in short, or bailout). It causes the discarding of the compiled code, the conversion of the machine stack frames into interpreter stack frames, and resuming execution in the interpreter. Previous versions of V8 incurred significant overheads from deoptimization checks, with estimates of 2-4 % on real hardware <ref type="bibr">[3]</ref>. HW/SW codesign solutions that optimized these checks were able to speed up execution time by 5-6% [6], [4] on simulated hardware. In this study, we characterize the current state of deoptimization checks in V8 on modern CPU architectures to see whether additional performance gains are possible when leveraging HW/SW codesign for the checks.</p><p>V8 also supports WebAssembly (WASM), through a first baseline compiler called Liftoff, followed by a slower but highly optimized compilation process based on TurboFan ?. In addition, V8 uses builtin functions to perform common JavaScript operations (e.g. string concatenation). These functions are written in the Torque DSL and compiled into a binary blob by the TurboFan stack [9] during the build process. This blob is loaded from an external file into the engine.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Deoptimization Checks in V8</head><p>TurboFan speculatively generates code using the type information collected during interpretation. V8 must guarantee that these speculations hold at execution time by adding deoptimization checks to the generated machine code. Here, we introduce the main categories and types of deoptimization checks.</p><p>1) Deoptimization categories: The V8 JavaScript engine has 52 types of deoptimization checks, divided across into three deoptimization categories. Each type of deoptimization check is uniquely assigned to one of the following three categories: 1) deopt-eager: the main category of deoptimizations, occurring in JIT-compiled code when speculations fail (e.g., a type is different from expected) or other exceptional states are encountered (e.g., out-of-bounds array accesses, overflows). deopt-lazy: V8 allows multiple functions to point to the same optimized object code: if one is deoptimized, the other functions will be deoptimized at the beginning of their next invocation. This prevents deoptimization chains <ref type="bibr">[10]</ref>. deopt-soft: triggered when a function takes a path (more precisely, a Call Site) for which no type feedback is present, i.e., the function was compiled too soon. Their overhead during the steady-state execution phase is irrelevant.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>2)</head><p>3)</p><p>We focus on the first category (deopt-eager), as they are by far the most common and the most relevant in terms of performance. TurboFan inserts a checkpoint before each deopt-eager check. The checkpoint captures the state of the stack before the deoptimization triggers: if a check fails, it will deoptimize to the state of the most recent checkpoint and resumes execution in the interpreter <ref type="bibr">[11]</ref>.</p><p>2) Relevant deoptimization types: As TurboFan has more than 20 deopt--eager check types, we divide similar checks into 6 groups, starting from the taxonomy in <ref type="bibr">[3]</ref>. We extend the Type group with new checks that were not present in Crankshaft and introduce the Arithmetic errors and Other groups. Arithmetic errors contains checks such as Lost-precision and Division-by-zero. Among the most common and time-consuming deoptimization checks we find:</p><p>1) SMI and Not-a-SMI: V8 can use compressed pointers on 64-bit platforms. These pointers are stored as tagged 32-bit values that can also represent Small-Integers (SMIs). The Least-significant Bit (LSB) is the tag. If this tag bit is cleared, the remaining bits are a signed 31-bit integer. If it is set, the remaining bits are a tagged pointer. SMI values can be stored directly, without requiring a heap access. This memory optimization is critical to avoid memory accesses. However, it requires bit-shifts to turn SMIs into machine integers (i.e., an untagging right-shift), and checks that inspect the value's LSB. 2) Boundary Checks: these checks ensure that array accesses are within the array's bounds. Array indices are often stored as SMIs, which require additional checks and untagging shifts.</p><p>Wrong Map Checks: JavaScript is prototype-based language.</p><p>Properties can be dynamically added and removed from individual objects. V8 uses hidden classes, called maps, to handle objects of the same shape. Each object shape encountered at run time is assigned a map. Maps act like classes in that they keep the storage offsets of their objects' properties. The objects themselves have a 32-bit tagged pointer to their map object. To guarantee that an object has the expected shape when used in compiled code, V8 checks that the object's map pointer points to the same map the compiler expected.</p><p>This list is not exhaustive. There are additional checks, which we omit here as they are less frequent, or self-explanatory (e.g., overflow checks). Our method can be applied to other JavaScript engines and dynamic languages that use similar checks. We pay special attention to Not-a-SMI checks, given their abundance and since SMIs also appear in connection with other checks such as boundary checks.</p><p>As we will show in Section V, Not-a-SMI checks are a strong candidate for performance improvements through HW/SW codesign. V8 can be built with 32-bit SMIs instead of 31-bit SMI by setting the corresponding compile-time flag. The flag is set when pointer compression is disabled. Node.js uses 32-bit SMI whereas Chromium, Deno, and our experiments with the standalone V8 use 31-bit SMIs. 32-bit SMIs still use the LSB for tagging, and require the same deoptimization checks and untagging shift. Therefore, our results do not depend on the chosen SMIs representation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>3)</head><p>C. The Extended JetSteam2 Benchmark Suite Our analysis of overheads of the deoptimization checks focuses on the JetStream2 suite <ref type="bibr">[12]</ref>, which is maintained as part of Apple's WebKit JavaScript engine. JetStream2 is a large and heterogeneous collection of benchmarks that allow us to tests V8 from different angles, including mathematical computations, regular expression, and language parsers. It also includes most benchmarks that can be found in older suites, such as Octane [13] (used in <ref type="bibr">Southern et al. [3]</ref>), <ref type="bibr">Kraken [14]</ref> and SunSpider <ref type="bibr">[15]</ref>. We exclude the WebAssembly benchmarks of the JetStream2 suite from our analysis as they are not relevant for our study. WebAssembly is statically typed and, therefore, does not require speculation on types for efficient execution. We grouped JetStream2 benchmarks by the language feature they stress (c.g., string manipulation) or by their application domain (e.g., cryptography). Benchmarks within the same category exhibit similar overhead characteristics. We add six custom sparse linear algebra kernels used to test JavaScript performance in memoryintensive computations with many indirect memory accesses. One is CSR Sparse matrix-vector multiplication (SpMV), which we test for different data types (floating-point, large integers and SMI), to capture the performance difference of type-dependent checks.</p><p>In Section V, we validate our analysis with a set of SMI-intensive benchmarks, some of which have been adapted from JetStream2 using cycle-accurate simulation in gem5. Due to the complexity of the JetStream2 suite and the resulting simulation overhead, we are simulating a subset of the workload that we run on real hardware.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>D. Experimental Setup</head><p>We conduct our tests on V8 9.2.0 through its D8 shell, built using default release settings. Tests are performed on an X64 Intel Xeon E5-2680 v2 @2.80 GHz with 384 GB of RAM, and an ARM64 TaiShan 2280 server with Kunpeng-920 out-of-order cores and 64 GB of RAM. We ran each benchmark of the suite for 1,000 iterations and repeated this process 30 times.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>III. CHARACTERIZATION OF CHECK OVERHEADS</head><p>Quantifying the runtime costs of the deoptimization checks is not trivial due to the complexity of the V8 engine. One possible approach is instrumenting the generated code, followed by measuring or analyzing the generated machine code, and then estimating the costs through a performance model. However, instrumenting TurboFan, the V8 compiler, could skew results as it would also affect the compilation process itself; similarly, techniques based on Statistical sampling might not capture the state of multiple in-flight instructions in Out-of-Order (03) CPUs. To address these challenges, we measure the check overhead with a methodology that applies Statistical inference to the estimates of both techniques, providing greater robustness and deeper insights than previous techniques.</p><p>For comparison, <ref type="bibr">Dot et al. [6]</ref> estimate the overheads of checks by introducing additional machine instructions (e.g., a counter) in JIT-compiled code. They measure between 10% to 20%, on a simulated O3 desktop core across the Octane, Kraken, and SunSpider benchmark suites. They approximate overheads by counting how many times checks are executed relative the total instruction count. This approach is precise enough, as it does not account for the individual cost of instructions. <ref type="bibr">Southern et al. [3]</ref> modify the V8 compiler to perform a coarse-grained elimination of checks during compilation. Compared to them, we use two orthogonal methods to estimate the overhead of the individual checks. The first method (Section III-A) estimates check overheads from time-based Program Counter (PC) sampling. The second method directly measures the impact of checks on the execution time. We can modify the TurboFan compiler to remove either the check branches or the checks altogether, where removing them does not alter the benchmarks' correctness (Sections II-B and IV-B). The advantage of the former method is that overhead can be simply estimated from a profiler trace. In contrast, Fig. <ref type="figure">4</ref>: Breakdown of the number of checks and their overhead, on x64 and ARM64. We estimated overheads on X64 by considering one instruction before the check's branch as part of the check, on ARM64 the two previous instructions. Checks on ARM64 require more instructions due to the RISC nature of the ISA. Benchmarks are ordered by overhead, using x64 as reference.</p><p>the latter directly measures the overhead, although it ignores the overhead of checks that we leave in for correctness.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Check Overheads from Program Counter Sampling</head><p>We use perf to sample the PC in JIT-compiled code and count the samples that fall on instructions that are part of a check. Figure <ref type="figure">3</ref> shows an example of a sequence of machine instructions with the corresponding sample count. We can identify checks because deoptimization paths always jump to a specific region at the end of a compiled function. In addition, because every check has a different target address, we can also determine its type with the help of the annotated assembly listing provided by V8.</p><p>Checks do not only consist of branches alone. Other instructions that determine the branch condition, such as cmp or test, must also be counted as part of the check. For example, in boundary checks, the size of the array must be loaded into a register and compared with the index (Figure <ref type="figure">3</ref>). Identifying which instructions are part of the check, though is not straightforward. For example, the result of an instruction may be used in the check as well as in regular code and, thus, should not be considered overhead. Furthermore, the instruction scheduling done the compiler interleaves instructions that are part of a the check with main-line instructions. As a pragmatic heuristic, we consider instructions within a certain window preceding the deoptimization branch as part of the check. On the CISC X64 ISA, we consider just one instruction before the branch. On ARM64, we use two instructions before the branch as this RISC ISA requires more instructions to compute conditions with memory operands. We observe that a window size of two aligns best with the exact overhead measurements obtained through the second method (Section IV). Once we identified the instructions that are part of a check, we assign per-instruction sample count from perf counts to each check. The overhead of checks is the ratio between the PC samples identified as part of a check and the total number of collected PC samples. The advantage of this approach is its non-intrusiveness. No engine changes are necessary, and execution time is only affected by the overall profiling overhead.</p><p>Distribution of Check Types: Figure <ref type="figure">4</ref> depicts the breakdown of the different check types in the benchmarks. Figures <ref type="figure">4a</ref> and<ref type="figure">4b</ref> show how many checks TurboFan emits per 100 machine instructions on X64 and ARM64, respectively, while Figures <ref type="figure">4c</ref> and<ref type="figure">4d</ref> show the overheads for each check type and benchmark. The frequency varies between 2 to 10 with an average of 5 checks for 100 instructions, coherently with previous studies <ref type="bibr">[3]</ref>. In contrast, the overhead of checks in JIT-compiled code is higher, ranging between 5 % and 7 %, compared to older estimates of 24%. Type checks are the most common, with almost half of the occurrences. However, their actual overhead is significantly lower, accounting for only 30 % of the total. Type checks dominate only in objects-heavy benchmarks. The next frequent checks are SMI, Not-a-SMI and Boundary Checks. Together, they account for 50% of both frequency and overhead. We target our ISA extension at SMI arithmetic Section V. It not helps SMI and Not-a-SMI checks but also Boundary Checks, since they also contain SMI operations (e.g., on SMI indices).</p><p>The frequency is lower (2-8 checks for 100 instructions) on ARM64 than on X64. The reason is that the JIT needs to emit more instruction for the RISC architecture than for X64. Furthermore, the absolute number of checks does not depend on the architectures; the same number of checks are distributed over more instructions resulting in a lower frequency.</p><p>Sparse Linear Algebra benchmarks have the highest check frequency because they are simple benchmarks with relatively few instructions. However, their checks have a moderately low overhead.</p><p>The only exception is SpMV on SMIs, which requires many overflow checks in arithmetic operations that have result type SMI.</p><p>Compared to the analysis in [3], we spot differences that corroborate the need to re-evaluate the impact of checks in V8. Among others, CRYP no longer has 50% of overflow checks (it has almost none), Navier-Stokes (NS) has only 10 checks per 100 instructions (instead of 20), and splay (SPL) has now 4 times as many checks per 100 instructions.</p><p>Overheads: The distribution of overheads is highly dependent on the benchmark category. In general, mathematical and crypto benchmarks have the highest overheads. This can be explained by the high number of boundary, SMI, and overflow checks. Regular Expression benchmarks on the other hand do not have any significant check overhead, which is also expected because most of their computation is performed by Irregexp, V8's regex engine, and not in JIT-compiled code. String Manipulation and Language Parsing benchmarks also have low overheads, possibly due to the heavy use of builtin functions that do not require checks (e.g., string concatenation or equality). For the Richards (RICH) benchmark, which tests the performance of object property accesses, we can observe significantly higher overheads due to checks on ARM64 than on X64, highlighting the difference between the two ISAs again: some checks, such as wrong map and boundary checks, require multiple instructions on ARM64, while X64 can perform them with fewer (or possibly just one) instructions, resulting in lower overheads for these check classes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Removing Checks in the V8 JIT</head><p>Sampling how often a given instruction appears in the PC trace does not necessarily reflect its true cost, especially in O3 CPUs. In order to increase the accuracy of the cost estimation, we combine the sampling technique with with another approach that removes checks in JIT-compiled code altogether by modifying the V8 compiler itself. To effectively suppress the emission of checks during the JITcompilation stage in V8, it is not sufficient to disable the generation of machine instructions that are involved in the checks. The reason is that while the program is lowered from the Sea-of-nodes (SoN) graph to instructions, the provenance of a given instruction is lost-it is no longer known whether an instruction belongs to regular code, a check, or both. As a more robust approach, thus, we operate directly on the SoN representation. We short-circuit deoptimization condition with a Boolean constant (0), as shown in Figure <ref type="figure" target="#fig_3">5</ref>. This way, we not only remove the nodes representing checks in subsequent graph optimization passes but also all ancestor nodes that are only used in the checks (for example, loading the array size to perform out-ofbounds array accesses checks), as they are marked as dead code. We can selectively disable individual check types, which is useful when testing the overhead of one specific check or to prevent changes in the program semantics when checks get actually triggered.</p><p>1) Removing Checks: We further split the costs in the checks into the computation of the Boolean check condition and the conditional branch that follows. To this end, we modified the late code-generation portion of TurboFan to generate the check condition (e.g., the bittest for SMIs) without emitting the conditional branch instruction. This allows us to determine whether the additional control-flow complexity has an observable performance impact. We find that omitting the deopt branches reduces the the committed branches by 20%. However, the speedup is hardly noticeable with 1-2 % on average. We discuss check branches in more detail in Section IV-B.</p><p>2) Leftover checks: 16 benchmarks out of 51 do not complete execution correctly if all checks are removed, since they trigger some deoptimizations as part of their normal execution flow. Therefore, we are removing only those check types in a benchmark that will not fail to guarantee correct execution. With this method, less than 20% of checks of the otherwise failing benchmarks remain in the code. This leftover overhead, estimated from perf, is less than 0.5 %. Overall, the amount of remaining checks is small enough to allow precise measurements through the check removal technique in this section.</p><p>3) Execution time profile with and without checks: We measure the execution time of the JIT-compiled code for each iteration of the benchmark run. V8 progressively compiles code as it executes, reducing the execution time for each iteration. Figure <ref type="figure">6</ref> shows the execution time, relative to the first iteration, for 1,000 iterations of each benchmark. The two lines depict the time with checks and after removing them. The difference between the lines indicates to the check overhead. We also include the 16 benchmarks (marked with *) for which it was not possible to remove all checks without altering the semantics. Vertical bars indicate the occurrence of deoptimization events. As the figure shows, these events are very rare and typically occur within the first few iterations of each benchmark. Therefore, further optimizations of the bailout path will not provide any speedup once the generated code reaches steady-state. However, code without checks is significantly faster, with a mean overall time difference of 8%. If all leftover checks were removed, this estimate would be higher. This value is 2-4x higher than the estimates from <ref type="bibr">Southern et al. [3]</ref>, and slightly larger than the one obtained in Section I-A through statistical sampling. Therefore, investments in future optimizations should reduce the overhead of the checks rather than improve the deoptimization path. This motivates our ISA extension.</p><p>From Figure <ref type="figure">6</ref>, we identify outliers such as the Crypto-AES-SP (AES2) and sparse benchmarks, which are more than 30% faster without checks. With checks, SpMV on SMI values are even 20% slower than the large integer and floating-point counterparts, even though 31-bit integer arithmetic has the lowest complexity conceptually. This difference is due to the checks required in SMI arithmetic to detect overflows and other unexpected behaviors, as seen in Figure <ref type="figure">4</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>IV. STATISTICAL ANALYSIS OF CHECK OVERHEADS</head><p>We perform further statistical analyses of the overhead estimates of the deoptimization checks obtained through profiling in Section IN-A and through removal of checks in Section III-B by combining both peered |B erred rrr r e r e r a r e r =r rea 0 10? 10 10? 10? 10" 10" 10? 10? 10" 10" 10? 108 10" 10 10? 10? 10" 10" 10? 10? 10? 10" 10" To* 10" 10" 10" 10" 10? Io" 10" 10 Number of iterations, from 1 to 1000 (log-scale) Fig. <ref type="figure">6</ref>: Relative execution time per iteration with respect to the first iteration, with checks and after removal of checks. Vertical bars indicate the number of deoptimization events. Deoptimizations are rare. Most deoptimizations happen in the first 10 iterations. Compiled code in steady-state is also 2.5x faster than unoptimized interpreted code. Benchmarks with leftover checks are marked with (*).</p><p>techniques. We also characterize deoptimization branches and show how they have a minor but not negligible performance impact.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Statistical Analysis of Check Overhead</head><p>To better understand the relationship between our overhead estimates, we compare measurements obtained from PC-sampling and check removal for each category (Figure <ref type="figure">8</ref>) and for individual benchmarks (Figure <ref type="figure">7</ref>). Since removing checks reduces the execution time, we convert the estimates of our two techniques into a speedup to directly compare them. In the case of PC-sampling, we obtain the estimated speedup as (1 -%ovn/100)-*, where %ovn refers to the check overhead values in Figure <ref type="figure">4</ref>. For our second technique, the relative execution time differences from Figure <ref type="figure">6</ref> can directly be interpreted as speedups.</p><p>We start our analysis with speedups grouped by category, in Figure <ref type="figure">8</ref>. For many benchmark categories, the speedups estimated by PC sampling and check removal are similar. However, there are cases where our two techniques provide different results, such as in sparse benchmarks on x64 and mathematical benchmarks on ARM64. This difference justifies a deeper statistical analysis of our estimates to understand whether speedups are only separated by a proportionality factor and, thus, can still be considered correlated.</p><p>In Figure <ref type="figure" target="#fig_5">9</ref> each benchmark is represented as a point whose coordinates are the speedup values estimated by our two techniques, one for each axis. We also estimate the joint density distribution (in red) and show the linear regression with 95 % confidence intervals. We observe non-negligible correlations between the estimates: R? = 0.51, 71% correlation on x64, and R? = 0.36, 60% correlation on ARM64. Most importantly, a statistical test whose null hypothesis is a zero correlation gives close-to-zero p-values in both cases (&lt; 107?), showing a statistically significant correlation. The lower correlation on ARM64 is explained by the complex structure of checks in this RISC ISA. These results demonstrate the robustness of our overhead estimation methodology and highlight how we can combine information from two very different approaches to obtain a coherent picture of the performance of one of the most complex parts of V8.</p><p>When comparing individual speedup estimates in Figure <ref type="figure">7</ref>, we see how results can significantly change between benchmarks and ISAs. Some benchmarks show hardly any performance improvement; others are more than 20 % faster. Moreover, there is some non-determinism in V8 in how JIT-compilation and garbage collection are triggered. This introduces noise in our measurements as shown by the 95 % percentile error bars in Figure <ref type="figure">7</ref>. As real-world applications can also have noisy and unpredictable performance, we against attempting to eliminate the noise through an artificially setup (e.g., by thread pinning or fixating garbage collection and JIT times), but rather follow a thorough statistical analysis. We, therefore, conduct individual hypothesis tests to identify which benchmarks have a statistically significant overhead that can be attributed to deoptimization checks.</p><p>Practical significance of check overheads: In Figutes 7 and 9, we identify the practically significant benchmarks, i.e., we separate benchmarks with noisy results from those benchmarks that present a real performance difference that can be attributed to deoptimization checks. In this context, the relative execution times of each benchmark, with or without checks, represent a population. We use the total execution duration of the benchmark since repeating the analyses on the steady-state (e.g., the last 300 iterations) did not reveal any evident difference. The significance of tests is set to 0.05, adjusted with Bonferroni's correction over the number of tests <ref type="bibr" target="#b15">[16]</ref>. We identify practically significant benchmarks as benchmarks with a statistically significant performance difference &gt; 2%.  (67 %) on ARM64 show performance improvement when checks are removed, despite the noisy measurements. Most benchmarks that do not gain a significant speedup contain only a few checks (e.g., benchmarks with parsing or regular expression). However, the Multi-Inspector-Code-Load (MICL) benchmark, a cache-intensive parsing benchmark, is 35 % faster on ARM64. While on X64, it also had a large speedup, it had too much variance to be significant. Also, on ARM64, the Raytrace (RAY) and Gaussian-Blur (BLUR) seem to be slower: this apparent slowdown is caused by the large number of leftover checks necessary to preserve the execution semantics.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Measuring the Impact of Branches in Checks</head><p>In the previous section, we established how removing checks results in a significant speedup. However, we do not know whether the speedup comes from the computation of the Boolean check condition or the additional control-flow complexity introduced by these branches also plays a role. We already know that the check branches are rarely taken, as we observed earlier that deoptimizations are very infrequent (Figure <ref type="figure">6</ref>). The question is how expensive the nontaken branches are, compared to the cost of computing the conditions.</p><p>To better characterize the impact of such branches, we modify the code generator in TurboFan so that conditional branches for the checks are not emitted, but without altering the computation of Boolean conditions themselves. Figure <ref type="figure" target="#fig_6">10</ref> presents the relative change of different low-level hardware metrics (collected with perf) of the JetStream2 benchmark suite after removing check branches, aggregated by category.</p><p>We can make the following observations from these measurements. The first observation is that the number of retired instructions is reduced by 5% and the branch count by 20%. However, this reduction achieves only a modest 1-2 % speedup. Despite the 20% reduction of branches, the mispredictions are only reduced by 2-5 %: check branches are almost always predicted correctly, and the cost of a correctly predicted branch is mostly negligible. In Figure <ref type="figure" target="#fig_6">10</ref>, the reduction of mispredictions is larger on the ARM processor than on X64, This indicates that lowering the total branch count helps the branch predictor improve the accuracy of the remaining branches.</p><p>Although removing check branches lowers the instruction count by 5% when, the total number of clock cycles only by 1-2 %. On X64, we note an increase in stalled frontend cycles, up to 5% of cycles stall in the frontend. Further analysis with perf indicates that benchmarks with increased frontend stalls suffer from increased pressure from stalls in the backend. Although check branches are almost always predicted correctly, their presence is still limiting the CPU backend from filling all instruction slots. Without branches, however, the bottleneck moves closer to the CPU backend. Overall, removing check branches alone has a minor impact on performance. This result is relevant when designing ISA extensions for JavaScript. Simply hiding these branches (for example, by merging them with other instructions or handling deoptimizations using exceptions) will not provide significant gains. Instead, a more promising direction is the optimization in the computation of check conditions, even more so, if other downstream computations can benefit from such an optimization. We provide an example of such an ISA extension that improves the performance of SMI arithmetic in the next section.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>V. EXTENSION OF ARM64 ISA IN V8</head><p>SMI arithmetic is a key performance optimization in V8, as it avoids heap accesses for integer values that can be stored in 31 bits. Unlike arithmetic on machine numbers which can be performed within a single instruction, operations on SMIs typically require a sequence of CPU instructions. If SMIs are loaded from memory into a register and the compiler is forced to speculate, a Not-a-SMI deoptimization check must be performed (through a tst followed by b.ne, Figure <ref type="figure">3</ref>) to check whether the value is really an SMI. The value is then converted into a machine integer by right-shifting it by one bit before the arithmetic operation can be performed. This pattern is also prevalent in array accesses and loops with SMI loop variables. Therefore, SMI arithmetic is a good candidate for HW/SW optimizations. To this end, we propose a set of new ARM64 instructions that optimize loading of SMI values, we call jsldrsmi and jsldursmi, as specializations of the load instructions 1dr and ldur. Instead of performing the Not-a-SMI check and the untagging shift through additional instructions, jsldr(u) rsmi performs all these operations with a single hardware component.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Optimizing SMI Arithmetic with Custom Load Instructions</head><p>The idea behind our ISA SMI load extension is that integers should only be represented as SMI values in memory, given that SMIs are primarily a memory optimization. When an SMI is loaded into a register, it should be transparently converted into a regular machine integer, allowing the subsequent instructions to directly operate on it. We add six new SMI load instructions, all belonging to the 1d (u) r family. These instructions support loads with immediate, register, scaled, and unscaled offsets, covering the full set of load instructions that operate on SMIs in V8. Figure <ref type="figure" target="#fig_7">11</ref> shows how the code in Figure <ref type="figure">3</ref> is modified with our new instructions. Note the reduction of the code footprint and the lack of explicit deoptimization checks. The additional instructions at the beginning and the end of the code allow us to handle deoptimization without any explicit branch instructions. Instead, we use three new registers: REG_BA stores the address of the bailout handler. REG_PC and REG_RE are written by our SMI load instructions when the deoptimization check fails. REG_PC stores the program counter of the failed load instruction. REG_RE contains the code of the deoptimization reason, i.e., an 8-bit code that identifies the deoptimization type. The shown ISA extension only supports one deoptimization type, thus, the REG_RE is not strictly necessary. We introduce this register to distinguish the deoptimization reason, allowing us to support future check types that have more than one failure reason. If a check fails, execution moves to the bailout handler through an exception triggered during the instruction commit phase, if REG_RE is not 0. In turn, the bailout handler uses REG_PC and REG_RE to identify which check failed and initiate the bailout process through the same sequence of instructions as the unmodified V8. Our extension does not alter the cost of the bailout handler.</p><p>Figure <ref type="figure">12</ref> illustrates the simple data path extension in the CPU core that implements our SMI load instructions. The untagging shift is performed in parallel to the Not-a-SMI check, and the target register (e.g., XO) is updated concurrently with the special registers REG_PC and REG_RE. Note that even when loading values into a 64-bit adrp x?@, bailout_handler add x@, x?@, :1012:bailout_handler msr REG BA, x@ register, such as X0, the untagging shift operates on the 32-bit view of the register, as SMIs only contain relevant data in the lower 32 bits. The result of the Not-a-SMI check activates two multiplexers, used to update values in REG_PC and REG_RE.</p><p>Adding our new instructions to V8 requires several changes to the TurboFan compiler. We modified the ARM64 backend to generate new instructions and introduced new nodes to the SoN graph representation. We made multiple optimization passes aware of the new instructions, e.g., by suppressing the emission of shift instructions and deoptimizations that are no longer necessary. We prototype the SMI load instructions through the cycle-accurate gem5 simulator <ref type="bibr">[19]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Performance Analysis of our Extended ISA</head><p>We validate our ISA extension on small-scale benchmarks that make use of SMI arithmetic and run with a reasonable time budget in gem5. Each selected benchmark takes around 5 milliseconds on teal hardware (using the unmodified ISA), which still translates to one hour or more of simulation time for each benchmark run. Each benchmark runs 10 times, with an without custom SMI instructions.</p><p>Inputs are fixed and the correctness of the results validated at the end of execution. The main benchmark each benchmark (e.g., mmul) is executed multiple times (e.g., 500, for each of the 10 benchmark runs). With the exception of AES2, all benchmarks reach a stable compilation state before we start recording statistics through gem5. Our benchmark suite is composed of computations mainly operating on SMIs. From results in Figure <ref type="figure">13</ref>, we observe an average execution time reduction of 3 % thanks to our extended ISA, up to 10% for SMIheavy computations such as DP and SPMM. Although the simpler in-order CPUs show a slightly better average speedup, the complex 03 CPUs can still take advantage of our custom instructions. In some cases (e.g., SPMM, AES2), a better speedup is achievable than on the in-order CPUs. We also observe a 4% reduction of retired instructions, mostly attributed to the lower number of ALU instructions that are performed with our extended ISA. Through the memory load unit extension in Figure <ref type="figure">12</ref>, fewer explicit test and shift instructions are necessary. Some speedups, such as SPMV and SPMM on Exynosbig, closely resemble the SM7 and Boundary checks overheads in Figure <ref type="figure">4</ref>. The AES2 benchmark has higher variance on the Exynos CPU due to TurboFan compilation events happening while we are recording statistics. Additional recompilations also explain the higher run time of the IM2COL benchmarks when using our extended ISA. By comparing the execution time distribution of the standard and extended ARM64 ISA, we can obtain additional insight into the performance profile of different benchmarks and CPUs (Figure <ref type="figure">14</ref>). While the performance gap is evident in some cases (e.g., <ref type="bibr">Dot</ref> To the best of our knowledge, we are the first to do so. This result is PyPy JIT compiler, just like V8, shows a significant performance highly relevant for two reasons. First, ARM is not only the dominant difference between the start-up and steady-state performance <ref type="bibr">[26]</ref>.</p><p>architecture in the mobile space-where JavaScript is extremely Other researchers have shown how custom hardware can improve common for client-side applications and web browsers, but it is also Garbage Collection performance by up to 60% in Python and V8</p><p>getting traction in the desktop and server-where platforms such [5], and by 3x in Java when running on an in-order CPU <ref type="bibr">[27]</ref>.</p><p>as Electron and Node.js are increasingly popular-with processors An instruction set extension that adds hardware support for JITs such as the Apple M1 and the Ampere Altra. Second, the fixed-to RISC-V, the J Extension, is currently being drafted. Features that length instruction word in a RISC ISA limits the number and size of are being discussed are hardware support for pointer tagging. instruction operands that can be encoded while X64, which supports VI. RELATED WORK variable-length instructions, offers more flexibility.</p><p>VII. <ref type="bibr">CONCLUSION Southern et al. [3]</ref> analyzed the check overheads in V8, focusing on X64 processors and estimated that an overhead of 2.2 % and 4.6 % on</p><p>We characterized how JavaScript code running in V8, one of high and low-performance Intel processors, respectively. These esti-the widely used JavaScript engine, spends about 8% of its time in mates were obtained in 2016 using the old V8 compiler (Crankshaft), | deoptimization checks. This value is 24x higher than what earlier and cannot be considered representative of the current state of V8. studies reported on an earlier version of V8. This difference motivated Indeed, we measured that checks have an average overhead of 8%, us to perform an up-to-date analysis of check overheads in V8. Most even on server-grade CPUs (Figure <ref type="figure">7</ref>), significantly more than what importantly, we find that this overhead justifies novel research on was assumed before. We also use a broader benchmark suite that aims HW/SW codesign optimizations. Through our ISA extension, we to be is more representative of real JavaScript workloads and include show how to improve the performance of a modern JavaScript engine ARM64 into our analysis. Most importantly, we combine multiple by up to 10%, on SMI-intensive computations.</p><p>new methodologies to estimate check overheads and analyze results While we focused on the commonly-occurring SMI arithmetic, with a thorough statistical analysis, something that was missing from we believe that similar optimizations are possible for other checks, previous research on V8. e.g., imap and boundary checks. These techniques are not limited HW/SW codesign optimizations for JavaScript also attracted inter-to V8. Other JavaScript engines, such as WebKit's JavaScriptCore est in the past. Both <ref type="bibr">Dot et al. [6]</ref> and <ref type="bibr">Anderson et al. [22]</ref> propose and Mozilla's SpiderMonkey, also have multi-tier JIT compilers an ISA extension for X64 that targets the optimization of checks in that perform similar type speculations. Although the implementation JavaScript. Our ISA extension, while indirectly optimizing Not-a-SMI details are different, our methodology to estimate check overheads and Boundary Checks, addresses a more general problem of dynamic and our ISA extension could be applied to these engines.</p><p>languages: how to support efficient data representations (in our case, Furthermore, opportunities in the context of HW/SW codesign are SMIs) for types only available at run time, without introducing not limited to JavaScript but exist for dynamic languages in general. overheads during memory operations. Other techniques use dynamic One area besides optimizing checks is hardware-assisted and cacheinformation tracing to remove, for example, the generation of checks based type-tracing and accelerating the collection of type feedback. that are known to never fail at run time <ref type="bibr">[23]</ref>, <ref type="bibr">[4]</ref>.</p><p>Also possible is the hardware-acceleration of specific and frequently The ARMv8.3-A ISA already contains a specific instruction for used builtin functions (e.g., string equality), which we have measured JavaScript, FICVTZS, which converts double-precision floating-point to take up to 8 % of the execution time in string-intensive benchmarks.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head></head><label></label><figDesc>Fig. 2: Left: V8's compilation flowchart, from different code representations (rounded rectangles). All stages but GN and Parser produce executable code. Right: hierarchy of code representations in V8.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head></head><label></label><figDesc>Time breakdown of checks, on ARM64.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Fig. 5 :</head><label>5</label><figDesc>Fig.5: To prevent the insertion of checks, we short-circuit the node by replacing the original condition with an always-false constant. This node, the original condition and the deoptimization node are marked as dead code and deleted from the Sea-of-Nodes graph.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>Time diff. = 8%|| Time dif. = 8%|| Time diff. = 3%|| Time diff = 4%|| Time dif. = 4%|| Time diff. = 0%|| Time diff. = 6%|| Time dif. = 2%|| Time diff. = Time diff. = 1%|| Time diff. = 1%|| Time diff. -12%|| Time diff. = 0%|| Time dif -10%|| Timo dif. = 2%|[, Time dit = 2%|| Time dif -Time dif = 11%|| Time dif. = 12%| || Time diff -5%|| Time dif. -494] Time ditt -5%|| Time diff. -8% || Time dil &gt; 1%|| Time dit -2%||| Time di -GE = 1%][ A i m e ditt. = 1% Time diff. = 12%|| Time diff. = 6%|| Time diff. = 23%|| Time dif. -6%|| Timo diff. =3%|| Timo dif -3%]| Timo dif. -3%|| Time dif. = 0% Time Gf = -CSR-INT SPMV-CSR-SMI tax ] Time dif. = 145%] Tne di = 37%@|[ Timo ditt = 18%|[ Time dif. = 0%|[ Time dit. = 20%]| Time ditt = 34%] Time dim, = 94%][ Timo dif. =</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Fig. 9 :</head><label>9</label><figDesc>Fig.9: Correlation of check overhead estimates obtained with PCsampling and check removal. We measure a statistically significant positive correlation in both cases.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Fig. 10 :</head><label>10</label><figDesc>Fig.10: Removing only the branch instruction from checks does not result in a significant speedup. However, we still see a S-10% reduction in retired instructions and a 20% reduction in branches. On X64, stalled frontend cycles increase by 3 %.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Fig. 11 :</head><label>11</label><figDesc>Fig. 11: Code snippet from Figure 3 updated with our optimized SMI load instructions. They benefit Not-a-SMI checks, but also Outof-bounds checks and subsequent arithmetic instructions on SMIs, thanks to our implicit untagging shift.Least-significant Pct v bit of X@ exe" wo XOs5 ' a NOT_AN_SMI ce (const, e.g. ean) w! Lu JSLDRSMI X@, ... eex ?</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head></head><label></label><figDesc>We can better characterize the performance of our extended ARM64 ISA by looking at execution time distributions for different benchmarks and CPUs. In multiple cases, variance is reduced (e.g., BLUR on all CPUs, or AES2 on 03-KPG). In some cases (e.g., BLUR on the Exynos-big core), this phenomenon results in lower median execution time.Product (DP) on HPD), in other cases, the difference is less noticeable.numbers to 32-bit integers. It can be configured to trigger a floating-While the mean execution time might look unchanged, our extended point exception if the conversion fails. V8 already makes use of ISA often provides lower variance, and a better median execution this instruction; however, it does not handle conversion errors. This time, such as for BLUR on Exynos-big and AES2 on 03-KPG.instruction is orthogonal to our SMI optimization, as our goal is to improve the handling of SMIs given that V8 avoid using floating point numbers whenever possible. Previous analyses of workloads and overheads of JavaScript en-Research interest in dynamic languages and HW/SW codesign goes gines, and also previous proposals of HW/SW codesign techniques, beyond JavaScript, V8, and ARM. For example, similar analyses on have prevalently focused on X64 [3], [6], [4]. While we also Python have determined that function calls and the cache hierarchy characterize check overheads on X64, we focus our work on ARM64, are a major source of run-time overhead [24], [25], and that the</figDesc><table><row><cell>aan mes | 1 ox-xee ||</cell><cell cols="7">L ih 90.8% 94.2% 97.5% 100.9% 96.3% 97.8% 99.3% 100.9% vr Ih 94.5% 96.5% 98.6% 100.6% -LA | 99.2% 99.7% 100.3% 100.9% \. 5% 97.8% 99.1% 100.: [ | Ao 99.4% 100.0% 100.6% 101.1% | or lb A L L |e 94.8% 96.7% 98.7% 100.6% 96.1% 97.7% 99.2% 100.8% 96.9% 98.1% 99.3% 100.5% 98.0% 98.9% 99.8% 100.7% 96.0% 97.5% 98.9% 100.4% 99.3% 100.1%100.8%101.6% | } } 99.7% 100.3%100.8%101.4% 97.6% 99.3% 101.1%102.9% 76.2% 94.3% 112.4%130.5% 96.7% 100.0%103.3% 106.7% r a | | | x lS Ln h |. | 99.9% 100.0% 100.1% 100.2% 06.4% 97.7% 99.0% 100.3% 99.1% 09.5% 99.9% 100.3% 100.2%101.5%102.9%104.2% 92.4% 95.1% 97.8% 100.5% 98.9% 100.0% 101.0% 102.1% 75.0% 89.8% 104.5%119.3% 96.3% 100.6% 104.9% 109.2% ,</cell></row><row><cell></cell><cell cols="7">bp 97.9% 102.0% 99.7% 100.1%100.5% 100.9% 93.5% 95.9% 98.4% 100.8% 90.8% 100.5% 101.7% 102.0% 04.6% 96.6% 98.5% 100.4% 98. om 100.2% 102.0% 108.7% 97.8% 99.7% 101.6% 108.5% 99.0% 99.8% 100.6%101.5%</cell></row><row><cell></cell><cell>SPMV</cell><cell>MMUL</cell><cell>IM2CoL</cell><cell>SPMM</cell><cell>BLUR</cell><cell>AES2</cell><cell>HASH</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">[) Default ISA HG SMI-extended ISA</cell><cell></cell><cell></cell></row><row><cell>Fig. 14:</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>-</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" xml:id="foot_0"><p>Authorized licensed use limited to: Tsinghua University. Downloaded on January 01,2024 at 05:20:05 UTC from IEEE Xplore. Restrictions apply.</p></note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>References</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Usage statistics of javascript as client-side programming language on websites</title>
+		<author>
+			<persName><forename type="first">Web</forename><forename type="middle">Technology</forename><surname>W? Techs</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Surveys</surname></persName>
+		</author>
+		<imprint>
+			<biblScope unit="page" from="2021" to="2026" />
+		</imprint>
+	</monogr>
+	<note>w3techs.com/technolo gies/details/cp-javascript</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title level="m" type="main">Total number of websites</title>
+		<author>
+			<persName><forename type="first">Internet</forename><surname>Live</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stats</forename></persName>
+		</author>
+		<imprint/>
+	</monogr>
+	<note>internetlivestats.com/to tal-number-of-websites. retrieved on 2021-06-23</note>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Overhead of deoptimization checks in the v8 javascript engine</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Southern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Renau</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 IEEE International Symposium on Workload Characterization (IISWC)</title>
+		<imprint>
+			<publisher>TEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="10" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Removing checks in dynamically typed languages through efficient profiling</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Martinez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gonz?lez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2017 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="257" to="268" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Hardware-software co-optimization of memory management in dynamic languages</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ismail</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Suh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">53</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="45" to="58" />
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Analysis and optimization of engines for dynamically typed languages</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Dot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Martinez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gonzdlez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2015 27th International Symposium on Computer Architecture and High Performance Computing (SBAC-PAD)</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="41" to="48" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Sparkplug -a non-optimizing javascript compiler</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Swirski</surname></persName>
+		</author>
+		<ptr target="ev/blog/sparkplug" />
+		<imprint>
+			<biblScope unit="page" from="2021" to="2025" />
+		</imprint>
+	</monogr>
+	<note>retrieved on 2021-06-22</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">A simple graph-based intermediate representation</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Click</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Paleczny</surname></persName>
+		</author>
+		<ptr target="8.dev/docs/torque" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Sigplan Notices</title>
+		<imprint>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="2021" to="2026" />
+			<date type="published" when="1995">1995</date>
+		</imprint>
+	</monogr>
+	<note>V8 torque user manual</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<monogr>
+		<title level="m" type="main">An internship on laziness: lazy unlinking of deoptimized functions</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Franco</surname></persName>
+		</author>
+		<ptr target="8.dev/blog/lazy-unlinking" />
+		<imprint>
+			<date type="published" when="2017-10-04">2017-10-04</date>
+		</imprint>
+	</monogr>
+	<note>retrieved on 2021-03-31</note>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">6 oCocRASCfTqGq1GCo1jbULDGS-w-nzxkbVF7Up0u0/htmlpresent</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sevcik</surname></persName>
+		</author>
+		<ptr target="docs.google.com/presentation/d/1Z" />
+		<imprint>
+			<date type="published" when="2016-12-09">2016-12-09</date>
+			<biblScope unit="page" from="2021" to="2026" />
+		</imprint>
+	</monogr>
+	<note>Deoptimization in v8</note>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">Introducing the jetstream 2 benchmark suite</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Barati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Saboff</surname></persName>
+		</author>
+		<ptr target="webkit.org/blog/8685/introducing-the-jetstream-2-benchmark-suite" />
+		<imprint>
+			<date type="published" when="2019-03-27">2019-03-27</date>
+		</imprint>
+	</monogr>
+	<note>retrieved on 2021-03-31</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">Octane javascript benchmark suite</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Developers</surname></persName>
+		</author>
+		<ptr target="github.com/chromium/octane" />
+		<imprint>
+			<biblScope unit="page" from="2021" to="2023" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Kraken javascript benchmark</title>
+		<author>
+			<persName><surname>Mozilla</surname></persName>
+		</author>
+		<ptr target="wiki.mozilla.org/Kraken" />
+		<imprint>
+			<biblScope unit="page" from="2021" to="2022" />
+		</imprint>
+	</monogr>
+	<note>retrieved on 2021-03-31</note>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">Sunspider 1.0.2 javascript benchmark</title>
+		<author>
+			<persName><surname>Webkit</surname></persName>
+		</author>
+		<ptr target="webkit.org/perf/sunspider/sunspider.html" />
+		<imprint>
+			<biblScope unit="page" from="2021" to="2023" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Bonferroni correction</title>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">W</forename><surname>Weisstein</surname></persName>
+		</author>
+		<idno>18] [19] [20] [21] [22] [23] [24] [25] [26</idno>
+		<ptr target="Attps://mathworld.wolfram.com/" />
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Tests for departure from normality: Comparison of powers</title>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">S</forename><surname>Pearson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">B</forename><surname>Agostino</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">O</forename><surname>Bowman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Biometrika</title>
+		<imprint>
+			<biblScope unit="volume">64</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="231" to="246" />
+			<date type="published" when="1977">1977</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Individual comparisons by ranking methods</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Wilcoxon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Breakthroughs in statistics</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Springer</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="page" from="196" to="202" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">The gem5 simulator</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Binkert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Saidi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Basu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hestness</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">R</forename><surname>Hower</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sardashti</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGARCH computer architecture news</title>
+		<imprint>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="1" to="7" />
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Arm research starter kit: System modeling using gem5</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Tousi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Full-system simulation of big. little multicore architecture for performance and energy exploration</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Butko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Bruguier</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gamati?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sassatelli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Novo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Torres</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Robert</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 ieee 10th international symposium on embedded multicore/many-core systems-on-chip (mcsoc</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="201" to="208" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Checked load: Architectural support for javascript type-checking on mobile processors</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Anderson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Fortuna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Eggers</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2011 IEEE 17th International Symposium on High Performance Computer Architecture. YEEE</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="419" to="430" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Trace-based just-in-time type specialization for dynamic languages</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Eich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Shaver</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Anderson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Mandelin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">R</forename><surname>Haghighat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hoare</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zbarsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Orendorff</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Sigplan Notices</title>
+		<imprint>
+			<biblScope unit="volume">44</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="465" to="478" />
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Cross-layer workload characterization of meta-tracing jit vms</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ilbeyi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">F</forename><surname>Bolz-Tereick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Batten</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2017 IEEE International Symposium on Workload Characterization (IISWC)</title>
+		<imprint>
+			<publisher>TEEE</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="97" to="107" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Quantitative overhead analysis for python</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ismail</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Suh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Symposium on Workload Characterization (IISWC)</title>
+		<imprint>
+			<publisher>TEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="36" to="47" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">A rigorous benchmarking and performance analysis methodology for python workloads</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Crap?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Eeckhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 IEEE International Symposium on Workload Characterization (IISWC)</title>
+		<imprint>
+			<publisher>TEEE</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="83" to="93" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">A hardware accelerator for tracing garbage collection</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Maas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Asanovi?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kubiatowicz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 ACM/IEEE 45th Annual International Symposium on Computer Architecture (ISCA). TEEE, 2018, pp</title>
+		<imprint>
+			<biblScope unit="page" from="138" to="151" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

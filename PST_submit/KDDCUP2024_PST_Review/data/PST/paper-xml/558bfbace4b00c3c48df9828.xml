@@ -1,0 +1,1064 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Fast Thread Migration via Cache Working Set Prediction</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Jeffery</forename><forename type="middle">A</forename><surname>Brown</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<addrLine>San Diego La Jolla</addrLine>
+									<postCode>92093-0404</postCode>
+									<region>CA</region>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Leo</forename><surname>Porter</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<addrLine>San Diego La Jolla</addrLine>
+									<postCode>92093-0404</postCode>
+									<region>CA</region>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Dean</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California</orgName>
+								<address>
+									<addrLine>San Diego La Jolla</addrLine>
+									<postCode>92093-0404</postCode>
+									<region>CA</region>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Fast Thread Migration via Cache Working Set Prediction</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:44+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>The most significant source of lost performance when a thread migrates between cores is the loss of cache state. A significant boost in post-migration performance is possible if the cache working set can be moved, proactively, with the thread.</p><p>This work accelerates thread startup performance after migration by predicting and prefetching the working set of the application into the new cache. It shows that simply moving cache state performs poorly, and that moving the instruction working set can be even more critical than data. This paper demonstrates a technique that captures the access behavior of a thread, summarizes that behavior into a compact form for transfer between cores, and then prefetches appropriate data into the new caches based on the summary. It presents a detailed study of single-thread migration effects, and then demonstrates its utility on a speculative multithreading architecture.</p><p>Working set prediction as much as doubles the performance of short-lived threads, and in a full speculative multithreading implementation, the technique is also shown to nearly double the effectiveness of the spawned threads.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>As we progress into the manycore era, we become increasingly dependent on high levels of thread-level parallelism for performance scaling. This will require new programming and execution models that expose more parallelism. An important barrier to the viability of many proposed execution models is an inability to efficiently execute short threads, due to the overhead of copying a thread's cache state between cores. Several new execution models significantly decrease the mean core occupancy times of threads, or otherwise increase the frequency of thread state transfers between cores.</p><p>Such new models will be significantly more effective if they have the freedom to exploit parallelism in chunks which are tens to hundreds of instructions long. However, current machines cannot profitably move or fork execution between cores at ranges below tens to hundreds of thousands of instructions; a great deal of potential parallelism is unavailable due to the cost of moving and forking threads.</p><p>We also see frequent state migration with traditional parallelization, both at loop-level (where threads spawned for a loop iteration inherit the state of the serial code leading to the loop) and at task-level (where parallel tasks inherit the state of the callers). Less traditional uses of parallel hardware also demand frequent migration. Speculative multithreading <ref type="bibr" target="#b31">[32,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b33">34]</ref> breaks serial execution into potentially parallel threads, each thread inheriting the execution context of the previous thread. Helper threads <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b10">11,</ref><ref type="bibr" target="#b39">40]</ref> also utilize parallel hardware for speedup, without actually offloading computation; each new helper thread executes within the same address space as the main thread, inheriting its memory state.</p><p>Heterogeneous multi-core proposals <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b18">19]</ref> move threads between cores to exploit power-performance-area trade-offs. Those proposals use frequent sampling, via heavy thread migration, to discover good mappings of threads to cores. They migrate threads conservatively due to the high cost of migration; presumably, as we lower that cost, such architectures can adapt more quickly, increasing potential gains.</p><p>Other research migrates threads when thread-level parallelism changes <ref type="bibr" target="#b0">[1]</ref> or at each system call <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b4">5]</ref>. Software data spreading <ref type="bibr" target="#b16">[17]</ref> frequently migrates threads at compiler-determined points in order to effectively utilize the aggregate capacity of multiple private caches. Even when multi-cores are not exploited for performance, thread migration may be demanded, e.g. for schemes which use core-hopping for thermal management <ref type="bibr" target="#b5">[6]</ref>.</p><p>These techniques all share the property that a thread begins or resumes execution on one core after its working set has been built up on another core. In current systems, the primary mechanism for working set migration (WSM) is executing code on the new core, causing demand misses which retrieve data from either another core, shared cache, or memory. This is a particularly inefficient mechanism for building a working set, since the rate at which data migrates is directly tied to the speed of the "migration engine"the executing code. The time when execution is most sensitive to cold-cache effects -just after migration -is the very time when execution generates addresses most slowly, because performance suffers due to those same effects.</p><p>We explore mechanisms for predicting and prefetching the future working set of threads as they migrate between cores. We introduce a three-step approach to WSM: first, we augment each core with simple hardware to capture the access behavior of threads as they execute. Next, when deactivating or forking a thread, we summarize the captured behavior to represent likely future instruction and data accesses, then transfer that summary along with other thread state. Finally, we apply the summary data with a prefetcher at the new core.</p><p>Our primary purpose is to evaluate a diverse set of mechanisms which capture access behavior, and measure how effectively each predicts future accesses. Though we evaluate schemes of varying complexity, we achieve our best results using very inexpensive schemes. We realize useful performance gains at low cost with small, low-complexity tables, maintained using only the address stream of executing threads.</p><p>We also demonstrate the utility of WSM by adding it to a speculative multithreading architecture, where it significantly boosts the effectiveness of speculative threads.</p><p>This research makes the following contributions: We show that demand-fetching is not an effective mechanism for filling caches after migration. We show that conventional hardware prefetchers are not useful over the time intervals in which performance loss is the most dire. We show that in many scenarios I-stream misses are much more critical to post-migration performance than D-stream misses. We demonstrate that bulk transferring the private caches is surprisingly ineffective, and in many cases is worse than doing nothing. With the addition of a few small, simple tables to monitor access activity, and a prefetcher driven by those tables, we achieve as much as a 2X performance boost for short (100-instruction) threads. We show that some of these techniques directly apply to the problem of lost locality due to frequent thread spawning in a speculative multithreading architecture.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Background and Related Work</head><p>Previous work <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b37">38]</ref> describes support mechanisms for migrating register state in order to decrease the latency of thread activation and deactivation; however, performance subsequent to migration still suffers due to cold-cache effects. Our work is complimentary; we specifically address the post-migration cache misses which limit the gains of those techniques. Choi, et al., explore the complementary problem of branch prediction for short-lived threads <ref type="bibr" target="#b7">[8]</ref>.</p><p>Stream buffers <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b23">24]</ref> introduce small associative structures which track data access patterns. Additional work <ref type="bibr" target="#b30">[31]</ref> extends this idea, allowing an advanced predictor to be shared among many streams. We model a discrete hardware predictor-directed stream buffer in the style of <ref type="bibr" target="#b30">[31]</ref>, omitting the shared Markov predictor, as part of our baseline. We also add the ability to transfer stream-buffer state as a candidate working set prefetcher.</p><p>Sair, et al. <ref type="bibr" target="#b28">[29]</ref> survey several prefetchers, and introduce a method for classifying memory access behaviors in hardware: the memory access stream is matched against behavior-specific tables operating in parallel. We utilize some similar structures in the capture stage of our migration system.</p><p>Speculative Precomputation <ref type="bibr" target="#b39">[40,</ref><ref type="bibr" target="#b10">11]</ref> targets memory instructions which degrade performance due to poor cache behavior, using alternate contexts on multithreaded or CMP <ref type="bibr" target="#b3">[4]</ref> architectures. Focusing on misses, these schemes target the subset of the future working set which is not currently cached. Dependence-following schemes <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b9">10]</ref> prefetch by following dependence chains through memory. While valuable, these techniques alone are of limited utility immediately after a migration, due to their serial progression. (We incorporate this style of prefetching with our pointer-chase table.)</p><p>Runahead Execution <ref type="bibr" target="#b22">[23]</ref> prefetches by speculatively executing the application, but ignoring dependences on longlatency misses. This seems well-suited to our need to prefetch what would normally be cache hits in addition to misses, and to cover a substantial amount of workingset with little metadata overhead. However, this scheme is hamstrung in the post-migration environment by the lack of I-cache state at the target core; I-cache miss stalls serialize short-term prefetching.</p><p>Dead-block prediction <ref type="bibr" target="#b19">[20]</ref> predicts when L1 D-cache blocks are no longer needed before replacement; an additional table is used to predict likely successors for earlyevicted blocks. They use the dead-block predictor and correlations it exposes to prefetch likely misses, and use the freed L1 storage as a prefetch buffer. Their work motivates ours; we also find that caches often hold data irrelevant to future accesses.</p><p>Data Marshaling <ref type="bibr" target="#b35">[36]</ref> mitigates inter-core data misses in Staged Execution models. In contrast to our approach, DM targets scheduled stage transitions using compile-time flagging of producer instructions, hardware to track writes by flagged instructions, and a new instruction which triggers data transfers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">Baseline Multicore Architecture</head><p>We study a four-core chip multiprocessor (CMP). Each core has a four-way superscalar out-of-order execution engine. Given their ability to exploit memory level parallelism, these cores will be less sensitive to cache migration effects than those of a conservative design. Our cores have private first-level I-and D-caches, and a private secondlevel unified cache; see Figure <ref type="figure" target="#fig_0">1</ref>. Off-chip memory is accessed via a shared four-channel off-chip memory controller. Specific parameters of the core and memory subsystems are detailed in §6.1. The four cores communicate over a shared bus. Caches are kept coherent with a MESI coherence protocol <ref type="bibr" target="#b24">[25]</ref> and snooping; our techniques readily apply to systems with scalable interconnects and more cores.</p><p>The cores of our CMP feature hardware support for thread activation and deactivation, as found in prior studies of thread scheduling <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b37">38]</ref>. While those works used hardware support to implement scheduling and time-sharing policies, we use it simply for adding and removing threads from cores. Traditional software-driven migration has much higher overhead, which would dominate cache migration costs; we believe that direct OS involvement in all thread movement is ceasing to be a viable model, but even the OS overhead for migration can be significantly reduced from current levels <ref type="bibr" target="#b34">[35]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Motivation</head><p>Many execution scenarios require the working set of a thread to migrate between cores: load balancing, thread spawning, loop-level parallelization, task-level parallelization, helper threads, speculative multithreading, heterogeneous multicore adaptation, thermal management, etc. These will become more common as core counts increase; each of these mechanisms will be even more effective with decreased migration cost. Although the principles of this work apply in all of these cases, for clarity of evaluation we focus first on single-thread migration at arbitrary points in the program. We later apply our technique to a speculatively multithreaded, transaction-based parallel workload, improving overall performance.</p><p>To initially evaluate migration mechanisms on our single-thread workloads, we repeatedly move a single thread among a set of cores. There are several costs incurred in migrating a thread: transferring register state, transferring TLB state, recreating branch predictor state, etc.; however, the largest amount of program state on a core resides in the caches. As a result, the cost of transferring cached state dominates thread re-start performance. In addition, cache state is moved very slowly, because it is only demandfetched as the thread executes on the new core, but after migration that thread is executing (and demand-fetching) extremely slowly. Figure <ref type="figure" target="#fig_1">2</ref> gives the result of an experiment that illustrates the cost of migration and the potential to reduce the cacherelated portion of that cost. We force a single thread to migrate round-robin among four cores, moving every 1 million commits, and record the time it takes to start-up and commit the next 1, 10, 100, . . . 10 6 instructions after each migration. We perform this experiment across the SPEC2000 benchmark suite, with varying amounts of architectural (and oracle) support for migration. We show slowdown relative to the ideal case where all cache contents are instantly transported to the new core for free. It takes, on average, 7 times as long to commit the 100th instruction in the default migration case -"no help" -compared to cost-free cache migration. (We initially assume that a background workload causes cache state to be evicted before a thread returns to a previous core, and which does not otherwise impair the thread; we revisit this assumption in §7.6.)</p><p>Considering the feasible schemes of Figure <ref type="figure" target="#fig_1">2</ref>, "copy I+D" bulk-copies both first-level caches by transferring a list of their tags to the new core and fetching blocks via core-to-core transfers; "copy stream info" transfers just the metadata from the first core's hardware stream buffer to the second, allowing it to resume following known streams. For the idealized schemes, "oracle prefetch" uses perfect knowledge of future accesses to fetch required blocks at the new core, requesting them via the memory hierarchy as the thread restarts and modeling the costs of these requests; "instant-copy I+D" instantly transfers the contents of the first-level I-and D-caches to the new core, cost-free; finally, "instant-copy L1+L2" instantly transfers all cached data, cost-free.</p><p>This graph provides several key insights. First, we see that unless a thread executes on a core for many instructions before being migrated, the cost of migration is not amortized in the realistic schemes. At 10,000 commits, the cost is still very high (2X slowdown); for shorter threads, migration cost is extreme. Note that several speculative multi-threading proposals routinely execute threads under 100 instructions <ref type="bibr" target="#b20">[21]</ref>, as do helper-threads <ref type="bibr" target="#b38">[39]</ref>; several transactional memory programs (for Transactional Coherency and Consistency) showed average transaction lengths in the low hundreds <ref type="bibr" target="#b8">[9]</ref>.</p><p>We also see that copying entire caches proactively -the "copy I+D" case -is not effective: there is too much data, much of it irrelevant. This is worse than doing nothing over short intervals, and takes about 10,000 instructions to be amortized enough to approach break-even. While not shown, the cost of copying the larger L2-resident state is even higher.</p><p>We see that copying stream buffer state -the "copy stream info" case -is more effective over short terms than moving the entire L1 cache state; the stream buffer is small and directly targets future accesses. This is still not particularly effective, since it represents only a small fraction of the future working set: the stream buffer is built to target future misses in the D-stream; what we really want is something similar to the stream buffer, but trained on the entire access stream. Furthermore, this scheme does not prefetch for the I-stream. Immediately after migration, there is great demand for instructions; the lack of I-stream prefetching is exacerbated by the inability to overlap multiple I-misses.</p><p>At the short time scales we're most interested in for migration support, conventional hardware prefetchers are unable to contribute much (we observe this, because hardware prefetchers are included in our baseline architecture): they don't have enough time to train on an incoming thread's behavior, since the thread itself is struggling to execute.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Architectural Support for WSM</head><p>In §4 we demonstrated that characterizing the miss stream is not sufficient to cover many migration-related misses; we need to characterize the access stream. We construct a working set predictor which works in three stages. First, we observe the access stream of a thread and capture patterns and behaviors. Second, we summarize this behavior and transfer the summary data to the new core. Third, we apply the summary via a prefetch engine on the target core, to rapidly fill the caches in advance of the migrated thread.</p><p>We begin by describing a set of possible capture engines. We start out concerned less with the implementation cost, and more with exploring a variety of possibilities. After evaluating tables that capture a wide variety of access patterns, we find that we get excellent performance with very few, very small tables, each with simple index functions, utilizing only post-commit PCs and memory addresses.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1.">Memory logger</head><p>To each core we add a memory logger, a specialized unit which records selected details of each committed memory instruction and I-cache access. This unit passively ob- serves the current thread as it executes, but does not directly affect execution; it can be implemented outside of the main pipeline where it need not influence critical timing paths, and is tolerant of any additional latency needed for buffering. If a conservatively-implemented memory logger becomes swamped with input, records may safely be discarded; this will degrade the accuracy of later prefetching. We model a memory logger which can keep up with execution.</p><p>The memory logger is implemented with small (32entry) content-addressable memory (CAM) tables, each with associated control logic. These tables are indexed using various portions of the information from each memory operation. We examine a variety of potential table types, each tailored to capture a specific class of access pattern: one table tracks striding accesses, another tracks pointer traversals, etc. Figure <ref type="figure" target="#fig_2">3</ref> shows an overview of a potential memory logger architecture with multiple tables. As mentioned, we find in §7.3 and §7.4 that we get excellent performance with a few simple tables, and very little information extracted from the pipeline.</p><p>Each table within the memory logger targets a specific type of access pattern; we next describe each type we consider. (We are not proposing these tables as novel prefetching schemes; several of the underlying ideas are discussed in §2, and <ref type="bibr" target="#b28">[29]</ref> surveys several more.)</p><p>Next-block-{Inst,Data}: These detect sequential block accesses; entries are advanced by one cache block on a hit. We maintain separate next-block tables for the I-and Dstreams.</p><p>StridePC: This tracks individual instructions which walk through memory in fixed-sized steps; only D-stream accesses are tracked, using the PC values and access addresses.</p><p>Pointer, Pointer-chase: These capture active pointers and pointer traversals, respectively, by detecting when the data output of a load matches the address of a later memory access, similar to pointer-cache <ref type="bibr" target="#b9">[10]</ref> and dependence- Same-object: This captures accesses to ranges of memory from a common base address, as is common for structure and object access code. This takes advantage of the common "base+offset" addressing mode, tracking minimum and maximum offsets for each base address, while ignoring accesses relative to the global pointer or stack pointer.</p><p>SPWindow, PCWindow: These don't actually use tables; we just record the value of the stack pointer and PC, respectively, and use them to prefetch a window of data blocks near the top of the stack, or a window of instructions near the first post-migrate instruction.</p><p>{Inst,Data}-MRU: These record the most recent blocks accessed from the I-and D-streams. These operate at fourcache-block granularity, allowing them to cheaply cover a larger number of blocks without increasing MRU maintenance.</p><p>BTB, BlockBTB: These capture taken branches and their targets, recording the most recent inbound branch for each target. BlockBTB is a block-aligned variant of BTB; branch and target PCs are block-aligned, allowing a greater amount of the instruction working set to be characterized at a given table size.</p><p>RetStack: This maintains a shadow copy of the processor return stack, prefetching blocks of instructions near the top few control frames.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.">Summary generator</head><p>The summary generator, depicted in Figure <ref type="figure" target="#fig_3">4</ref>, activates when a core is signaled to migrate a thread. As introduced in §3, our baseline core design assumes hardware support for thread swapping; at halt-time, the core collects and stores the register state of the thread being halted.</p><p>While register state is being transferred, the summary generator reads through the tables populated by the memory logger and prepares a compact summary of the thread's likely future working set. This summary is transmitted after the architected thread state, and is used to prefetch the thread's working set when it resumes on the new core. During summarization each table entry is inspected to determine its usefulness by observing whether its age-adjusted hit counter exceeds a threshold. Output summaries are packed into cache-line size blocks for efficient transfer.</p><p>Table entries are summarized for transfer by generating a sequence of block addresses from each, following the behavior pattern captured by that table (e.g. prefetching an object's blocks for a Same-object entry, or the successor block for a Next-Block entry). We encode each sequence with a simple linear-range encoding, &lt;start-address, stride, length&gt;, which tells the prefetcher to fetch length cache blocks, starting at start-address, with stride stride. We conservatively allocate 64 bits for each tuple; this could be reduced with even rudimentary compression. The length bound is necessary because we prefetch directly into the caches, dependence-free, as fast as the memory subsystem allows. This does not have the natural pacing present in, for example, stream buffers; while finite MSHR and cache ports limit overall prefetcher throughput, judicious length restrictions help individual summaries share those resources. Overall, we've tuned lengths to roughly transfer enough data to cover the first 1,000 instructions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3.">Summary-driven prefetcher</head><p>Rounding out our working-set migration hardware is the summary-driven prefetcher, depicted in Figure <ref type="figure" target="#fig_4">5</ref>. When a previously-suspended thread is activated on a core, its summary records are read by the prefetcher. Each record is expanded to a sequence of cache block addresses, which are submitted for prefetching as bandwidth allows. While the main execution pipeline reloads register values and resumes execution, the prefetcher independently begins to prefetch a likely working set. Prefetches search the entire memory hierarchy, and contend for the same resources as demand requests. Once the register state has been loaded, the thread resumes execution and competes with the prefetchers for memory resources. Communication overlap and contention for interconnect and caches is modeled among transfers of register state, table summaries, prefetches, and the service of demand-misses.</p><p>We model the prefetch engine as submitting virtuallyaddressed memory requests at the existing ports of the Iand D-caches, utilizing the existing memory hierarchy for service. While these requests compete with the thread itself, we find that most prefetching immediately after migration occurs while the thread would otherwise be stalled for memory access; thus we do not require additional cache porting.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Methodology</head><p>We evaluate the prefetching coverage and overall performance of our working-set migration system using an execution-driven, out-of-order processor and memory system simulator.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1.">Simulator configuration</head><p>We start with a multi-core version of SMTSIM <ref type="bibr" target="#b36">[37]</ref>, configured with single-threaded cores. Our four cores are clocked at 2.0 GHz, with timing for other structures reported in terms of this clock rate. Table 1 lists the most significant parameters of the baseline system used in our experiments. Our memory subsystem layout and latencies are based on that of recent Intel Nehalem-based processors <ref type="bibr" target="#b14">[15]</ref>; bandwidth constraints are based on benchmarking of Nehalem-based systems and on the specifications of DDR3-1600.</p><p>Our system details MSHRs, queues, banking, and porting for each cache, with per-bank and port latency and bandwidth accounting. We model latency and bandwidth for each DRAM channel with a simple queue, "QILM" in the parlance of <ref type="bibr" target="#b32">[33]</ref>, without detailed memory controller modeling. In this study, virtually all post-migration misses are serviced core-to-core rather than off-chip; consequently, the memory hierarchy beyond the L2 caches has no significant impact on our results. (We confirm this in §7.8, where our results are unaffected by adding a shared L3 cache, and again in §8 where our overall speedups are unaffected by large changes in DRAM latency.)</p><p>Atop this baseline, we implement and evaluate the working-set migration architecture described in §5. The InstMRU and DataMRU CAMs have 16 entries each; all other logger CAMs have 32 entries. We use an easilyimplemented round-robin replacement policy, which skips replacement of entries with recent hits (within the last 500 lookups), avoiding the complexity of LRU.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2.">Workloads</head><p>Evaluating the speed of migration is not straightforward. We could examine a particular environment which benefits from fast migration (e.g. speculative multithreading, a shared-thread multiprocessor), but the results would be specific to those execution models; instead, we first model a generic environment to produce techniques that are useful in the general case. While there are many potential reasons for a particular migration (as discussed in §1), any migration in a real system will be subject to some or all of the overheads we characterize in this work.</p><p>We start with all individual benchmarks from the SPEC2000 suite, running standalone on a four-core processor. Each benchmark is simulated for 200 million commits during its main phase of execution. To evaluate performance subsequent to migration, we force threads to migrate round-robin around cores, triggering a migration every 1 million commits. We measure the time to commit 10 n instructions after each migration, n ∈ {0 . . . 6}. Examining performance across this wide range of intervals offers insight into how long it takes to amortize the cost of a migration, and the expected throughput for short, medium, and long-lived threads.</p><p>We initially assume that caches are empty when a migrating thread returns to a given core. This is a simplified model of an environment where unrelated background threads occupy other cores, evicting the blocks of the thread under study during its absence; this allows evaluation absent noise from other threads. We also present data from more realistic scenarios with background threads simulated in §7.6 and §7.7. In those cases, we use random sets of the other benchmarks running on the idle cores, with threads on the other cores migrating among cores about as often as the thread under measurement.</p><p>In addition to the detailed evaluation of post-migrate behavior described in this section, we also demonstrate the overall benefit of working-set migration on a particular architecture, speculative multithreading. Because those experiments introduce several new properties, that methodology is discussed in §8.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3.">Metrics</head><p>Performance evaluation presents another challenge: we wish to gauge the impact of our changes on performance in the immediate wake of migration operations, which we repeatedly induce. By triggering fairly infrequently and capturing the post-migration behavior over a wide range of intervals, we capture both the short-term and long-term impact of each migration. Our measured migrations are independent of any particular system condition other than overall commit progress; this ensures that the results at each time interval are comparable across various migration policies, since migrations occur at the exact same points in each simulation.</p><p>Our performance metric is based on the time it takes to commit an interval of 10 n instructions immediately following each migration operation, for n ∈ {0 . . . 6}. We measure time from the first post-migrate fetch until 10 n instructions commit. We report results in terms of speedups relative to the same intervals on our baseline system.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">Analysis and Results</head><p>This section examines a number of mechanisms for predicting the future working set of a migrating thread, ranging from simple to complex, ideal to realistic.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.1.">Bulk cache transfer</head><p>The most straightforward predictor of the future working set is the existing contents of the caches. We can copy those contents in bulk immediately after moving register state. We saw in Figure <ref type="figure" target="#fig_1">2</ref> that this was not effective, at least over the short intervals, due to the quantity of data transferred and the fraction of data that does not turn out to be useful. To perform bulk cache transfers at migration time -while the source core's pipeline is retrieving register values for transfer -we read out the set of cache tags belonging to the subject thread, and pack them into a message for transfer to the target core.</p><p>Figure <ref type="figure" target="#fig_5">6</ref> shows the impact of bulk cache transfers on our single-threaded workloads, broken down by individual cache. Over the shorter intervals, performance is significantly worse, as the dependence-free prefetch traffic consumes most available request bandwidth. In the baseline case, the thread is already hamstrung by the low rate at which it can generate new memory references; adding bulk cache requests increases the contention for MSHRs and request ports, and confuses the cache replacement priority, worsening the short-term situation. Over longer intervals, we do see benefit from bulk-transferring the I-cache, and from transferring both L1 caches together.</p><p>Moving the D-cache by itself has almost no positive effect. This is a recurring theme in our results: the I-cache is more critical to post-migration performance, if both caches start empty. I-cache misses progress serially, while D-cache misses can often be serviced in parallel with each other, making the I-stream the clear bottleneck. In the case where all three caches are bulk copied, we see performance gains at large intervals primarily because the I-cache is included, and in fact this is less effective than copying the I-cache alone. Due to the size of the L2 cache, the transfer cost is not amortized even over 1 million commits (I + D + L2 is never better than I + D).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.2.">Limits of prefetching</head><p>Our next experiment explores the potential of postmigration prefetching. Here, we rely on an oracle prefetcher which has perfect knowledge of all future L1 block accesses. It prefetches these in order, looking far enough ahead to fill each of the L1 caches halfway. This result is shown in Figure <ref type="figure" target="#fig_6">7</ref>. We see that the potential gains are high; despite incurring the full cost of sending the summaries and transferring the data, the oracle's perfect accuracy allows it to approach the performance of free transfers -and actually doing better at 10 3 commits and beyond -while far outpacing cache copying. This demonstrates that the underlying memory system has sufficient bandwidth to support efficient thread migration; performance depends primarily on the accuracy of our working-set summaries.  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.3.">I-stream prefetching</head><p>I-stream prefetching and D-stream prefetching are synergistic; we saw this earlier, where fetching the D-stream was useless if the I-cache was empty. Therefore, to evaluate the tables of our memory logger which target the Istream, we first assume a good solution for the D-stream. In this section, we evaluate the different I-stream tables in combination with an oracle D-stream prefetcher. The oracle still incurs overhead, but has perfect knowledge of the 1000 commits following each migration.</p><p>We see these results in Figure <ref type="figure" target="#fig_7">8</ref>. We can't conclude much yet in terms of realistic speedup, but we do see that two very simple approaches -PCWindow and InstMRU -are quite effective over both the short and medium term. The latter has a significant advantage over moving the entire cache because it can be more timely: by requesting a subset of the cache, it moves the most relevant instructions more quickly.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.4.">D-stream prefetching</head><p>As we prefetch the I-stream into the new caches, the Dstream then becomes the bottleneck. Complementing §7.3 above, here we evaluate the tables of our memory logger which target the D-stream, temporarily assuming an oracle I-stream prefetcher with perfect knowledge of 1000 commits into the future.  Figure <ref type="figure" target="#fig_8">9</ref> shows these results. Here, the variations are lower than in the I-stream case, partially because of the diversity of access patterns, but also because of overlap between schemes: several of these tables track the same accesses in different ways. Again, very simple tables suffice; DataMRU and StridePC both perform well over a range of intervals, the former slightly better for shorter threads, the latter slightly better for longer threads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.5.">Combined prefetchers</head><p>Next, we examine combinations of realistic I-and Dstream prefetchers, with no oracle knowledge. For the Istream, we use a combination of PCWindow and InstMRU. (Results with just InstMRU were quite similar, because In-stMRU partially subsumes PCWindow: the current PC is always in the MRU table.) However, by combining their behaviors, we can prefetch a larger window of instructions around the current PC than we do for the other addresses.</p><p>We combine these with several of our D-stream predictors in Figure <ref type="figure" target="#fig_9">10</ref>. Again, we see the StridePC and DataMRU predictors each give excellent performance overall. For threads as short as 100 instructions, we achieve speedups as high as 2X using this working set prediction framework.</p><p>Table <ref type="table" target="#tab_2">2</ref> shows the transfer intensity and the accuracy of several prefetching schemes: the best two prefetch com-  binations from Figure <ref type="figure" target="#fig_9">10</ref>, as well as bulk-copy of the L1 caches. We see from these results that our proposed migration support provides both more accurate and more directed prefetching than moving the cache state itself. In summary, we see that a combination like In-stMRU+PCWindow+DataMRU uses only two 16-entry tables, one watching the I-stream and one watching the Dstream, and enables us to as much as double the throughput of short threads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.6.">Cross-migration data reuse</head><p>We've been migrating individual threads in an otherwise idle system, in order to evaluate prefetching absent interference from other threads. However, with no other a frequently-migrating thread would quickly build up copies of working set each core, and gain less from prefetching. To simulate cache interference from other threads, thus far we've assumed that when a thread is migrated a core, its entire working set has been evicted.</p><p>For a more realistic scenario, in this section we remove that restriction on cached data re-use. In order to provide cache replacement pressure on the cores which are not running the thread under evaluation, we schedule an independent workload on each (chosen randomly from SPEC2000), and move these background threads among cores periodically, outside of our prefetch-evaluation time periods. Figure <ref type="figure" target="#fig_0">11</ref> shows the resulting performance. Compared to Figure <ref type="figure" target="#fig_9">10</ref>, our gains are reduced, but overall performance trends are similar. For example, mean suite-wide speedup for the DataMRU combination over 100 post-migrate commits has dropped from about 2.00 to 1.61. This drop is from the combination of additional cache re-use along with contention for interconnect and memory resources. However, the available performance gains are still quite high.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.7.">Impact on other threads</head><p>The experiments in §7.6 also allow us to evaluate the impact of these short bursts of prefetches on unrelated threads running on other cores. In the short term, the impact is measurable -4% slowdown of other threads during the time the migrated thread executes its first 100 instructions -but is dwarfed by the gains of the migrated thread. The slowdown tapers off quickly, to 0.1% slowdown at 10,000 instructions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.8.">Adding a shared last-level cache</head><p>To demonstrate that our gains are largely insensitive to memory latencies beyond the core-to-core transfers that dominate during migration, we model the addition of a shared L3 cache. We add an 8MB 16-way associative L3, with an overall load-use latency of 40 cycles (L2 latency remains 14 cycles). With this L3 added to both the baseline and experimental cases, we find that performance is nearly identical; compared to e.g. the "StridePC" experiments described for Figure <ref type="figure" target="#fig_9">10</ref>, adding the L3 to both the baseline and the system with working set prediction, decreases the achieved speedup by a mean of 0.1% for 100 post-migrate commits, and mean 1.0% across all time scales. (In §8 we also show that overall benefits are insensitive to large changes in main-memory latency itself.)</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.9.">Simple hardware prefetchers</head><p>All of our results thus far use a baseline with a fairly aggressive hardware stream-buffer based prefetcher. This prefetcher is rendered relatively ineffective during postmigration startup because it needs to learn stride patterns. It could be argued that in a system that expects frequent short threads, a simpler hardware prefetcher that ramped up more quickly might be more appropriate and could render our techniques less necessary. In fact, we find that not to be true.</p><p>For these results, we add next-block prefetchers to both L1 caches: these prefetch the successor to each block, at the first touch after that block is filled. Using these prefetchers instead of our proposed migration-targeting prefetchers, we observed only 1.010 mean speedup over 100 post-migrate commits. Over longer time scales, the benefits ramp up, to e.g. 1.104 mean speedup over 10000 post-migrate commits.</p><p>We find that over the short time scales we're most interested in for migration support, even these simple prefetchers are unable to contribute: they still fall prey to the nascent thread's slow progress, which prevents them being trained quickly enough to help, because they are being trained by demand misses. In contrast, our prefetchers are already trained at the time of migration.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.">WSM for Speculative Multithreading</head><p>We've demonstrated our techniques to be effective at mitigating the loss of cache state during thread migration in a framework that forces frequent migrations for the sole purpose of measurement. To demonstrate a practical application of working-set migration, we evaluate its ability to improve Speculative Multithreading.</p><p>In Speculative Multithreading (SpMT), loss of cache state impedes performance as execution migrates across cores <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b12">13,</ref><ref type="bibr" target="#b25">26]</ref>. This is a well-documented and longstanding problem. Execution that would ordinarily reside on a single core is now spread across several, creating misses and invalidate traffic where the original code experienced hits in a single cache. Additionally, coherence-based speculative multithreading requires certain data to be invalidated in caches for both squashed and committed threads, exacerbating the problem.</p><p>The SpMT scenario is different from our generic migration experiments of previous sections in three important ways. Thread start points are more deterministic (we frequently start threads at the same PC), we have less interference from other applications (we assume an idle core is not made available to other applications while waiting to spawn a new SpMT thread), and because spawned threads represent future execution, the memory loggers will experience a gap in memory addresses between the spawn point and the execution of the spawned thread. The first two differences mean that I-stream prefetching is less critical, since I-caches warm to the code of recurring threads and stay warm. Addressing the third difference is the subject of future work; however, despite all these challenges, we still see gains from working-set prediction on SpMT architectures.</p><p>We obtained the Multithreading framework to evaluate a number of Hardware Transactional Memory designs <ref type="bibr" target="#b25">[26]</ref> and modified it to include our working migration techniques. In this framework, loops and function calls are identified for speculative parallelization entirely in hardware. Register dependencies between threads are predicted by a live-in predictor and the values are predicted using an increment predictor <ref type="bibr" target="#b20">[21]</ref>. Memory dependencies are addressed via a modified form of Hardware Transactional Memory, specifically the OFWI design recommended by <ref type="bibr" target="#b25">[26]</ref>. This memory design is aware of thread ordering, forwards values between threads, and detects conflicts at word granularity. Since the protocol creates invalidations, write-sharing can cause additional cache misses. We perform working-set-prediction prefetches non-transactionally, so they do not impact the read/write sets of transactions.</p><p>We evaluate the full SPEC 2000 benchmark suite with reference inputs. Each benchmark is executed using 100Minstruction simulations based on SimPoint <ref type="bibr" target="#b29">[30]</ref>. We model dual-core execution using architectural parameters similar to <ref type="bibr" target="#b25">[26]</ref>; these parameters include a shared L2 cache, which decreases the penalty for transferring data between cores. A lower cost of cache-to-cache transfers also lessens the criti- cality of migrating the working-set. Nevertheless, working set migration significantly boosts performance.</p><p>Speculative threads (both committed and squashed) were spawned, on average, approximately every 275 instructions. Averaged across our benchmarks, speculative threads committed 57-67 instructions before committing, depending on the working set migration support. Our migration techniques, specifically DataMRU, resulted in the most committed instructions per thread, contributing to the improved performance.</p><p>Figure <ref type="figure" target="#fig_10">12</ref> explores the effectiveness of our WSM techniques on the integer subset (SPECint). Focusing on the leftmost group, we see that baseline SpMT execution achieves an average speedup of 1.10, and D-stream WSM nearly doubles the overall effectiveness of speculative threading, increasing the gain from 10% to 18%. Across the entire SPEC benchmark suite, WSM increases overall gain from 24% to 32% (not pictured). When comparing the combination of prefetching both I-and D-streams ("I+D Combo") against that of data alone ("DataMRU"), we see that I-stream prefetching slightly degrades performance, since the I-caches are already warm. Although instruction prefetches are likely to be hits, they can impede the thread because they occupy cache request ports.</p><p>Figure <ref type="figure" target="#fig_10">12</ref> also shows results for an oracle D-prefetcher, which, at each spawn point, prefetches the memory blocks used by the next 100 instructions (the average speculative thread length is 59). This oracle achieves a 1.23 speedup on SPECint. Since this oracle prefetcher should almost entirely solve the cache locality problem for SpMT, we find that our realistic working-set prefetcher achieves most of the gains (1.18 speedup) available.</p><p>SpMT speedup is significantly hampered by the increase in average memory access time (AMAT) that occurs when we spread the computation among multiple cores. However, data working set prediction significantly mitigates the AMAT inflation, as shown in Figure <ref type="figure" target="#fig_11">13</ref>. In some cases, it reduces AMAT to near, or even below, the single-thread AMAT. In nearly all other cases, prefetching significantly reduces AMAT. As a result, overall SpMT performance improves significantly.</p><p>The one anomalous result is mcf. The performance of mcf is completely dominated by a small number of hardto-predict "delinquent" loads <ref type="bibr" target="#b10">[11]</ref>. SpMT benefits mcf less from the successful completion of spawned threads, as from the prefetching provided by those threads, which bring in hard-to-predict data. Hence, for mcf, speculative threads already succeed at performing critical prefetches; those critical prefetches are delayed by the extra traffic generated by DataMRU prefetching.</p><p>As mentioned in §6.1, post-migrate performance is dominated by cache-to-cache transfers. Prior work <ref type="bibr" target="#b32">[33]</ref> shows that memory simulation models such as ours can underestimate latency by up to 25%. Since main memory access patterns are largely unaffected by WSM, the details of that simulation should not impact our relative speedups. In Figure <ref type="figure" target="#fig_10">12</ref> the center and right groups show the performance of SpMT and WSM with DRAM access latencies increased by 11% and 90%, respectively. The overall trends in this section are shown to be insensitive to large increases in memory latency.</p><p>To model a more aggressive SpMT system, we also evaluate the SpMT framework using a perfect register value predictor to determine if our results remain consistent without thread squashes caused by register mispredictions. Again, we see significant gains from the DataMRU working set predictor, which improves SPECint SpMT speedup from 1.24 to 1.34.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="9.">Summary and Conclusions</head><p>In this paper we describe a working set predictor which greatly speeds up post-migration execution. As we proceed further into the multicore era, migrations -loosely defined as scenarios where the state of a thread on one core needs to migrate to another core -will occur with greater frequency. Accelerating migration will make many proposed execution models more effective, and will make finding exploitable pockets of parallelism easier.</p><p>In this work we show that it's critical to address I-stream performance, post-migration; otherwise, the I-cache is left to be filled by serial demand-misses. However, we improve the delivery of both instructions and data to boost the performance of short threads. We also show that simply copying cache contents is extremely ineffective over the short term: it moves too much data, at too much expense, and much of that data is not useful over the short term. We demonstrate techniques that as much as double the performance for short threads. We also demonstrate these techniques are successful at significantly improving the effectiveness of speculative multithreading. These solutions require only small, simple tables to monitor the access streams of a running thread on each core.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Baseline multicore processor</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: The cost of migration, in reduced instruction throughput, for various assumptions about the migration of data. The baseline is instant replication of all private caches.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: A memory logger implementation with multiple table types.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Summary generatorbased<ref type="bibr" target="#b27">[28]</ref> prefetching. Pointer tracks loaded values used as addresses without following them, while Pointer-chase replaces each entry with the target value when a load match is observed.Same-object: This captures accesses to ranges of memory from a common base address, as is common for structure and object access code. This takes advantage of the common "base+offset" addressing mode, tracking minimum and maximum offsets for each base address, while ignoring accesses relative to the global pointer or stack pointer.SPWindow, PCWindow: These don't actually use tables; we just record the value of the stack pointer and PC, respectively, and use them to prefetch a window of data blocks near the top of the stack, or a window of instructions near the first post-migrate instruction.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Summary-driven prefetcher</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Impact of adding bulk cache transfers to single-threaded workloads. Speedups are relative to no migration support.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Impact of a future oracle prefetcher, compared to instant transfer and bulk cache copy.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Impact of realistic I-stream prefetchers, combined with an oracle D-stream prefetcher.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Impact of realistic D-stream prefetchers, combined with an oracle I-stream prefetcher.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Impact of various combinations of realistic I-and D-stream prefetchers.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: SPECint SpMT mean speedup across migration techniques and memory configurations. "I+D Combo" uses InstMRU, PCWindow, and DataMRU.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 13 :</head><label>13</label><figDesc>Figure 13: SPECint per benchmark average memory delay slowdown from SpMT and from SpMT with DataMRU.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 : Baseline processor parameters</head><label>1</label><figDesc></figDesc><table><row><cell>Parameter</cell><cell>Value</cell></row><row><cell>Clock rate Fetch width Reorder buffer Integer window FP window Max issue width Integer ALUs FP ALUs Load/store units Branch predictor BTB Cache block size Page size L1 I-cache size/assoc. L1 I-MSHR L1 D-cache size/assoc. L1 D-cache ports L1 D-MSHR L2 cache size/assoc. L2 cache ports ITLB entries DTLB entries Load-use latency, L1 hit Load-use latency, L2 hit Load-use latency, memory Load-use latency, cross-core TLB miss penalty L1 I-cache ideal b/w L1 D-cache ideal b/w L2 cache ideal b/w Bus ideal b/w Mem ideal b/w Thread activate latency Thread deactivate latency L1 D stream buffer L1 D stream buffer stride table</cell><cell>2.0 GHz 4 128 entries 64 insts 64 insts 4 4 2 2 4 Kbit gshare 256-entry, 4-way 32 B 8 KB 32 KB/4-way 16 entries, 32 waiters each 32 KB/4-way 2 read/write 16 entries, 32 waiters each 512KB/8-way, per-core 8 banks, 1 port ea. 48 128 2 cyc 14 cyc 176 cyc 34 cyc 160 cyc 60 GB/s 60 GB/s 60 GB/s 30 GB/s 30 GB/s R, 20 GB/s W 15 cyc, to first fetch 44 cyc, to fetch available 8 streams, 4 blocks/stream 256-entry, 4-way</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 2 : Prefetcher activity and accuracy, mean over 200 migrations. Figure 11: Realistic prefetchers, with previous- instance cache reuse and background thread movement.</head><label>2</label><figDesc></figDesc><table /></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>The authors would like to thank the anonymous reviewers for their helpful insights. This research was supported in part by NSF grant CCF-1018356 and Semiconductor Research Corporation Grant 2005-HJ-1313.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Mitigating Amdahl&apos;s Law through EPI throttling</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Annavaram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Grochowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Shen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">32nd International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2005-06">June 2005</date>
+			<biblScope unit="page" from="298" to="309" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Data prefetching by dependence graph precomputation</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Annavaram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Patel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">S</forename><surname>Davidson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">28th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2001-07">July 2001</date>
+			<biblScope unit="page" from="52" to="61" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">The shared-thread multiprocessor</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">21st International Conference on Supercomputing</title>
+				<imprint>
+			<date type="published" when="2008-06">June 2008</date>
+			<biblScope unit="page" from="73" to="82" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Speculative precomputation on chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Chrysos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">P</forename><surname>Shen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">6th Workshop on Multithreaded Execution, Architecture and Compilation</title>
+				<imprint>
+			<date type="published" when="2002-11">Nov. 2002</date>
+			<biblScope unit="page" from="35" to="42" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Computation spreading: Employing hardware migration to specialize CMP cores on-the-fly</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Chakraborty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">M</forename><surname>Wells</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">12th International Conference on Architecture Support for Programming Languages and Operating Systems</title>
+				<imprint>
+			<date type="published" when="2006-10">Oct. 2006</date>
+			<biblScope unit="page" from="283" to="292" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Thermal-aware clustered microarchitectures</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Chaparro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>González</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>González</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">22nd IEEE International Conference on Computer Design</title>
+				<imprint>
+			<date type="published" when="2004-10">Oct. 2004</date>
+			<biblScope unit="page" from="48" to="53" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Simultaneous subordinate microthreading (SSMT)</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">S</forename><surname>Chappell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Stark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">P</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">26th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1999-05">May 1999</date>
+			<biblScope unit="page" from="186" to="195" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Accurate branch prediction for short threads</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Porter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">13th International Conference on Architecture Support for Programming Languages and Operating Systems</title>
+				<imprint>
+			<date type="published" when="2008-03">Mar. 2008</date>
+			<biblScope unit="page" from="125" to="134" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">The common case transactional behavior of multithreaded programs</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Chafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">C</forename><surname>Minh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mcdonald</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">D</forename><surname>Carlstrom</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Olukotun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">12th International Symposium on High-Performance Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2006-02">Feb. 2006</date>
+			<biblScope unit="page" from="266" to="277" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Pointer cache assisted prefetching</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">D</forename><surname>Collins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sair</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">35th International Symposium on Microarchitecture</title>
+				<imprint>
+			<date type="published" when="2002-11">Nov. 2002</date>
+			<biblScope unit="page" from="62" to="73" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Speculative precomputation: Long-range prefetching of delinquent loads</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">D</forename><surname>Collins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">J</forename><surname>Hughes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y.-F</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Lavery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">P</forename><surname>Shen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">28th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2001-07">July 2001</date>
+			<biblScope unit="page" from="14" to="25" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Improving cache locality for thread-level speculation</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">L</forename><surname>Fung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">G</forename><surname>Steffan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">20th International Parallel and Distributed Processing Symposium</title>
+				<imprint>
+			<date type="published" when="2006-04">Apr. 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Speculative versioning cache</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gopal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Vijaykumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">4th International Symposium on High-Performance Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1998-02">Feb. 1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Data speculation support for a chip multiprocessor</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Hammond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Willey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Olukotun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">8th International Conference on Architecture Support for Programming Languages and Operating Systems</title>
+				<imprint>
+			<date type="published" when="1998-10">Oct. 1998</date>
+			<biblScope unit="page" from="58" to="69" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">First the tick, now the tock: Next generation Intel microarchitecture (Nehalem)</title>
+		<author>
+			<persName><surname>Intel</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+	<note>Intel white paper</note>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Improving direct-mapped cache performance by the addition of a small fully-associative cache and prefetch buffers</title>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">P</forename><surname>Jouppi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">17th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1990-06">June 1990</date>
+			<biblScope unit="page" from="364" to="373" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Software data spreading: Leveraging distributed caches to improve single thread performance</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kamruzzaman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Swanson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN 2010 Conference on Programming Language Design and Implementation</title>
+				<imprint>
+			<date type="published" when="2010-06">June 2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Single-ISA heterogeneous multi-core architectures: The potential for processor power reduction</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">I</forename><surname>Farkas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">P</forename><surname>Jouppi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">36th International Symposium on Microarchitecture</title>
+				<imprint>
+			<date type="published" when="2003-12">Dec. 2003</date>
+			<biblScope unit="page" from="81" to="92" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Single-ISA heterogeneous multi-core architectures for multithreaded workload performance</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">P</forename><surname>Jouppi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">I</forename><surname>Farkas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">31st International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2004-06">June 2004</date>
+			<biblScope unit="page" from="64" to="75" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Dead-block prediction &amp; dead-block correlating prefetchers</title>
+		<author>
+			<persName><forename type="first">A.-C</forename><surname>Lai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Fide</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">28th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2001-07">July 2001</date>
+			<biblScope unit="page" from="144" to="154" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Thread-spawning schemes for speculative multithreading</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Marcuello</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>González</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">8th International Symposium on High-Performance Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2002-02">Feb. 2002</date>
+			<biblScope unit="page" from="55" to="64" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Using asymmetric single-ISA CMPs to save energy on operating systems</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">C</forename><surname>Mogul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Mudigonda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Binkert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Talwar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">28</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="26" to="41" />
+			<date type="published" when="2008-05">May 2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Runahead execution: An alternative to very large instruction windows for out-of-order processors</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Stark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wilkerson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">9th International Symposium on High-Performance Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2003-02">Feb. 2003</date>
+			<biblScope unit="page" from="129" to="140" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Evaluating stream buffers as a secondary cache replacement</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Palacharla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">E</forename><surname>Kessler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">21st International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1994-04">Apr. 1994</date>
+			<biblScope unit="page" from="24" to="33" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">A low-overhead coherence solution for multiprocessors with private cache memories</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">S</forename><surname>Papamarcos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">H</forename><surname>Patel</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">11th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1984-06">June 1984</date>
+			<biblScope unit="page" from="348" to="354" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Mapping out a path from hardware transactional memory to speculative multithreading</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Porter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">18th International Conference on Parallel Architectures and Compilation Techniques</title>
+				<imprint>
+			<date type="published" when="2009-09">Sept. 2009</date>
+			<biblScope unit="page" from="313" to="324" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Mitosis compiler: An infrastructure for speculative threading sed on precomputation slices</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">G</forename><surname>Quiñones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Madriles</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><forename type="middle">J</forename><surname>Sánchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Marcuello</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gonzáles</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGPLAN 2005 Conference on Programming Language Design and Implementation</title>
+				<imprint>
+			<date type="published" when="2005-06">June 2005</date>
+			<biblScope unit="page" from="269" to="279" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Dependence based prefetching for linked data structures</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Moshovos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">8th International Conference on Architecture Support for Programming Languages and Operating Systems</title>
+				<imprint>
+			<date type="published" when="1998-10">Oct. 1998</date>
+			<biblScope unit="page" from="115" to="126" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Quantifying load stream behavior</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sair</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sherwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">8th International Symposium on High-Performance Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2002-02">Feb. 2002</date>
+			<biblScope unit="page" from="197" to="208" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Automatically characterizing large scale program behavior</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sherwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Perelman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hamerly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">10th International Conference on Architecture Support for Programming Languages and Operating Systems</title>
+				<imprint>
+			<date type="published" when="2002-10">Oct. 2002</date>
+			<biblScope unit="page" from="45" to="57" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Predictor-directed stream buffers</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Sherwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sair</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">33rd International Symposium on Microarchitecture</title>
+				<imprint>
+			<date type="published" when="2000-12">Dec. 2000</date>
+			<biblScope unit="page" from="42" to="53" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Multiscalar processors</title>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">E</forename><surname>Breach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">N</forename><surname>Vijaykumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">22nd International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1995-06">June 1995</date>
+			<biblScope unit="page" from="414" to="425" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">CMP memory modeling: How much does accuracy matter?</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ganesh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Jacob</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Espig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Iyer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">5th Workshop on Modeling, Benchmarking and Simulation</title>
+				<imprint>
+			<date type="published" when="2009-06">June 2009</date>
+			<biblScope unit="page" from="24" to="33" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">The potential for using thread-level data speculation to facilitate automatic parallelization</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">G</forename><surname>Steffan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">4th International Symposium on High-Performance Computer Architecture</title>
+				<imprint>
+			<date type="published" when="1998-01">Jan. 1998</date>
+			<biblScope unit="page" from="2" to="13" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Fast switching of threads between cores</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">D</forename><surname>Strong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Mudigonda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">C</forename><surname>Mogul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">L</forename><surname>Binkert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGOPS Operating Systems Review</title>
+		<imprint>
+			<biblScope unit="volume">43</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="35" to="45" />
+			<date type="published" when="2009-04">Apr. 2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Data marshaling for multi-core architectures</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Suleman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Joao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><forename type="middle">N</forename><surname>Khubaib</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">37th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2010-06">June 2010</date>
+			<biblScope unit="page" from="441" to="450" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Simulation and modeling of a simultaneous multithreading processor</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">22nd International Computer Measurement Group Conference</title>
+				<imprint>
+			<date type="published" when="1996-12">Dec. 1996</date>
+			<biblScope unit="page" from="819" to="828" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Balanced multithreading: Increasing throughput via a low cost multithreading hierarchy</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Tune</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Calder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">37th International Symposium on Microarchitecture</title>
+				<imprint>
+			<date type="published" when="2004-12">Dec. 2004</date>
+			<biblScope unit="page" from="183" to="194" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Understanding the backward slices of performance degrading instructions</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">B</forename><surname>Zilles</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">27th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2000-06">June 2000</date>
+			<biblScope unit="page" from="172" to="181" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Execution-based prediction using speculative slices</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">B</forename><surname>Zilles</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">28th International Symposium on Computer Architecture</title>
+				<imprint>
+			<date type="published" when="2001-06">June 2001</date>
+			<biblScope unit="page" from="2" to="13" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,247 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Fast Transformer Decoding: One Write-Head is All You Need</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2019-11-07">November 7, 2019</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author role="corresp">
+							<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+							<email>noam@google.com</email>
+						</author>
+						<title level="a" type="main">Fast Transformer Decoding: One Write-Head is All You Need</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2019-11-07">November 7, 2019</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:1911.02150v1[cs.NE]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T09:41+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Multi-head attention layers, as used in the Transformer neural sequence model, are a powerful alternative to RNNs for moving information across and between sequences. While training these layers is generally fast and simple, due to parallelizability across the length of the sequence, incremental inference (where such paralleization is impossible) is often slow, due to the memory-bandwidth cost of repeatedly loading the large "keys" and "values" tensors. We propose a variant called multi-query attention, where the keys and values are shared across all of the different attention "heads", greatly reducing the size of these tensors and hence the memory bandwidth requirements of incremental decoding. We verify experimentally that the resulting models can indeed be much faster to decode, and incur only minor quality degradation from the baseline.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>The Transformer neural sequence model <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref> has emerged as a popular alternative to recurrent sequence models. Transformer relies on attention layers to communicate information between and across sequences. One major challenge with Transformer is the speed of incremental inference. As we will discuss, the speed of incremental Transformer inference on modern computing hardware is limited by the memory bandwidth necessary to reload the large "keys" and "values" tensors which encode the state of the attention layers. In the following sections, we will review the multi-head-attention layers used by Transformer, provide a performance analysis, and propose an architectural variation (multi-query attention) which greatly improves inference speed with only minor quality degradation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Background: Neural Attention</head><p>Neural Attention, introduced by <ref type="bibr" target="#b0">[Bahdanau et al., 2014]</ref>, is a powerful tool for manipulating variable-length representations. A neural attention function takes a single query-vector q and a set of m different (key-vector, value-vector) pairs (represented by the matrices K and V ), and produces an output vector y. The output y is computed as a weighted sum of the different value vectors, where the weights are derived by comparing the query to the keys.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Dot-Product Attention</head><p>The following code describes a common formulation, where the weights are computed as the softmax of the dot-products of the query with the different keys. d e f Do tP r o ductAttentio n ( q , K, V ) :</p><p>" " " Dot-Product A t t e n t i o n on one quer y . Args : q : a v e c t o r with sha pe [ k ] K: a ma tr ix with sha pe [m, k ] V: a ma tr ix with sha pe [m, v ] Retur ns : y : a v e c t o r with sha pe [ v ] " " " l o g i t s = t f . einsum ( " k , mk-&gt;m" , q , K) w e i g h t s = t f . so ftma x ( l o g i t s ) r e t u r n t f . einsum ( "m, mv-&gt;v " , weig hts , V)</p><p>Our code samples use einsum notation, as defined in TensorFlow and numpy, for generalized contractions between tensors of arbitrary dimension. In this notation, an equation names the dimensions of the input and output Tensors. The computation is numerically equivalent to broadcasting each input to have the union of all dimensions, multiplying component-wise, and summing across all dimensions not in the desired output shape.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Multi-head Attention</head><p>The "Transformer" seuqence-to-sequence model <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref> uses h different attention layers (heads) in parallel, which the authors refer to as "Multi-head attention". The query vectors for the h different layers are derived from h different learned linear projections P q of an input vector x. Similarly, the keys and values are derived from h different learned linear projections P k , P v of a collection M of m different input vectors. The outputs of the h layers are themselves passed through different learned linear projections P o , then summed. For simplicity, we give the input and output vectors identical dimensionality d. The The computation can be expressed as follows: d e f M u l t i h e a d A t t e n t i o n (</p><p>x , M, P_q, P_k, P_v, P_o ) : " " " Multi-head A t t e n t i o n on one quer y . Args :</p><p>x : a v e c t o r with sha pe y : a v e c t o r with sha pe [ d ] " " " q = t f . einsum ( " d , hdk-&gt;hk " , x , P_q) K = t f . einsum ( "md, hdk-&gt;hmk" , M, P_k) V = t f . einsum ( "md, hdv-&gt;hmv" , M, P_v) l o g i t s = t f . einsum ( " hk , hmk-&gt;hm" , q , K) w e i g h t s = t f . so ftma x ( l o g i t s ) o = t f . einsum ( "hm, hmv-&gt;hv " , weig hts , V) y = t f . einsum ( " hv , hdv-&gt;d " , o , P_o) r e t u r n y Note: <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref> include a constant scaling factor on the logits. We omit this in our code, as it can be folded into the linear projections P q or P k .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Multi-head Attention (Batched)</head><p>In practice, it is far more efficient to batch together multiple queries. The code below adds two types of batching. First, we generate queries from n different positions in a sequence. These queries all interact with the same keys and values. In addition, we process a batch of b different non-interacting sequences at once. Following <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref>, in an autoregressive model, we can prevent backward-information-flow by adding a "mask" to the logits containing the value -? in the illegal positions. Y: a t e n s o r with sha pe [ b , n , d ] " " " Q = t f . einsum ( " bnd , hdk-&gt;bhnk " , X, P_q) K = t f . einsum ( "bmd, hdk-&gt;bhmk" , M, P_k) V = t f . einsum ( "bmd, hdv-&gt;bhmv" , M, P_v) l o g i t s = t f . einsum ( " bhnk , bhmk-&gt;bhnm " , Q, K) w e i g h t s = t f . so ftma x ( l o g i t s + mask ) O = t f . einsum ( "bhnm , bhmv-&gt;bhnv " , weig hts , V) Y = t f . einsum ( " bhnv , hdv-&gt;bnd " , O, P_o) r e t u r n Y</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3.1">Performance Analysis of Batched Multi-head Attention</head><p>To simplify the performance analysis, we will make several simplifying assumptions:</p><formula xml:id="formula_0">? m = n ? k = v = d</formula><p>h , as suggested by <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref> ? n ? d</p><p>The total number of arithmetic operations is ?(bnd 2 ). (Since the complexity of each of the tf.einsum operations above is O(bnd 2 ) given the simplifying assumptions.</p><p>The total size of memory to be accessed is equal to the sum of the sizes of all the tensors involved:</p><formula xml:id="formula_1">O(bnd + bhn 2 + d 2 ). The first term is due to X, M , Q, K, V , O</formula><p>and Y , the second term due to the logits and weights, and the third term due to the projection tensors P q , P k , P v and P o .</p><p>Dividing the two, we find that the ratio of memory access to arithmetic operations is O( 1 k + 1 bn ). This low ratio is necessary for good performance on modern GPU/TPU hardware, where the computational capacity can be two orders of magnitude higher than the memory bandwidth.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.4">Multihead Attention (Incremental)</head><p>In some settings, data dependencies make it is impossible to process queries from multiple positions in parallel. An example is a self-attention layer in an autoregressive language model such as Transformer <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref>. The queries produced at each position attend to key-value pairs produced at all positions up to and including that position. During training, the ground-truth target sequence is known, and we can use an efficient parallel implementation similar to that in section 2.3. However, when generating from the trained model, the output of the self-attention layer at a particular position affects the token that is generated at the next position, which in turn affects the input to that layer at the next position. This prevents parallel computation. Code for incrementally computing this self-attention layer is shown below. d e f M u l t i h e a d S e l f A t t e n t i o n I n c r e m e n t a l ( x , prev_K , prev_V , P_q , P_k , P_v , P_o ) : " " " Multi-head S e l f -A t t e n t i o n ( one s t e p ) . Args :</p><p>x new_V : t e n s o r with sha pe [ b , h , m+1 , v ] " " " q = t f . einsum ( " bd , hdk-&gt;bhk " , x , P_q) new_K = t f . c o n c a t ( [ prev_K , t f . expand_dims ( t f . einsum ( " bd , hdk-&gt;bhk " , M, P_k) , a x i s = 2 ) ] , a x i s =2) new_V = t f . c o n c a t ( [ prev_V , t f . expand_dims ( t f . einsum ( " bd , hdv-&gt;bhv " , M, P_v) , a x i s = 2 ) ] , a x i s =2) l o g i t s = t f . einsum ( " bhk , bhmk-&gt;bhm" , q , new_K) w e i g h t s = t f . so ftma x ( l o g i t s ) o = t f . einsum ( "bhm, bhmv-&gt;bhv " , weig hts , new_V) y = t f . einsum ( " bhv , hdv-&gt;bd " , O, P_o) r e t u r n y , new_K, new_V</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.4.1">Performance Analysis</head><p>We make the same simplifying assumptions as in section 2.3.1.</p><p>Across n calls, the total number of arithmetic operations is again ?(bnd 2 ).</p><p>Across n calls, the total amount of memory access is ?(bn 2 d + nd 2 ), the first term due to K and V and the second term due to P q , P k , P v and P o .</p><p>Dividing the memory by the computations, we find that the ratio of memory access to arithmetic operations is ?</p><formula xml:id="formula_2">( n d + 1 b ). When n ? d or b ? 1</formula><p>, the ratio is close to 1, causing memory bandwidth to be a major performance bottleneck on modern computing hardware. In order to make incremental generation efficient, we must reduce both of these terms to be ? 1. The 1 b term is the easier one -we can just use a larger batch size, memory size permitting.</p><p>Reducing the n d term is harder. This term is related to the expense of reloading at each step the K and V tensors representing the memory which have size bhmk = bn 2 . One solution is to limit the sequence length n. Another is to reduce the number of positions being attended-to, either by attending to a local neighborhood, or by otherwise compressing the number of memory positions, as in <ref type="bibr" target="#b2">[Liu et al., 2018]</ref>, <ref type="bibr" target="#b5">[Zhang et al., 2018]</ref>, <ref type="bibr" target="#b3">[Povey et al., 2018]</ref>. In this paper we present an orthogonal approach to reducing the size of the K and V tensors -namely removing their "heads" dimension, while maintaining the "heads" dimension in the queries.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Multi-Query Attention</head><p>We introduce multi-query Attention as a variation of multi-head attention as described in <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref>. Multi-head attention consists of multiple attention layers (heads) in parallel with different linear transformations on the queries, keys, values and outputs. Multi-query attention is identical except that the different heads share a single set of keys and values. The code for (incremental) multi-query (self) attention is identical to the code listed above for multi-head attention, except that we remove the letter "h" from the tf.einsum equations where it represents the "heads" dimension of K, V , P k , or P v . d e f M u l t i q u e r y A t t e n t i o n B a t c h e d ( X, M, mask , P_q, P_k, P_v, P_o ) : " " " Multi-Query A t t e n t i o n . Args :</p><p>X Y: a t e n s o r with sha pe [ b , n , d ] " " " Q = t f . einsum ( " bnd , hdk-&gt;bhnk " , X, P_q) K = t f . einsum ( "bmd, dk-&gt;bmk" , M, P_k) V = t f . einsum ( "bmd, dv-&gt;bmv" , M, P_v) l o g i t s = t f . einsum ( " bhnk , bmk-&gt;bhnm " , Q, K) w e i g h t s = t f . so ftma x ( l o g i t s + mask ) O = t f . einsum ( "bhnm , bmv-&gt;bhnv " , weig hts , V) Y = t f . einsum ( " bhnv , hdv-&gt;bnd " , O, P_o) r e t u r n Y d e f M u l t i q u e r y S e l f A t t e n t i o n I n c r e m e n t a l ( x , prev_K , prev_V , P_q , P_k , P_v , P_o ) : " " " Multi-quer y S e l f -A t t e n t i o n ( one s t e p ) . Args :</p><p>x new_V : t e n s o r with sha pe [ b , m+1 , v ] " " " q = t f . einsum ( " bd , hdk-&gt;bhk " , x , P_q) K = t f . c o n c a t ( [ prev_K , t f . expand_dims ( t f . einsum ( " bd , dk-&gt;bk " , M, P_k) , a x i s = 2 ) ] , a x i s =2) V = t f . c o n c a t ( [ prev_V , t f . expand_dims ( t f . einsum ( " bd , dv-&gt;bv " , M, P_v) , a x i s = 2 ) ] , a x i s =2) l o g i t s = t f . einsum ( " bhk , bmk-&gt;bhm" , q , K) w e i g h t s = t f . so ftma x ( l o g i t s ) o = t f . einsum ( "bhm, bmv-&gt;bhv " , weig hts , V) y = t f . einsum ( " bhv , hdv-&gt;bd " , O, P_o) r e t u r n y , K, V</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Performance Analysis for Incremental Multi-Query Attention</head><p>We make the same simplifying assumptions as in section 2.3.1.</p><p>Across n calls, the total number of arithmetic operations is again ?(bnd 2 ).</p><p>Across n calls, the total amount of memory access is ?(bnd + bn 2 k + nd 2 ), the first term due to x, q, o and y, the second term due to K and V and the third term due to P q , P k , P v , P o .</p><p>Dividing the memory by the computations, we find that the ratio of memory access to arithmetic operations is ?(</p><formula xml:id="formula_3">1 d + n dh + 1 b ).</formula><p>We have reduced the offensive n d by a factor of h. Theoretically, given large batch size b, this should dramatically improve performance of incremental generation. In our experimental section, we will show that the performance gains are real and that model quality remains high.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Experiments and Results</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Experimental Setup</head><p>Following <ref type="bibr" target="#b4">[Vaswani et al., 2017]</ref>, we evaluate on the WMT 2014 English-German translation task. As a baseline, we use an encoder-decoder Transformer model with 6 layers, using</p><formula xml:id="formula_4">d model = 1024 d f f = 4096, h = 8, d k = d v = 128,</formula><p>learned positional embeddings, and weight-sharing between the token-embedding and output layers. The baseline model and all variations have 211 million parameters. All models were trained for 100,000 steps ( 20 epochs). Each training batch consisted of 128 examples, each of which consisted of a 256-token input sequence and a 256-token target sequence (multiple training sentences were concatenated together to reach this length). Models were trained on a 32-core TPUv3 cluster, with each model taking about 2 hours to train. We used an implementation from the tensor2tensor and mesh-tensorflow libraries.</p><p>The configurations used can be found at [to be added before publication] , including details about learning rates, dropout, label smoothing, etc.</p><p>In our "multi-query" model, we replace all of the attention layers in the model to multi-query attention. This includes the encoder-self-attention, decoder-self-attention and encoder-decoder-attention layers. We widen the feed-forward hidden layers from 4096 to 5440 to make the total parameter-count equal to that of the baseline.</p><p>To demonstrate that local-attention and multi-query attention are orthogonal, we also trained "local" versions of the baseline and multi-query models, where the decoder-self-attention layers (but not the other attention layers) restrict attention to the current position and the previous 31 positions.</p><p>A simpler alternative way to reduce the sizes of K and V is to reduce the number of heads h and/or to reduce the dimensionalities k and v of the keys and values. We trained several such models for comparison, again widening the feed-forward hidden layers to make the total parameter-count equal to that of the baseline.</p><p>We preformed a similar set of experiments using "transformer-decoder" language models on the Billion-Word Language Modeling Benchmark <ref type="bibr" target="#b1">[Chelba et al., 2013]</ref>. For the baseline, we use a model with 6 layers,</p><formula xml:id="formula_5">d model = 1024 d f f = 8192, h = 8, d k = d v = 128.</formula><p>The total parameter count is 192 million for the baseline and for all variations. We trained for 136K steps (10 epochs) at a batch size of 64K tokens. Again, we used a 32-core TPUv3 cluster for approximately 3 hours to train each model.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Model Quality</head><p>Table <ref type="table" target="#tab_5">1</ref> shows results for the machine-translation experiments. We decoded the dev set using greedy maximum-likelihood decoding and computed BLEU score with sacrebleu "sacrebleu -t wmt13 -l en-de -tok intl". We also list per-subword-token perplexity on the dev set. According to both of these metrics, the multi-query attention model seems to be slightly worse than the baseline, but much closer than any of the alternatives involving decreasing h, d k and d v .</p><p>We validated the results by decoding the test set using both greedy decoding and beam search (beam 4, ? = 0.6), and evaluated with sacrebleu "sacrebleu -t wmt14 -l en-de -tok intl". Again, the multiquery model performed similarly to the baseline, and actually had the highest BLEU score (28.5) with beam-4 decoding.</p><p>Table <ref type="table" target="#tab_7">3</ref> shows results for the billion-word language modeling benchmark. Models were evaluated by perword (not per-subword-token) perplexity on the dev set. The results paint a similar picture to the translation results. The multi-query attention model was slightly worse than the baseline, but significantly better than any of the alternatives involving decreasing h, d k and d v .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Speed</head><p>Table <ref type="table" target="#tab_6">2</ref> shows training and inference times for the various models. Both training and inference speeds were evaluated on one TPUv2 (8 cores). A training step (consisting of 32,768 input tokens and 32,768 target tokens, as described above) took 433ms for the base model and 425ms for the multi-query model. Dividing by 32,768, we find that the training time is 13.2?s per (input-token + target-token), as listed in Table <ref type="table" target="#tab_6">2</ref>.</p><p>We ran incremental greedy inference on a batch of 1024 sequences (128 per core) using a source-sequence length of 128 tokens and a target sequence length of 128. 1 For the baseline model, the encoder part of the model took 222ms and each incremental step of the decoder took 47ms. Dividing by the respective numbers of tokens, we find that the amortized inference time is 1.7?s per token for the encoder and a much larger 46?s per token for the decoder, as listed in Table <ref type="table" target="#tab_6">2</ref>. For the multi-query model, the encoder took 195ms and the decoder took 3.9ms per step, for amortized per-token costs of 1.5?s and 3.8?s respectively. Table <ref type="table" target="#tab_6">2</ref> shows these values as well as similar results for beam-search. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Conclusion</head><p>We have proposed multi-query attention -an alternative to multi-head attention with much lower memorybandwidth requirements in the incremental setting. We believe that this enables wider adoption of attentionbased sequence models in inference-performance-critical applications.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 1 :</head><label>1</label><figDesc> </figDesc><table><row><cell>Attention</cell><cell cols="2">h d k , d v</cell><cell>d f f</cell><cell cols="3">ln(PPL) BLEU BLEU (test)</cell></row><row><cell>Type</cell><cell></cell><cell></cell><cell></cell><cell>(dev)</cell><cell>(dev)</cell><cell>beam 1 / 4</cell></row><row><cell>multi-head</cell><cell>8</cell><cell>128</cell><cell>4096</cell><cell>1.424</cell><cell>26.7</cell><cell>27.7 / 28.4</cell></row><row><cell>multi-query</cell><cell>8</cell><cell>128</cell><cell>5440</cell><cell>1.439</cell><cell>26.5</cell><cell>27.5 / 28.5</cell></row><row><cell cols="2">multi-head local 8</cell><cell>128</cell><cell>4096</cell><cell>1.427</cell><cell>26.6</cell><cell>27.5 / 28.3</cell></row><row><cell cols="2">multi-query local 8</cell><cell>128</cell><cell>5440</cell><cell>1.437</cell><cell>26.5</cell><cell>27.6 / 28.2</cell></row><row><cell>multi-head</cell><cell>1</cell><cell>128</cell><cell>6784</cell><cell>1.518</cell><cell>25.8</cell><cell></cell></row><row><cell>multi-head</cell><cell>2</cell><cell>64</cell><cell>6784</cell><cell>1.480</cell><cell>26.2</cell><cell>26.8 / 27.9</cell></row><row><cell>multi-head</cell><cell>4</cell><cell>32</cell><cell>6784</cell><cell>1.488</cell><cell>26.1</cell><cell></cell></row><row><cell>multi-head</cell><cell>8</cell><cell>16</cell><cell>6784</cell><cell>1.513</cell><cell>25.8</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 2 :</head><label>2</label><figDesc>Amortized training and inference costs for WMT14 EN-DE Translation Task with sequence length 128. Values listed are in TPUv2-microseconds per output token.</figDesc><table><row><cell cols="2">Attention Training</cell><cell>Inference</cell><cell>Beam-4 Search</cell></row><row><cell>Type</cell><cell></cell><cell>enc. + dec.</cell><cell>enc. + dec.</cell></row><row><cell>multi-head</cell><cell>13.2</cell><cell>1.7 + 46</cell><cell>2.0 + 203</cell></row><row><cell>multi-query</cell><cell>13.0</cell><cell>1.5 + 3.8</cell><cell>1.6 + 32</cell></row><row><cell>multi-head local</cell><cell>13.2</cell><cell>1.7 + 23</cell><cell>1.9 + 47</cell></row><row><cell>multi-query local</cell><cell>13.0</cell><cell>1.5 + 3.3</cell><cell>1.6 + 16</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 3 :</head><label>3</label><figDesc>Billion-Word LM Benchmark Results.</figDesc><table><row><cell cols="2">Attention h d k , d v</cell><cell>d f f</cell><cell>dev-PPL</cell></row><row><cell>multi-head 8</cell><cell>128</cell><cell>8192</cell><cell>29.9</cell></row><row><cell>multi-query 8</cell><cell>128</cell><cell>9088</cell><cell>30.2</cell></row><row><cell>multi-head 1</cell><cell>128</cell><cell>9984</cell><cell>31.2</cell></row><row><cell>multi-head 2</cell><cell>64</cell><cell>9984</cell><cell>31.1</cell></row><row><cell>multi-head 4</cell><cell>32</cell><cell>9984</cell><cell>31.0</cell></row><row><cell>multi-head 8</cell><cell>16</cell><cell>9984</cell><cell>30.9</cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><p>1 Due to system limitations requiring fixed shapes, we used padding and masking in our decoder-self-attention implementation. The memory tensors were thus padded to the maximum length (128), or to the window-size (32) in the case of local attention. Each decoding step thus took the same amount of time. An alternative implementation of incrementally growing the tensors could save time near the beginning of the sequence.</p></div>
+			</div>			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">Neural machine translation by jointly learning to align and translate</title>
+		<author>
+			<persName><forename type="first">Dzmitry</forename><surname>Bahdanau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyunghyun</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yoshua</forename><surname>Bengio</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">One billion word benchmark for measuring progress in statistical language modeling</title>
+		<author>
+			<persName><forename type="first">Ciprian</forename><surname>Chelba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tomas</forename><surname>Mikolov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Schuster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Ge</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thorsten</forename><surname>Brants</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phillipp</forename><surname>Koehn</surname></persName>
+		</author>
+		<idno>CoRR, abs/1312.3005</idno>
+		<ptr target="http://arxiv.org/abs/1312.3005" />
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Generating wikipedia by summarizing long sequences</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Peter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Etienne</forename><surname>Saleh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ben</forename><surname>Pot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ryan</forename><surname>Goodrich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukasz</forename><surname>Sepassi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Shazeer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Conference on Learning Representations</title>
+		<meeting>the International Conference on Learning Representations</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">A time-restricted selfattention layer for ASR</title>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Povey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hossein</forename><surname>Hadian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pegah</forename><surname>Ghahremani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ke</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjeev</forename><surname>Khudanpur</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceddings of the IEEE International Conference on Acoustics, Speech and Signal Processing</title>
+		<meeting>eddings of the IEEE International Conference on Acoustics, Speech and Signal essing</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aidan</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukasz</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Illia</forename><surname>Polosukhin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Accelerating neural transformer via an average attention network</title>
+		<author>
+			<persName><forename type="first">Biao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Deyi</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinsong</forename><surname>Su</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

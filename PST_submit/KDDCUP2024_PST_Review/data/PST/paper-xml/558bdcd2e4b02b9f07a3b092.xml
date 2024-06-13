@@ -1,0 +1,965 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Jigsaw: Scalable Software-Defined Caches</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Nathan</forename><surname>Beckmann</surname></persName>
+							<email>beckmann@csail.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Massachusetts Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Daniel</forename><surname>Sanchez</surname></persName>
+							<email>sanchez@csail.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">Massachusetts Institute of Technology</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Jigsaw: Scalable Software-Defined Caches</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:37+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>cache</term>
+					<term>memory</term>
+					<term>NUCA</term>
+					<term>partitioning</term>
+					<term>isolation</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Shared last-level caches, widely used in chip-multiprocessors (CMPs), face two fundamental limitations. First, the latency and energy of shared caches degrade as the system scales up. Second, when multiple workloads share the CMP, they suffer from interference in shared cache accesses. Unfortunately, prior research addressing one issue either ignores or worsens the other: NUCA techniques reduce access latency but are prone to hotspots and interference, and cache partitioning techniques only provide isolation but do not reduce access latency.</p><p>We present Jigsaw, a technique that jointly addresses the scalability and interference problems of shared caches. Hardware lets software define shares, collections of cache bank partitions that act as virtual caches, and map data to shares. Shares give software full control over both data placement and capacity allocation. Jigsaw implements efficient hardware support for share management, monitoring, and adaptation. We propose novel resource-management algorithms and use them to develop a system-level runtime that leverages Jigsaw to both maximize cache utilization and place data close to where it is used.</p><p>We evaluate Jigsaw using extensive simulations of 16-and 64core tiled CMPs. Jigsaw improves performance by up to 2.2× (18% avg) over a conventional shared cache, and significantly outperforms state-of-the-art NUCA and partitioning techniques.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>I. INTRODUCTION</head><p>Chip-multiprocessors (CMPs) rely on sophisticated on-chip cache hierarchies to mitigate the high latency, high energy, and limited bandwidth of off-chip memory accesses. Caches often take over 50% of chip area <ref type="bibr" target="#b20">[21]</ref>, and, to maximize utilization, most of this space is structured as a last-level cache shared among all cores. However, as Moore's Law enables CMPs with tens to hundreds of cores, shared caches face two fundamental limitations. First, the latency and energy of a shared cache degrade as the system scales up. In large chips with distributed caches, more latency and energy is spent on network traversals than in bank accesses. Second, when multiple workloads share the CMP, they suffer from interference in shared cache accesses. This causes large performance variations, precludes quality-of-service (QoS) guarantees, and degrades throughput. With the emergence of virtualization and cloud computing, interference has become a crucial problem in CMPs.</p><p>Ideally, a cache should both store data close to where it is used, and allow its capacity to be partitioned, enabling software to provide isolation, prioritize competing applications, or increase cache utilization. Unfortunately, prior research does not address both issues jointly. On one hand, prior non-uniform cache access (NUCA) work <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b9">10,</ref><ref type="bibr" target="#b10">11,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b30">31,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b45">46]</ref> has proposed a variety of placement, migration, and replication policies to reduce network distance. However, these best-effort techniques often result in hotspots and additional interference <ref type="bibr" target="#b2">[3]</ref>. On the other hand, prior work has proposed a variety of partitioning techniques <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b41">42,</ref><ref type="bibr" target="#b43">44]</ref>, but these schemes only work on fully shared caches, often scale poorly beyond few partitions, and degrade throughput.</p><p>We present Jigsaw, a design that jointly addresses the scalability and interference problems of shared caches. On the hardware side, we leverage recent prior work on efficient fine-grained partitioning <ref type="bibr" target="#b36">[37]</ref> to structure the last-level cache as a collection of distributed banks, where each bank can be independently and logically divided in many bank partitions. Jigsaw lets software combine multiple bank partitions into a logical, software-defined cache, which we call a share. By mapping data to shares, and configuring the locations and sizes of the individual bank partitions that compose each share, software has full control over both where data is placed in the cache, and the capacity allocated to it. Jigsaw efficiently supports reconfiguring shares dynamically and moving data across shares, and implements monitoring hardware to let software find the optimal share configuration efficiently.</p><p>On the software side, we develop a lightweight systemlevel runtime that divides data into shares and decides how to configure each share to both maximize cache utilization and place data close to where it is used. In doing so, we develop novel and efficient resource management algorithms, including Peekahead, an exact linear-time implementation of the previously proposed quadratic-time Lookahead algorithm <ref type="bibr" target="#b33">[34]</ref>, enabling global optimization with non-convex utilities on very large caches at negligible overheads.</p><p>We evaluate Jigsaw with simulations of 16-and 64-core tiled CMPs. On multiprogrammed mixes of single-threaded workloads, Jigsaw improves weighted speedup by up to 2.2× (18.4% gmean) over a shared LRU LLC, up to 35% (9.4% gmean) over Vantage partitioning <ref type="bibr" target="#b36">[37]</ref>, up to 2.05× (11.4% gmean) over R-NUCA <ref type="bibr" target="#b13">[14]</ref>, and up to 24% (6.3% gmean) over an idealized shared-private D-NUCA organization that uses twice the cache capacity <ref type="bibr" target="#b15">[16]</ref>. Jigsaw delivers similar benefits on multithreaded application mixes, demonstrating that, given the right hardware primitives, software can manage large distributed caches efficiently.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>II. BACKGROUND AND RELATED WORK</head><p>This section presents the relevant prior work on multicore caching that Jigsaw builds and improves on: techniques to partition a shared cache, and non-uniform cache architectures. Table <ref type="table" target="#tab_0">1</ref> summarizes the main differences among techniques.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Cache Partitioning</head><p>Cache partitioning requires a partitioning policy to select partition sizes, and a partitioning scheme to enforce them.  Partitioning schemes: A partitioning scheme should support a large number of partitions with fine-grained sizes, disallow interference among partitions, strictly enforce partition sizes, avoid hurting cache associativity or replacement policy performance, support changing partition sizes efficiently, and require small overheads. Achieving these properties is not trivial. Several techniques rely on restricting the locations where a line can reside depending on its partition. Way-partitioning <ref type="bibr" target="#b8">[9]</ref> restricts insertions from each partition to its assigned subset of ways. It is simple, but it supports a limited number of coarsely-sized partitions (in multiples of way size), and partition associativity is proportional to its way count, sacrificing performance for isolation. To avoid losing associativity, some schemes can partition the cache by sets instead of ways <ref type="bibr" target="#b34">[35,</ref><ref type="bibr" target="#b42">43]</ref>, but they require significant changes to cache arrays. Alternatively, virtual memory and page coloring can be used to constrain the pages of a process to specific sets <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b41">42]</ref>. While software-only, these schemes are incompatible with superpages and caches indexed using hashing (common in modern CMPs), and repartitioning requires costly recoloring (copying) of physical pages.</p><p>Caches can also be partitioned by modifying the allocation or replacement policies. These schemes avoid the problems with restricted line placement, but most rely on heuristics <ref type="bibr" target="#b27">[28,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b44">45]</ref>, which provide no guarantees and often require many more ways than partitions to work well. In contrast, Vantage <ref type="bibr" target="#b36">[37]</ref> leverages the statistical properties of skew-associative caches <ref type="bibr" target="#b38">[39]</ref> and zcaches <ref type="bibr" target="#b35">[36]</ref> to implement partitioning efficiently. Vantage supports hundreds of partitions, provides strict guarantees on partition sizes and isolation, can resize partitions without moves or invalidations, and is cheap to implement (requiring ≈1% extra state and negligible logic). For these reasons, Jigsaw uses Vantage to partition each cache bank, although Jigsaw is agnostic to the partitioning scheme.</p><p>Partitioning policies: Partitioning policies consist of a monitoring mechanism, typically in hardware, that profiles partitions, and a controller, in software or hardware, that uses this information and sets partition sizes to maximize some metric, such as throughput <ref type="bibr" target="#b33">[34]</ref>, fairness <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b40">41]</ref>, or QoS <ref type="bibr" target="#b22">[23]</ref>.</p><p>Utility-based cache partitioning (UCP) is a frequently used policy <ref type="bibr" target="#b33">[34]</ref>. UCP introduces a utility monitor (UMON) per core, which samples the address stream and measures the partition's miss curve, i.e., the number of misses that the partition would have incurred with each possible number of allocated ways. System software periodically reads these miss curves and repartitions the cache to maximize cache utility (i.e., the expected number of cache hits). Miss curves are often not convex, so deriving the optimal partitioning is NP-hard. UCP decides partition sizes with the Lookahead algorithm, an O(N 2 ) heuristic that works well in practice, but is too slow beyond small problem sizes. Although UCP was designed to work with way-partitioning, it can be used with other schemes <ref type="bibr" target="#b36">[37,</ref><ref type="bibr" target="#b44">45]</ref>. Instead of capturing miss curves, some propose to estimate them with analytical models <ref type="bibr" target="#b40">[41]</ref>, use simplified algorithms, such as hill-climbing, that do not require miss curves <ref type="bibr" target="#b27">[28]</ref>, or capture them offline <ref type="bibr" target="#b5">[6]</ref>, which simplifies monitoring but precludes adaptation. Prior work has also proposed approximating miss curves by their convex fits and using efficient convex optimization instead of Lookahead <ref type="bibr" target="#b5">[6]</ref>.</p><p>In designing Jigsaw, we observed that miss curves are often non-convex, so hill-climbing or convex approximations are insufficient. However, UCP's Lookahead is too slow to handle large numbers of fine-grained partitions. To solve this problem, we reformulate Lookahead in a much more efficient way, making it linear-time (Sec. IV).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Non-Uniform Cache Access (NUCA) Architectures</head><p>NUCA techniques <ref type="bibr" target="#b19">[20]</ref> reduce the access latency of large distributed caches, and have been the subject of extensive research. Static NUCA (S-NUCA) <ref type="bibr" target="#b19">[20]</ref> simply spreads the data across all banks with a fixed line-bank mapping, and exposes a variable bank access latency. Commercial designs often use S-NUCA <ref type="bibr" target="#b20">[21]</ref>. Dynamic NUCA (D-NUCA) schemes improve on S-NUCA by adaptively placing data close to the requesting core <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b9">10,</ref><ref type="bibr" target="#b10">11,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b30">31,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b45">46]</ref>. They involve a combination of placement, migration, and replication strategies. Placement and migration dynamically place data close to cores that use it, reducing access latency. Replication makes multiple copies of frequently used lines, reducing latency for widely read-shared lines (e.g., hot code), at the expense of some capacity loss. Shared-vs private-based NUCA: D-NUCA designs often build on a private-cache baseline. Each NUCA bank is treated as a private cache, lines can reside in any bank, and coherence is preserved through a directory-based or snoopy protocol, which is often also leveraged to implement NUCA techniques. For example, Adaptive Selective Replication <ref type="bibr" target="#b1">[2]</ref> controls replication by probabilistically deciding whether to store a copy of a remotely fetched line in the local L2 bank; Dynamic Spill-Receive <ref type="bibr" target="#b32">[33]</ref> can spill evicted lines to other banks, relying on remote snoops to retrieve them. These schemes are flexible, but they require all LLC capacity to be under a coherence protocol, so they are either hard to scale (in snoopy protocols), or incur significant area, energy, latency, and complexity overheads (in directory-based protocols).</p><p>In contrast, some D-NUCA proposals build on a sharedcache baseline and leverage virtual memory to perform adaptive placement. Cho and Jin <ref type="bibr" target="#b10">[11]</ref> use page coloring and a NUCA-aware allocator to map pages to specific banks. Hardavellas et al. <ref type="bibr" target="#b13">[14]</ref> find that most applications have a few distinct classes of accesses (instructions, private data, readshared, and write-shared data), and propose R-NUCA, which specializes placement and replication policies for each class of accesses on a per-page basis, and significantly outperforms NUCA schemes without this access differentiation. Sharedbaseline schemes are simpler, as they require no coherence for LLC data and have a simpler lookup mechanism. However, they may incur significant overheads if remappings are frequent or limit capacity due to restrictive mappings (Sec. VI).</p><p>Jigsaw builds on a shared baseline. However, instead of mapping pages to locations as in prior work <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b13">14]</ref>, we map pages to shares or logical caches, and decide the physical configuration of the shares independently. This avoids page table changes and TLB shootdowns on reconfigurations, though some reconfigurations still need cache invalidations. Isolation and partitioning in NUCA: Unlike partitioning, most D-NUCA techniques rely on best-effort heuristics with little concern for isolation, so they often improve typical performance at the expense of worst-case degradation, further precluding QoS. Indeed, prior work has shown that D-NUCA often causes significant bank contention and uneven distribution of accesses across banks <ref type="bibr" target="#b2">[3]</ref>. We also see this effect in Sec. VI -R-NUCA has the highest worst-case degradation of all schemes. Dynamic Spill-Receive mitigates this problem with a QoS-aware policy that avoids spills to certain banks <ref type="bibr" target="#b32">[33]</ref>. This can protect a local bank from interference, but does not provide partitioning-like capacity control. Virtual Hierarchies rely on a logical two-level directory to partition a cache at bank granularity <ref type="bibr" target="#b28">[29]</ref>, but this comes at the cost of doubling directory overheads and making misses slower.</p><p>Because conventional partitioning techniques (e.g., way-partitioning) only provide few partitions and often degrade performance, D-NUCA schemes seldom use them. ASP-NUCA <ref type="bibr" target="#b11">[12]</ref>, ESP-NUCA <ref type="bibr" target="#b30">[31]</ref>, and Elastic Cooperative Caching <ref type="bibr" target="#b15">[16]</ref> use way-partitioning to divide cache banks between private and shared levels. However, this division does not provide isolation, since applications interfere in the shared level. In contrast, Jigsaw partitions the cache into multiple isolated virtual caches that, due to smart placement, approach the low latency of private caches. These schemes often size partitions using hill-climbing (e.g., shadow tags <ref type="bibr" target="#b11">[12]</ref> or LRU way hit counters <ref type="bibr" target="#b15">[16]</ref>), which can get stuck in local optima, whereas Jigsaw captures full miss curves to make global decisions.</p><p>CloudCache <ref type="bibr" target="#b21">[22]</ref> implements virtual private caches that can span multiple banks. Each bank is way-partitioned, and partitions are sized with a distance-aware greedy algorithm based on UCP with a limited frontier. Unfortunately, CloudCache scales poorly to large virtual caches, as it uses N-chance spilling on evictions, and relies on broadcasts to serve local bank misses, reducing latency at the expense of significant bandwidth and energy (e.g., in a 64-bank cache with 8-way banks, in a virtual cache spanning all banks, a local miss will trigger a full broadcast, causing a 512-way lookup and a chain of 63 evictions). In contrast, Jigsaw implements singlelookup virtual shared caches, providing coordinated placement and capacity management without the overheads of a globally shared directory or multi-level lookups, and performs global (not limited-frontier) capacity partitioning efficiently using novel algorithms (Sec. IV).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>III. JIGSAW HARDWARE</head><p>Jigsaw exposes on-chip caches to software and enables their efficient management using a small set of primitives. First, Jigsaw lets software explicitly divide a distributed cache in collections of bank partitions, which we call shares. Shares can be dynamically reconfigured by changing the size of each bank partition. Second, Jigsaw provides facilities to map data to shares, and to quickly migrate data among shares. Third, Jigsaw implements share monitoring hardware to let software find the optimal share configuration efficiently.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Shares</head><p>Fig. <ref type="figure">1</ref> illustrates the overall organization of Jigsaw. Jigsaw banks can be divided in bank partitions. Jigsaw is agnostic to the partitioning scheme used, as well as the array type and replacement policy. As discussed in Sec. II, in our evaluation we select Vantage partitioning due to its ability to partition banks at a fine granularity with minimal costs.</p><p>Shares are configurable collections of bank partitions, visible to software. Each share has a unique id number and comprises a set of bank partitions that can be sized independently. The share size is the sum of its bank partition sizes. The share id is independent from the individual partition ids.</p><p>We could exploit shares in two ways. On the one hand, we could assign cores to shares, having shares behave as virtual private caches. This is transparent to software, but would require a coherence directory for LLC data. On the other hand, we can map data to shares. This avoids the need for coherence beyond the private (L2) caches, as each line can only reside in a single location. Mapping data to shares also enables specializing shares to different types of data (e.g., shared vs thread-private <ref type="bibr" target="#b13">[14]</ref>). For these reasons, we choose to map data to shares.</p><p>Jigsaw leverages the virtual memory subsystem to map data to shares. Fig. <ref type="figure">1</ref> illustrates this implementation, highlighting the microarchitectural structures added and modified. Specifically, we add a share id to each page table entry, and extend the TLB to store the share id. Active shares must have unique ids, so we model 16-bit ids. Share ids are needed in L2 accesses, so these changes should not slow down page translations.</p><p>On a miss on the private cache levels, a per-core sharebank translation buffer (STB) finds the bank the line maps to, as well as its bank partition. Fig. <ref type="figure">1</ref> depicts the per-core STBs. Each STB has a small number of resident shares. Like in a software-managed TLB, an access to a non-resident share causes an exception, and system software can refill the STB. As we will see in Sec. IV, supporting a small number of resident shares per core (typically 4) is sufficient. Each share descriptor consists of an array of N bank and bank partition ids. To perform a translation, we hash the address, and use the hash value to pick the array entry used. We take the STB translation latency out of the critical path by doing it speculatively on L2 accesses. Fig. <ref type="figure">2</ref> details the different steps involved in a Jigsaw cache access.</p><p>There are several interesting design dimensions in the STB. First, the hash function can be as simple as bit-selection. However, to simplify share management, the STB should divide the requests into sub-streams with statistically similar access patterns. A more robust hash function can achieve this. Specifically, we use an H 3 hash function (H in Fig. <ref type="figure">1</ref>), which is universal and efficient to implement in hardware <ref type="bibr" target="#b6">[7]</ref>. All STBs implement the same hash function. Second, increasing N, the number of entries in a share descriptor, lets us finetune the load we put on each bank to adapt to heterogeneous bank partition sizes. For example, if a share consists of two bank partitions, one twice the size of the other, we'd like 66% of the requests to go to the larger bank partition, and 33% to the smaller one. N = 2 does not allow such division, but N = 3 does. In our implementation, we choose N equal to the number of banks, so shares spanning few bank partitions can be finely tuned to bank partition sizes, but large shares that span most banks can not. For a 64-core system with 64 banks in which each bank has 64 partitions, bank and bank partition ids are 6 bits, and each share descriptor takes 768 bits (96 bytes). Supporting four shares can be done with less than 400 bytes, a 0.2% storage overhead over the private cache sizes. Alternatively, more complex weighted hash functions or more restrictive mappings can reduce this overhead.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Dynamic Adaptation</head><p>So far we have seen how Jigsaw works on a static configuration. To be adaptive, however, we must also support both reconfiguring a share and remapping data to another share.</p><p>Share reconfiguration: Shares can be changed in two dimensions. First, per-bank partition sizes can be dynamically changed. This concerns the bank partitioning technique used (e.g., in Vantage, this requires changing a few registers <ref type="bibr" target="#b36">[37]</ref>), and is transparent to Jigsaw. Second, the share descriptor (i.e., the mapping of lines to bank partitions) should also be changed at runtime, to change either the bank partitions that conform the share, or the load put on each bank partition.</p><p>To support share descriptor reconfiguration, we introduce hardware support for bulk invalidations. On a reconfiguration, the new STB descriptors are loaded and each bank walks the whole array, invalidating lines from shares that have been reassigned to other banks. When a bulk invalidation is in progress, accesses to lines in the same bank partition are NACKed, causing an exception at the requesting core. This essentially quiesces the cores that use the bank partition until the invalidation completes.</p><p>Bulk invalidations may seem heavy-handed, but they avoid having a directory. We have observed that bulk invalidations take 30-300 K cycles. Since we reconfigure every 50 M cycles, and only a fraction of reconfigurations cause bulk invalidations, this is a minor overhead given the hardware support. For our benchmarks, more frequent reconfigurations show little advantage, but this may not be the case with highly variable workloads. We defer investigating additional mechanisms to reduce the cost of bulk invalidations (e.g., avoiding stalls or migrating instead of invalidating) to future work.</p><p>These tradeoffs explain why we have chosen partitionable banks instead of a large number of tiny, unpartitionable banks. Partitionable banks incur fewer invalidations, and addressing a small number of banks reduces the amount of state in the share descriptor and STB. Finally, increasing the number of banks would degrade NoC performance and increase overheads <ref type="bibr" target="#b25">[26]</ref>.</p><p>Page remapping: To classify pages dynamically (Sec. IV), software must also be able to remap a page to a different share. A remap is similar to a TLB shootdown: the initiating core quiesces other cores where the share is accessible with an IPI; it then issues a bulk invalidation of the page. Once all the banks involved finish the invalidation, the core changes the share in the page table entry. Finally, quiesced cores update the stale TLB entry before resuming execution. Page remaps typically take a few hundred cycles, less than the associated TLB shootdown, and are rare in our runtime, so their performance effects are negligible.</p><p>Invalidations due to both remappings and reconfigurations could be avoided with an extra directory between Jigsaw and main memory. Sec. VI shows that this is costly and not needed, as reconfiguration overheads are negligible.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>C. Monitoring</head><p>In order to make reasonable partitioning decisions, software needs monitoring hardware that gives accurate, useful and timely information. As discussed in Sec. II, utility monitors (UMONs) <ref type="bibr" target="#b33">[34]</ref> are an efficient way to gather miss curves. Prior partitioning schemes use per-core UMONs <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b36">37]</ref>, but this is  <ref type="bibr" target="#b33">[34]</ref>, the tag array samples accesses and counts hits per way to produce miss curves. The limit register finely controls the UMON's sampling rate. insufficient in Jigsaw, as shares can be accessed from multiple cores, and different cores often have wildly different access patterns to the same data. Instead, Jigsaw generates per-share miss curves by adding UMONs to each bank.</p><p>UMONs were originally designed to work with set-associative caches, and worked by sampling a small but statistically significant number of sets. UMONs can also be used with other cache designs <ref type="bibr" target="#b36">[37]</ref> by sampling a fraction of cache accesses at the UMON. Given high enough associativity, a sampling ratio of UMON lines : S behaves like a cache of S lines. Moreover, the number of UMON ways determines the resolution of the miss curve: an N -way UMON yields N +1-point miss curves.</p><p>Partitioning schemes with per-core UMONs implicitly use a fixed sampling ratio UMON lines : cache lines. This is insufficient in Jigsaw, because shares can span multiple banks. To address this, we introduce an adaptive sampling mechanism, shown in Fig. <ref type="figure" target="#fig_2">3</ref>. Each UMON has a 32-bit limit register, and only addresses whose hash value is below this limit are inserted into the UMON. Changing the limit register provides fine control over the UMON's sampling rate.</p><p>For single-bank shares, a ratio r 0 = UMON lines : LLC lines lets Jigsaw model the full cache, but this is inadequate for multi-bank shares. To see why, consider a share allocated 100 KB, split between two bank partitions allocated 67 KB and 33 KB. The STB spreads accesses across banks, so each bank sees a statistically similar request stream, but sampled proportionally to bank partition size: 2/3 of the accesses are sent to the first partition, and 1/3 to the second. Consequently, the first bank partition's UMON would behave like a cache of 1.5× the LLC size, and the second as a cache of 3× the LLC size. Using a fixed sampling ratio of r 0 would be wasteful. By using r 1 = 3/2 • r 0 and r 2 = 3 • r 0 , Jigsaw counters the sampling introduced by the STB, and both UMONs model LLC size precisely.</p><p>In general, if the STB sends a fraction f i of requests to bank partition i, then a sampling ratio r i = r 0 /f i models LLC capacity, and Jigsaw produces the share's miss curve by averaging the bank partitions' curves. Moreover, when shares span multiple banks, one or a few UMONs suffice to capture accurate miss curves. Jigsaw therefore only implements a few UMONs per bank (four in our evaluation) and dynamically assigns them to shares using a simple greedy heuristic, ensuring that each share has at least one UMON. This makes the number of UMONs scale with the number of shares, not bank partitions.</p><p>Finally, in order to make sound partitioning decisions, miss curves must have sufficiently high resolution, which is determined by the number of UMON ways. While a small number of UMON ways is sufficient to partition small caches as in prior work <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b36">37]</ref>, partitioning a large, multi-banked cache among many shares requires higher resolution. For example, for a 1 MB cache, a 32-way UMON has a resolution of 32 KB. In a 64-bank cache with 1 MB banks, on the other hand, the same UMON's resolution is 2 MB. This coarse resolution affects partitioning decisions, hurting performance, as our evaluation shows (Sec. VI-D). For now, we ameliorate this problem by implementing 128-way UMONs and linearly interpolating miss curves. Though high, this associativity is still practical since UMONs only sample a small fraction of accesses. Results show that even higher associativities are beneficial, although this quickly becomes impractical. We defer efficient techniques for producing higher-resolution miss curves to future work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>IV. JIGSAW SOFTWARE</head><p>Shares are a general mechanism with multiple potential uses (e.g., maximizing throughput or fairness, providing strict process isolation, implementing virtual local stores, or avoiding side-channel attacks). In this work, we design a system-level runtime that leverages Jigsaw to jointly improve cache utilization and access latency transparently to user-level software. The runtime first classifies data into shares, then periodically decides how to size and where to place each share.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Shares and Page Mapping</head><p>Jigsaw defines three types of shares: global, per-process, and per-thread. Jigsaw maps pages accessed by multiple processes (e.g., OS code and data, library code) to the (unique) global share. Pages accessed by multiple threads in the same process are mapped to a per-process share. Finally, each thread has a per-thread share. With this scheme, each core's STB uses three entries, but there are a large number of shares in the system.</p><p>Similar to R-NUCA <ref type="bibr" target="#b13">[14]</ref>, page classification is done incrementally and lazily, at TLB/STB miss time. When a thread performs the first access to a page, it maps it to its per-thread share. If another thread from the same process tries to access the page, the page is remapped to the per-process share. On an access from a different process (e.g., due to IPC), the page is remapped to the global share. When a process finishes, its shares are deallocated and bulk-invalidated.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>B. Share Sizing: Peekahead</head><p>The Jigsaw runtime first decides how to size each share, then where to place it. This is based on the observation that reducing misses often yields higher benefits than reducing access latency, and considering sizing and placement independently greatly simplifies allocation decisions. Conceptually, sizing shares is no different than in UCP: the runtime computes the per-share miss curves as explained in Sec. III, then runs Lookahead (Sec. II) to compute the share sizes that maximize utility, or number of hits. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Maximum allocation, S</head><formula xml:id="formula_0">′ S ′ &lt; D D ≤ S ′ &lt; F F ≤ S ′ &lt; G G ≤ S ′ &lt; H H ≤ S ′ Start A S ′ D D D D D - S ′ F S ′ H F - - S ′ - - H - - - - S ′</formula><p>Table <ref type="table">2</ref>. Maximal utility allocations for Fig. <ref type="figure" target="#fig_3">4</ref> across the entire domain from all possible starting positions.</p><p>Unfortunately, using Lookahead is unfeasible. Lookahead greedily allocates space to the partition that provides the highest utility per unit (hits per allocation quantum). Because miss curves are not generally convex, on each step Lookahead traverses each miss curve looking for the maximum utility per unit it can achieve with the remaining unallocated space. This results in an O(P • S 2 ) run-time, where P is the number of partitions and S is the cache size in allocation quanta, or "buckets". With way-partitioning, S is small (the number of ways) and this is an acceptable overhead. In Jigsaw, banks can be finely partitioned, and we must consider all banks jointly. Lookahead is too inefficient at this scale.</p><p>To address this, we develop the Peekahead algorithm, an exact O(P • S) implementation of Lookahead. We leverage the insight that the point that achieves the maximum utility per unit is the next one in the convex hull of the miss curve. For example, Fig. <ref type="figure" target="#fig_3">4</ref> shows a non-convex miss curve (blue) and its convex hull (red). With an unlimited budget, i.e., abundant unallocated cache space, and starting from A, D gives maximal utility per unit (steepest slope); starting from D, H gives the maximal utility per unit; and so on along the convex hull. With a limited budget, i.e. if the remaining unallocated space limits the allocation to S ′ , the point that yields maximum utility per unit is the next one in the convex hull of the miss curve in the region [0, S ′ ]. For example, if we are at D and are given limit S ′ between F and G, the convex hull up to S ′ is the line DF S ′ and F yields maximal utility per unit. Conversely, if S ′ lies between G and H, then the convex hull is DS ′ , S ′ is the best option, and the algorithm terminates (all space is allocated).</p><p>If we know these points of interest (POIs), the points that constitute all reachable convex hulls, traversing the miss curves on each allocation becomes unnecessary: given the current allocation, the next relevant POI always gives the maximum utility per unit. For example, in Fig. <ref type="figure" target="#fig_3">4</ref>, the only POIs are A, D, F , and H; Table <ref type="table">2</ref> shows all possible decisions. Fig. <ref type="figure" target="#fig_4">5</ref> Cache Size shows several example miss curves and their POIs. Note that some POIs do not lie on the full convex hull (dashed lines), but are always on the convex hull of some sub-domain.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Misses</head><p>Peekahead first finds all POIs in O(S) for each partition. This is inspired by the three coins algorithm <ref type="bibr" target="#b29">[30]</ref>. For example, we construct the convex hull ADHI in Fig. <ref type="figure" target="#fig_3">4</ref> by considering points from left to right. At each step, we add the next point to the hull, and then backtrack to remove previous points that no longer lie on the hull. We begin with the line AB. C is added to form ABC, and then we backtrack. Because B lies above AC, it is removed, leaving AC. Similarly, D replaces C, leaving AD. Next, E is added to form ADE, but since D lies below AE, it is not removed. Continuing, F replaces E, G replaces F , H replaces G, and finally I is added to give the convex hull ADHI.</p><p>We extend this algorithm to build all convex hulls over [0, X] for any X up to S, which produces all POIs. We achieve this in O(S) by not always deleting points during backtracking. Instead, we mark points in convex regions with the x-coordinate at which the point becomes obsolete, termed the horizon (e.g., F 's horizon is G). Such a point is part of the convex hull up to its horizon, after which it is superseded by the higher-utility-per-unit points that follow. However, if a point is in a concave region then it is not part of any convex hull, so it is deleted (e.g., C and G).</p><p>Algorithm 1 shows the complete Peekahead algorithm. First, ALLHULLS preprocesses each share's miss curve and computes its POIs. Then, PEEKAHEAD divides cache space across shares iteratively using a max-heap. In practice, ALL-HULLS dominates the run-time of Algorithm 1 at O(P • S), as Sec. VI-D confirms. We provide a detailed analysis of Peekahead's run-time and correctness in a technical report <ref type="bibr" target="#b3">[4]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>C. NUCA-Aware Share Placement</head><p>Once the Jigsaw runtime sizes all shares, it places them over cache banks using a simple greedy heuristic. Each share starts with its allocation given by PEEKAHEAD, called the budget. The goal of the algorithm is for each share to exhaust its budget on banks as close to the source as possible. The source is the core or "center of mass" of cores that generate accesses to a share. The distance of banks from the source is precomputed for each partition and passed as the lists return A[...] D 1 ...D P . Each bank is given an inventory of space, and shares simply take turns making small "purchases" from banks until all budgets are exhausted, as Algorithm 2 shows. PEEKAHEAD dominates the run-time of the complete algorithm at O(P •S).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>V. EXPERIMENTAL METHODOLOGY</head><p>Modeled systems: We perform microarchitectural, executiondriven simulation using zsim <ref type="bibr" target="#b37">[38]</ref>, an x86-64 simulator based on Pin <ref type="bibr" target="#b26">[27]</ref>, and model tiled CMPs with 16 and 64 cores and a 3-level cache hierarchy, as shown in Fig. <ref type="figure">1</ref>. We use both simple in-order core models, and detailed OOO models validated </p><formula xml:id="formula_1">d[i] ← d[i]+1 14: A p,b ← A p,b + ∆ 15: budget[s] ← budget[s] − ∆ 16: inventory[b] ← inventory[b] − ∆ 17:</formula><p>return A against a real Westmere system <ref type="bibr" target="#b37">[38]</ref>. The 64-core CMP, with parameters shown in Table <ref type="table" target="#tab_3">3</ref>, is organized in 64 tiles, connected with an 8×8 mesh network-on-chip (NoC), and has 4 memory controllers at the edges. The scaled-down 16-core CMP has 16 tiles, a 4×4 mesh, and a single memory controller. The 16-core CMP has a total LLC capacity of 16 MB (1 MB/tile), and the 64-core CMP has 32 MB (512 KB/tile). We use McPAT <ref type="bibr" target="#b23">[24]</ref> to derive the area and energy numbers of chip components (cores, caches, NoC, and memory controller) at 22 nm, and Micron DDR3L datasheets <ref type="bibr" target="#b31">[32]</ref> to compute main memory energy. With simple cores, the 16-core system is implementable in 102 mm 2 and has a typical power consumption of 10-20 W in our workloads, consistent with adjusted area and power of Atom-based systems <ref type="bibr" target="#b12">[13]</ref>.</p><p>Cache implementations: Experiments use an unpartitioned, shared (static NUCA) cache with LRU replacement as the baseline. We compare Jigsaw with Vantage, a representative partitioned design, and R-NUCA, a representative sharedbaseline D-NUCA design. Because private-baseline D-NUCA schemes modify the coherence protocol, they are hard to model. Instead, we model an idealized shared-private D-NUCA scheme, IdealSPD, with 2× the LLC capacity. In IdealSPD, each tile has a private L3 cache of the same size as the LLC bank (512 KB or 1 MB), a fully provisioned 5-cycle directory bank that tracks the L3s, and a 9-cycle exclusive L4 bank (512 KB or 1 MB). Accesses that miss in the private L3 are serviced by the proper directory bank (traversing the NoC). The L4 bank acts as a victim cache, and is accessed in parallel with the directory to minimize latency. This models D-NUCA schemes that partition the LLC between shared and private regions, but gives the full LLC capacity to both the private (L3) and shared (L4) regions. Herrero et al. <ref type="bibr" target="#b15">[16]</ref> show that this idealized scheme always outperforms several state-of- the-art private-baseline D-NUCA schemes that include sharedprivate partitioning, selective replication, and adaptive spilling (DCC <ref type="bibr" target="#b14">[15]</ref>, ASR <ref type="bibr" target="#b1">[2]</ref>, and ECC <ref type="bibr" target="#b15">[16]</ref>), often by significant margins (up to 30%).</p><p>Vantage and Jigsaw both use 512-line (4 KB) UMONs with 128 ways (Sec. III-C), and reconfigure every 50 M cycles. Jigsaw uses 4 UMONs per 1 MB L3 bank, a total storage overhead of 1.4%. Vantage uses utility-based cache partitioning (UCP) <ref type="bibr" target="#b33">[34]</ref>. R-NUCA is configured as proposed <ref type="bibr" target="#b13">[14]</ref> with 4-way rotational interleaving and page-based reclassification. Jigsaw and R-NUCA use the page remapping support discussed in Sec. III, and Jigsaw implements bulk invalidations with per-bank pipelined scans of the tag array (with 1 MB 4way banks, a scan requires 4096 tag array accesses). Jigsaw uses thread-private and per-process shares. In all configurations, banks use 4-way 52-candidate zcache arrays <ref type="bibr" target="#b35">[36]</ref> with H 3 hash functions, though results are similar with more expensive 32-way set-associative hashed arrays.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Workloads and Metrics:</head><p>We simulate mixes of single and multi-threaded workloads. For single-threaded mixes, we use a similar methodology to prior partitioning work <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b36">37]</ref>. We classify all 29 SPEC CPU2006 workloads into four types according to their cache behavior: insensitive (n), cache-friendly (f), cache-fitting (t), and streaming (s) as in <ref type="bibr" target="#b36">[37,</ref><ref type="bibr">Table 2]</ref>, and build random mixes of all the 35 possible combinations of four workload types. We generate four mixes per possible combination, for a total of 140 mixes. We pin each application to a specific core, and fast-forward all applications for 20 billion instructions. We use a fixed-work methodology and equalize sample lengths to avoid sample imbalance, similar to FIESTA <ref type="bibr" target="#b16">[17]</ref>: First, we run each application in isolation, and measure the number of instructions I i that it executes in 1 billion cycles. Then, in each experiment we simulate the full mix until all applications have executed at least I i instructions, and consider only the first I i instructions of each application when reporting aggregate metrics. This ensures that each mix runs for at least 1 billion cycles. Our perworkload performance metric is perf i = IP C i .</p><p>For multi-threaded mixes, we use ten parallel benchmarks from PARSEC <ref type="bibr" target="#b4">[5]</ref> (blackscholes, canneal, fluidanimate, swaptions), SPLASH-2 (barnes, ocean, fft, lu, radix), and BioParallel <ref type="bibr" target="#b18">[19]</ref> (svm). We simulate 40 random mixes of four workloads. Each 16-thread workload is scheduled in one quadrant of the 64-core chip. Since IPC can be a misleading proxy for work in multithreaded workloads <ref type="bibr" target="#b0">[1]</ref>, we instrument each application with heartbeats that report global progress (e.g., when each timestep finishes in barnes). The ten applications we use are the ones from these suites for which we can add heartbeats without structural changes. For each application, we find the smallest number of heartbeats that complete in over 1 billion cycles from the start of the parallel region when running alone. This is the region of interest (ROI).</p><p>We then run the mixes by fast-forwarding all workloads until the start of their parallel regions, running until all applications complete their ROI, and keep all applications running to avoid a lighter load on longer-running applications. To avoid biasing throughput by ROI length, our per-application performance metric is perf i = ROItime i,alone /ROItime i . We report throughput and fairness metrics: normalized throughput, i perf i / i perf i,base , and weighted speedup, ( i perf i /perf i,base )/N apps , which accounts for fairness <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b39">40]</ref>. To achieve statistically significant results, we introduce small amounts of non-determinism <ref type="bibr" target="#b0">[1]</ref>, and perform enough runs to achieve 95% confidence intervals ≤1% on all results.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VI. EVALUATION</head><p>We first compare Jigsaw against alternative cache organizations and then present a focused analysis of Jigsaw. A technical report <ref type="bibr" target="#b3">[4]</ref> includes additional results and experiments.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A. Single-threaded mixes on 16-core CMP</head><p>We first present results with in-order cores, as they are easier to understand and analyze, then show OOO results.</p><p>Performance across all mixes: Fig. <ref type="figure" target="#fig_5">6</ref> summarizes both throughput and weighted speedup for the cache organizations we consider across the 140 mixes. Each line shows the performance improvement of a single organization against the shared LRU baseline. For each line, workload mixes (the x-axis) are sorted according to the improvement achieved. Lines are sorted independently, so these graphs give a concise summary of improvements, but should not be used for workload-byworkload comparisons among schemes.</p><p>Fig. <ref type="figure" target="#fig_5">6</ref> shows that Jigsaw is beneficial for all mixes, and achieves large throughput and fairness gains: up to 50% higher throughput, and up to 2.2× weighted speedup  over an unpartitioned shared cache. Overall, Jigsaw achieves gmean throughput/weighted speedups of 14.3%/18.4%, Vantage achieves 5.8%/8.2%, R-NUCA achieves 8.2%/6.3%, and IdealSPD achieves 10.7%/11.4%. Partitioning schemes benefit weighted speedup more than throughput, improving fairness (despite using UCP, which optimizes throughput). R-NUCA favors throughput but not fairness, and IdealSPD favors both, but note this is an upper bound with twice the cache capacity.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Cycles vs LRU</head><formula xml:id="formula_2">L V R I J L V R I J L V R I J L V R I J L V R I J L V R I J L V R I J fffn0 snnn3 stnn0 ftnn2 ttnn2 tttt3 fttt2 Exec L2 Net LLC Reconf DRAM</formula><p>Performance of memory-intensive mixes: These mixes have a wide range of behaviors, and many access memory infrequently. For the mixes with the highest 20% of memory intensities (aggregate LLC MPKIs in LRU), where the LLC organization can have a large impact, the achieved gmean throughputs/weighted speedups are 21.2%/29.2% for Jigsaw, 11.3%/19.7% for Vantage, 5.8%/4.8% for R-NUCA, and 8.6%/14% for IdealSPD. Jigsaw and Vantage are well above their average speedups, R-NUCA is well below, and IdealSPD is about the same. Most of these mixes are at the high end of the lines in Fig. <ref type="figure" target="#fig_5">6</ref> for Jigsaw and Vantage, but not for R-NUCA. R-NUCA suffers on memory-intensive mixes because its main focus is to reduce LLC access latency, not MPKI, and IdealSPD does not improve memory-intensive mixes because it provides no capacity control in the shared region.</p><p>Performance breakdown: To gain more insight into these differences, Fig. <ref type="figure" target="#fig_7">7</ref> shows a breakdown of execution time for seven representative mixes. Each bar shows the total number of cycles across all workloads in the mix for a specific configuration, normalized to LRU's (the inverse of each bar is throughput over LRU). Each bar further breaks down where cycles are spent, either executing instructions or stalled on a memory access. Memory accesses are split into their L2, NoC, LLC, and memory components. For R-NUCA and Jigsaw, we include time spent on reconfigurations and remappings, which is negligible. For IdealSPD, the LLC contribution includes time spent in private L3, directory, and shared L4 accesses. We see four broad classes of behavior: First, in capacityinsensitive mixes (e.g., fffn0, snnn3) partitioning barely helps, either because applications have small working sets that fit in their local banks or have streaming behavior. Vantage thus performs much like LRU on these mixes. R-NUCA improves performance by keeping data in the closest bank (with single-threaded mixes, R-NUCA behaves like a private LLC organization without a globally shared directory). Jigsaw maps shares to their closest banks, achieving similar improvements. IdealSPD behaves like R-NUCA on low memory intensity mixes (e.g., fffn0) where the shared region is lightly used, but with increasing memory intensity (e.g. snnn3) its directory overheads (network and LLC) make it perform much like LRU. The latter holds for all remaining mixes. Second, capacity-critical mixes (e.g., stnn0) contain applications that do not fit within a single bank, but share the cache effectively without partitioning. Here, Vantage and IdealSDP show no advantage over LRU, but R-NUCA in particular performs poorly, yielding higher MPKI than the shared LRU baseline. Jigsaw gets the benefit of low latency, but without sacrificing the MPKI advantages of higher capacity.</p><p>Third, in partitioning-friendly mixes (e.g., fftn2 and ttnn2) each application gets different utility from the cache, but no single application dominates LLC capacity. Partitioning reduces MPKI slightly, whereas R-NUCA gets MPKI similar to the shared LRU baseline, but with lower network latency. IdealSDP performs somewhere between Vantage and LRU because it does not partition within the shared region. Jigsaw captures the benefits of both partitioning and low latency, achieving the best performance of any scheme.</p><p>Finally, partitioning-critical mixes (e.g., tttt3 and fttt2) consist of cache-fitting apps that perform poorly below a certain capacity threshold, after which their MPKI drops sharply. In these mixes, a shared cache is ineffective at dividing capacity, and partitioning achieves large gains. R-NUCA limits apps to their local bank and performs poorly. Jigsaw is able to combine the advantages of partitioning with the low latency of smart placement, achieving the best performance.</p><p>In some mixes (e.g., fttt2), IdealSPD achieves a lower MPKI than Vantage and Jigsaw, but this is an artifact of having twice the capacity. Realistic shared-private D-NUCA schemes will always get less benefit from partitioning than Vantage or Jigsaw, as they partition between shared and private regions, but do not partition the shared region among applications. Energy: Fig. <ref type="figure" target="#fig_8">8</ref> shows the system energy (full chip and main memory) consumed by each cache organization for each of the 140 mixes, normalized to LRU's energy. Lower numbers are better. Jigsaw achieves the largest energy reductions, up to 72%, 10.6% on average, and 22.5% for the mixes with the highest 20% of memory intensities. Fig. <ref type="figure" target="#fig_8">8</ref>  Performance with OOO cores: Fig. <ref type="figure">9</ref> shows throughputs and weighted speedups for each organization when using Westmere-like OOO cores. We also quadruple the memory channels (51.2 GB/s) to maintain a balanced system given the faster cores. Jigsaw still provides the best gmean throughput/weighted speedup, achieving 9.9%/10.5% over the LRU baseline. Vantage achieves 3.2%/2.7%, R-NUCA achieves -1.4%/1.3%, and IdealSPD achieves 3.6%/2.2%. OOO cores tolerate memory stalls better, so improvements are smaller than with in-order cores. Additionally, OOO cores hide short latencies (e.g., LLC) better than long latencies (e.g., main memory), so reducing MPKI (Jigsaw/Vantage) becomes more important than reducing network latency (R-NUCA). Finally, R-NUCA underperforms LRU on 25% of the mixes, with up to 42% lower throughput. These are memory-intensive mixes, where R-NUCA's higher MPKIs drive main memory close to saturation, despite the much higher bandwidth. With infinite memory bandwidth, R-NUCA achieves 4.5%/7.1% average improvements with a worst-case throughput degradation of 15% vs LRU, while Jigsaw achieves 11.1%/11.8%.</p><p>B. Multi-threaded mixes on 64-core CMP Fig. <ref type="figure" target="#fig_9">10</ref> shows throughput and weighted speedup results of different organizations on 40 random mixes of four 16thread workloads in the 64-core CMP with in-order cores. We include two variants of Jigsaw: one with a single per-process share (Jigsaw (P)), and another with additional thread-private shares as discussed in Sec. IV (Jigsaw). Jigsaw achieves the highest improvements of all schemes. Overall, gmean throughput/weighted speedup results are 9.1%/8.9% for Jigsaw, 1.9%/2.6% for Vantage, 5.0%/4.7% for R-NUCA, and 4.5%/5.5% for IdealSPD.</p><p>Unlike the single-threaded mixes, most applications are capacity-insensitive and have low memory intensity; only  Jigsaw (P) does better than Vantage, but worse than Jigsaw due to the lack of per-thread shares. Jigsaw achieves lower network latency than R-NUCA and outperforms it further when partitioning is beneficial. Note that R-NUCA and Jigsaw reduce network latency by different means. R-NUCA places private data in the local bank, replicates instructions, and spreads shared data across all banks. Jigsaw just does placement: per-thread shares in the local bank, and perprocess shares in the local quadrant of the chip. This reduces latency more than placing data throughout the chip and avoids capacity loss from replication. Because there is little capacity contention, we tried a modified R-NUCA that replicates readonly data (i.e., all pages follow a Private → Shared Readonly → Shared Read-write classification). This modified R-NUCA achieves 8.6%/8.5% improvements over LRU, bridging much of the gap with Jigsaw. While Jigsaw could implement fixed-degree replication a là R-NUCA, we defer implementing an adaptive replication scheme (e.g., using cost-benefit analysis and integrating it in the runtime) to future work.</p><p>Though not shown, results with OOO cores follow the same trends, with gmean throughput/weighted speedup improvements of 7.6%/5.7% for Jigsaw, 3.0%/3.7% for Vantage, 4.6%/2.1% for R-NUCA, and 4.4%/5.4% for IdealSPD.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>C. Summary of results</head><p>Fig. <ref type="figure">11</ref> summarizes LLC performance for both 16-and 64core mixes. For each cache organization, each mix is represented by a single point. Each point's x-coordinate is its LLC and main memory latency (excluding network) normalized to LRU, and the y-coordinate is its network latency normalized to LRU; lower is better in both dimensions. This representation tries to decouple each organization's intrinsic benefits in MPKI and latency reduction from the specific timing of the system. Overall, we draw the following conclusions:</p><p>• Vantage is able to significantly reduce MPKI, but has no impact on network latency. • R-NUCA achieves low network latency, but at the cost of increased MPKI for a significant portion of mixes. Often the losses in MPKI exceed the savings in network latency, so much so that R-NUCA has the worst-case degradation of all schemes.</p><p>• IdealSPD is able to act as either a private-cache or sharedcache organization, but cannot realize their benefits simultaneously. IdealSPD can match the main memory performance of Vantage on many mixes (albeit with twice the capacity) and R-NUCA's low latency on some mixes. However, IdealSPD struggles to do both due to its shared/private dichotomy, shown by its L -shape outline in Fig. <ref type="figure">11a</ref>. Mixes can achieve low latency only by avoiding the shared region. With high memory intensity, global directory overheads become significant, and it behaves as a shared cache.</p><p>• Jigsaw combines the latency reduction of D-NUCA schemes with the miss reduction of partitioning, achieving the best performance on a wide range of workloads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>D. Jigsaw analysis</head><p>Lookahead vs Peekahead: Table <ref type="table" target="#tab_6">4</ref> shows the average core cycles required to perform a reconfiguration using both the UCP Lookahead algorithm and Peekahead as presented in Sec. IV. Sensitivity to reconfiguration interval: All results presented so far use a reconfiguration interval of 50 M cycles. Smaller intervals could potentially improve performance by adapting more quickly to phase changes in applications, but also incur higher reconfiguration overheads. Fig. <ref type="figure" target="#fig_1">12a</ref> shows the gmean throughputs (weighted speedup is similar) achieved by both Jigsaw and Vantage on the 140 16-core mixes, for reconfiguration intervals of 5, 10, 25, 50, 100, 250, and 500 M cycles. Vantage is fairly insensitive to interval length, which is expected since its reconfigurations are fast and incur no invalidations, but also shows that for our target workloads there is little to gain from more frequent repartitionings. In contrast, Jigsaw benefits from longer intervals, as reconfigurations involve bulk invalidations. Performance quickly degrades below 10-25 M cycle intervals, and at 5 M cycles, the overheads from invalidations negate Jigsaw's benefits over Vantage. Both Jigsaw and Vantage degrade substantially with long intervals (250 and 500), but this may be an artifact of having few reconfigurations per run.</p><p>To elucidate this further, we also evaluated backing Jigsaw with a directory. We optimistically model an ideal, 0-cycle, fully-provisioned directory that causes no directory-induced invalidations. The directory enables migrations between lines in different banks after a reconfiguration, and avoids all bulk and page remapping invalidations. At 50 M cycles, directorybacked Jigsaw improves gmean throughput by 1.7%. We conclude that a directory-backed Jigsaw would not be beneficial. Even efficient implementations of this directory would require multiple megabytes and add significant latency, energy, and complexity. However, our workloads are fairly stable, we pin threads to cores, and do not overcommit the system. Other use cases (e.g., overcommitted systems) may change the tradeoffs.</p><p>Sensitivity to UMON configuration: Fig. <ref type="figure" target="#fig_1">12b</ref> shows Jigsaw's performance over the 140 16-core mixes with different UMON configurations. These results show the impact of both associativity, which determines miss curve resolution, and UMON size, which determines sampling error. The blue bars show a sweep over associativity at 32, 64, 128, 256, and 512 ways for a 4 KB UMON (results use 128-way 4 KB UMONs). The red bar shows the impact of increasing UMON size 8× to 32 KB holding associativity at 512 ways; and the green bar is an idealized configuration with 2048-way, 64 KB UMONs shared among all bank partitions, eliminating sampling issues for multi-bank shares (Sec. III-C).</p><p>These results demonstrate a consistent performance improvement, in both throughput and weighted speedup, from 32 to 512 ways. Increasing associativity from 32 to 64 ways improves throughput/weighted speedup by 1.1%/1.4% over LRU. This benefit comes from being able to partition the cache at finer granularity. With low resolution, the runtime overallocates space to applications with sharp knees in their miss curves. This is because UMON data is missing around the knee in the curve, so the runtime cannot tell precisely where the knee occurs. Increasing UMON associativity improves resolution, and frees this space for other shares that make better use of it. Increasing to 128 ways improves performance by 0.8%/1.2%. Subsequent doublings of associativity improve performance by only 0.1%/0.4% over LRU on average. This indicates that while performance increases are steady, there are significantly diminishing returns. In contrast, increasing UMON size by 8× (red bar) improves throughput by just 0.1%. Clearly, sampling error is not a significant problem in Jigsaw. Finally, the ideal configuration (green bar) shows that while more performance is possible with ideal UMONs, the 128-way, 4 KB configuration comes within 0.8%/1.5%.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>VII. CONCLUSIONS</head><p>We have presented Jigsaw, a cache organization that addresses the scalability and interference issues of distributed onchip caches. Jigsaw lets software define shares, virtual caches of guaranteed size and placement, and provides efficient mechanisms to monitor, reconfigure, and map data to shares. We have developed an efficient, novel software runtime that uses these mechanisms to achieve both the latency-reduction benefits of NUCA techniques and the hit-maximization benefits of controlled capacity management. As a result, Jigsaw significantly outperforms state-of-the-art NUCA and partitioning techniques over a wide range of workloads. Jigsaw can potentially be used for a variety of other purposes, including maximizing fairness, implementing process priorities or tiered quality of service, or exposing shares to user-level software to enable application-specific optimizations.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head></head><label></label><figDesc>Scheme H i g h c a p a c i t y L o w L a t e n c y C a p a c i t y c o n t r o l I s o l a t i o n D i r e c t o r yl e s s Private caches ✗ ✓ ✗ ✓ ✗</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 1 .Figure 2 .</head><label>12</label><figDesc>Figure 1. Jigsaw overview: target tiled CMP, tile configuration with microarchitectural changes and additions introduced by Jigsaw, and Share-Bank Translation Buffer (STB).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Jigsaw monitoring hardware. As in UMON-DSS<ref type="bibr" target="#b33">[34]</ref>, the tag array samples accesses and counts hits per way to produce miss curves. The limit register finely controls the UMON's sampling rate.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 .</head><label>4</label><figDesc>Figure 4. Non-convex miss curve (blue), and its convex hull (red).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 .</head><label>5</label><figDesc>Figure 5. Points of interest (POIs) for several example miss curves. Dashed lines denote their convex hulls.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 .</head><label>6</label><figDesc>Figure 6. Throughput and weighted speedup of Jigsaw, Vantage, R-NUCA, and IdealSPD (with 2× cache) over LRU baseline, for 140 SPEC CPU2006 mixes on the 16-core chip with in-order cores.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 7 .</head><label>7</label><figDesc>Figure 7. Execution time breakdown of LRU (L), Vantage (V), R-NUCA (R), IdealSPD (I), and Jigsaw (J), for representative 16-core single-thread mixes. Cycles are normalized to LRU's (lower is better).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 8 .</head><label>8</label><figDesc>Figure 8. System energy across LLC organizations on 16-core, inorder chip: per-mix results, and average energy breakdown across mixes. Results are normalized to LRU's energy (lower is better).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 10 .</head><label>10</label><figDesc>Figure 10. Throughput and weighted speedup of Jigsaw (w/ and w/o per-thread shares), Vantage, R-NUCA, and IdealSPD (2× cache) over LRU, for 40 4×16-thread mixes on 64-core chip with in-order cores.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 .</head><label>1</label><figDesc>Desirable properties achieved by main cache organizations.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>Algorithm 1. The Peekahead algorithm. Compute all reachable convex hulls and use the convexity property to perform Lookahead in linear time. Letters in comments refer to points in Fig.4. AB is the line connecting A and B. : A single miss curve: M , Cache size: S Returns: POIs comprising all convex hulls over [0, X] ∀ 0 ≤ X ≤ S</figDesc><table><row><cell cols="2">Inputs1: function ALLHULLS(M , S)</cell><cell></cell></row><row><cell>2:</cell><cell>start ← (0, M (0), ∞)</cell><cell cols="2">⊲ POIs are (x, y, horizon)</cell></row><row><cell>3:</cell><cell>pois[...] ← {start}</cell><cell></cell><cell>⊲ Vector of POIs</cell></row><row><cell>4:</cell><cell>hull[...] ← {pois.HEAD}</cell><cell cols="2">⊲ Current convex hull; references pois</cell></row><row><cell>5:</cell><cell>for x ← 1 to S :</cell><cell></cell></row><row><cell>6:</cell><cell>next ← (x, M (x), ∞)</cell><cell></cell></row><row><cell>7:</cell><cell cols="2">for i ← hull.LENGTH − 1 to 1 :</cell><cell>⊲ Backtrack?</cell></row><row><cell>8:</cell><cell cols="2">candidate ← hull[i]</cell></row><row><cell>9:</cell><cell>prev ← hull[i − 1]</cell><cell></cell></row><row><cell>10:</cell><cell cols="3">if candidate is not BELOW prev next :</cell></row><row><cell>11:</cell><cell>hull.POPBACK()</cell><cell></cell><cell>⊲ Remove from hull</cell></row><row><cell>12:</cell><cell cols="2">if candidate.x ≥ x − 1 :</cell></row><row><cell>13:</cell><cell cols="2">pois.POPBACK()</cell><cell>⊲ Not a POI (C, G)</cell></row><row><cell>14:</cell><cell>else :</cell><cell></cell></row><row><cell>15:</cell><cell cols="3">candidate.horizon ← x − 1 ⊲ POI not on hull (F )</cell></row><row><cell>16:</cell><cell>else :</cell><cell></cell></row><row><cell>17:</cell><cell>break</cell><cell cols="2">⊲ POI and predecessors valid (for now)</cell></row><row><cell>18:</cell><cell>pois.PUSHBACK(next)</cell><cell></cell><cell>⊲ Add POI</cell></row><row><cell>19:</cell><cell cols="2">hull.PUSHBACK(pois.TAIL)</cell></row><row><cell>20:</cell><cell>return pois</cell><cell></cell></row><row><cell></cell><cell>P times</cell><cell></cell></row><row><cell></cell><cell>{0...0}</cell><cell></cell></row><row><cell>25:</cell><cell>heap ← MAKEHEAP( )</cell><cell></cell><cell>⊲ Steps sorted by ∆U</cell></row><row><cell>26:</cell><cell>function NEXTPOI(p)</cell><cell></cell></row><row><cell>27:</cell><cell cols="2">for i ← current[p] + 1 to pois[p].TAIL :</cell></row><row><cell>28:</cell><cell cols="2">if i.x &gt; current[p].x + S : break</cell><cell>⊲ No space left</cell></row><row><cell>29:</cell><cell cols="3">if i.horizon &gt; current[p].x + S : return i</cell><cell>⊲ Valid POI</cell></row><row><cell>30:</cell><cell>x ← current[p].x + S</cell><cell cols="2">⊲ Concave region; take S</cell></row><row><cell>31:</cell><cell>return (x, Mp(x), ∞)</cell><cell></cell></row><row><cell>32:</cell><cell>function ENQUEUE(p)</cell><cell></cell></row><row><cell>33:</cell><cell>next ← NEXTPOI(p)</cell><cell></cell></row><row><cell>34:</cell><cell cols="2">∆S ← next.x − current[p].x</cell></row><row><cell>35:</cell><cell cols="2">∆U ← (current[p].y − next.y) /∆S</cell></row><row><cell>36:</cell><cell cols="2">heap.PUSH((p, ∆U, ∆S, next))</cell></row><row><cell>37:</cell><cell>ENQUEUE([1...P ])</cell><cell></cell></row><row><cell>38:</cell><cell>while S &gt; 0 :</cell><cell></cell><cell>⊲ Main loop</cell></row><row><cell>39:</cell><cell cols="2">(p, ∆U, ∆S, next) ← heap.POP()</cell></row><row><cell>40:</cell><cell>if S ≥ ∆S :</cell><cell cols="2">⊲ Allocate if we have space</cell></row><row><cell>41:</cell><cell>current[p] ← next</cell><cell></cell></row><row><cell>42:</cell><cell cols="2">A[p] ← A[p] + ∆S</cell></row><row><cell>43:</cell><cell>S ← S − ∆S</cell><cell></cell></row><row><cell>44:</cell><cell>ENQUEUE(p)</cell><cell></cell></row><row><cell>45:</cell><cell></cell><cell></cell></row></table><note>Inputs: Partition miss curves: M 1 ...M P , Cache size: S Returns: Partition allocations: A[...] 21: function PEEKAHEAD(M 1 ...M P , S) 22: pois[...] ← {ALLHULLS(M 1 , S)...ALLHULLS(M P , S)} 23: current[...] ← {pois[1].HEAD...pois[p].HEAD} ⊲ Allocations 24: A[...] ←</note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head></head><label></label><figDesc>Algorithm 2. Jigsaw's partitioning policy. Divide the LLC into shares to maximize utility and locality. Shares use budgets produced by Peekahead to claim capacity in nearby bank partitions in increments of ∆0. Partition miss curves: M 1 ...M P , Cache size: S, Num. banks: B, Banks sorted by distance: D 1 ...D P Returns: Share allocation matrix: A p,b where 1 ≤ p ≤ P and 1 ≤ b ≤ B 1: function PARTITION(M 1 ...M P , S, B)</figDesc><table><row><cell>2:</cell><cell cols="2">budget[...] ← PEEKAHEAD(M 1 ...M P , S)</cell></row><row><cell></cell><cell></cell><cell>B times</cell></row><row><cell>3: 4:</cell><cell cols="2">inventory[...] ← d[...] ← {D 1 .HEAD...D P .HEAD} S B , S B , S B S ... B</cell><cell>⊲ Prefer closer banks</cell></row><row><cell>5:</cell><cell cols="2">A ← [0] 1≤p≤P</cell></row><row><cell></cell><cell></cell><cell>1≤b≤B</cell></row><row><cell>6:</cell><cell>while</cell><cell>budget &gt; 0 :</cell></row><row><cell>7:</cell><cell cols="2">for s ← 1 to P :</cell></row><row><cell>8:</cell><cell></cell><cell>b ← d[i]</cell><cell>⊲ Closest bank</cell></row><row><cell>9:</cell><cell></cell><cell>if inventory[b] &gt; ∆ 0 :</cell></row><row><cell>10:</cell><cell></cell><cell>∆ ← ∆ 0</cell><cell>⊲ Have space; take ∆ 0</cell></row><row><cell>11:</cell><cell></cell><cell>else :</cell></row><row><cell>12:</cell><cell></cell><cell cols="2">∆ ← inventory[b] ⊲ Empty bank; move to next closest</cell></row><row><cell>13:</cell><cell></cell><cell></cell></row></table><note>Inputs:</note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 3 .</head><label>3</label><figDesc>Configuration of the simulated 64-core CMP.</figDesc><table><row><cell>Cores</cell><cell>64 cores, x86-64 ISA, in-order IPC=1 except on memory accesses / Westmere-like OOO, 2 GHz</cell></row><row><cell>L1 caches</cell><cell>32 KB, 8-way set-associative, split D/I, 1-cycle latency</cell></row><row><cell>L2 caches</cell><cell>128 KB private per-core, 8-way set-associative, inclusive, 6-cycle latency</cell></row><row><cell></cell><cell>512 KB/1 MB per tile, 4-way 52-candidate zcache, 9 cycles,</cell></row><row><cell>L3 cache</cell><cell>inclusive, LRU/R-NUCA/Vantage/Jigsaw, or idealized</cell></row><row><cell></cell><cell>shared-private D-NUCA with 2× capacity (IdealSPD)</cell></row><row><cell>Coherence</cell><cell>MESI protocol, 64 B lines, in-cache directory, no silent</cell></row><row><cell>protocol</cell><cell>drops; sequential consistency</cell></row><row><cell>Global</cell><cell>8×8 mesh, 128-bit flits and links, X-Y routing, 3-cycle</cell></row><row><cell>NoC</cell><cell>pipelined routers, 1-cycle links</cell></row><row><cell>Memory</cell><cell>4 MCUs, 1 channel/MCU, 120 cycles zero-load latency,</cell></row><row><cell>controllers</cell><cell>12.8 GB/s per channel</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head></head><label></label><figDesc>also shows the per-</figDesc><table><row><cell></cell><cell>1.4</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>1.4</cell><cell></cell><cell></cell><cell></cell></row><row><cell>Throughput vs LRU</cell><cell>0.7 0.8 0.9 1.0 1.1 1.2 1.3</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Jigsaw IdealSPD R-NUCA Vantage</cell><cell>W. Speedup vs LRU</cell><cell>0.8 0.9 1.0 1.1 1.2 1.3 0.7</cell><cell></cell><cell></cell><cell></cell><cell>Jigsaw IdealSPD R-NUCA Vantage</cell></row><row><cell></cell><cell>0.6</cell><cell>0</cell><cell>20</cell><cell>40</cell><cell>60</cell><cell>80 100 120 140</cell><cell></cell><cell>0.6</cell><cell>0</cell><cell>20</cell><cell>40</cell><cell>60</cell><cell>80 100 120 140</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">Workload</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Workload</cell></row><row><cell cols="13">Figure 9. Throughput and weighted speedup of Jigsaw, Vantage, R-</cell></row><row><cell cols="13">NUCA, and IdealSPD (2× cache) over LRU, for 140 SPEC CPU2006</cell></row><row><cell cols="13">mixes on 16-core chip with OOO cores and 4× memory bandwidth.</cell></row><row><cell cols="13">component breakdown of energy consumption for the different</cell></row><row><cell cols="13">cache organizations, showing the reasons for Jigsaw's savings:</cell></row><row><cell cols="13">its higher performance reduces static (leakage and refresh)</cell></row><row><cell cols="13">energy, and Jigsaw reduces both NoC and main memory</cell></row><row><cell cols="13">dynamic energy. These results do not model UMON or STB</cell></row><row><cell cols="13">energy overheads because they are negligible. Each UMON is</cell></row><row><cell cols="13">4 KB and is accessed infrequently (less than once every 512</cell></row><row><cell cols="13">accesses). STBs are less than 400 bytes, and each STB lookup</cell></row><row><cell cols="7">reads only 12 bits of state.</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head></head><label></label><figDesc>canneal is cache-friendly, and ocean is cache-fitting. This is why we model a 32 MB LLC: a 64 MB LLC improves throughput by only 3.5%. Longer network latencies emphasize smart placement, further de-emphasizing MPKI reduction. Consequently, Vantage yields small benefits except on the few mixes that contain canneal or ocean. IdealSPD enjoys the low latency of large local banks as well as a large shared cache, but read-write sharing is slower due to the deeper private hierarchy and global directory, ultimately yielding modest improvements. This drawback is characteristic of all private-based D-NUCA schemes. On the other hand, R-NUCA achieves low latency and, unlike the single-threaded mixes, does not suffer from limited capacity. This is both because of lower memory intensity and because R-NUCA uses shared cache capacity for data shared among multiple threads.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 4 .</head><label>4</label><figDesc>Performance of Peekahead and UCP's Lookahead<ref type="bibr" target="#b33">[34]</ref>. Results given in M cycles per invocation.</figDesc><table><row><cell></cell><cell>1.2</cell><cell></cell><cell></cell><cell>Jigsaw</cell><cell></cell><cell cols="2">IdealSPD</cell><cell></cell><cell cols="2">1.2 R-NUCA</cell><cell></cell><cell>Vantage</cell><cell></cell></row><row><cell></cell><cell>1.0</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>1.0</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Net Latency</cell><cell>0.4 0.6 0.8</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>Net Latency</cell><cell>0.4 0.6 0.8</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.2</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.2</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.0 0.0</cell><cell>0.5</cell><cell>1.0</cell><cell>1.5</cell><cell>2.0</cell><cell>2.5</cell><cell>3.0</cell><cell></cell><cell>0.0 0.0</cell><cell>0.2</cell><cell>0.4</cell><cell>0.6</cell><cell>0.8</cell><cell>1.0</cell><cell>1.2</cell></row><row><cell></cell><cell></cell><cell cols="5">LLC+DRAM Latency</cell><cell></cell><cell></cell><cell></cell><cell cols="5">LLC+DRAM Latency</cell></row><row><cell cols="8">(a) Single-threaded mixes, 16 cores</cell><cell cols="7">(b) Multi-threaded mixes, 64 cores</cell></row><row><cell cols="15">Figure 11. Intrinsic MPKI and network latency reduction benefits</cell></row><row><cell cols="15">of Jigsaw, Vantage, R-NUCA, and IdealSPD (with 2× cache) over</cell></row><row><cell cols="15">LRU. Each point shows the average LLC + memory latency (x) and</cell></row><row><cell cols="15">network latency (y) of one mix normalized to LRU's (lower is better).</cell></row><row><cell></cell><cell cols="2">Buckets</cell><cell>32</cell><cell>64</cell><cell>128</cell><cell></cell><cell>256</cell><cell>512</cell><cell cols="2">1024</cell><cell>2048</cell><cell>4096</cell><cell></cell><cell>8192</cell></row><row><cell cols="3">Lookahead</cell><cell>0.87</cell><cell>2.8</cell><cell>9.2</cell><cell></cell><cell>29</cell><cell>88</cell><cell>280</cell><cell></cell><cell>860</cell><cell>2,800</cell><cell></cell><cell>10,000</cell></row><row><cell cols="3">Peekahead</cell><cell cols="5">0.18 0.30 0.54 0.99</cell><cell>1.9</cell><cell>3.6</cell><cell></cell><cell>7.0</cell><cell>13</cell><cell></cell><cell>26</cell></row><row><cell></cell><cell cols="2">Speedup</cell><cell cols="6">4.8× 9.2× 17× 29× 48×</cell><cell cols="2">77×</cell><cell cols="3">125× 210×</cell><cell>380×</cell></row><row><cell cols="4">ALLHULLS % 87</cell><cell>90</cell><cell>92</cell><cell></cell><cell>95</cell><cell>96</cell><cell>98</cell><cell></cell><cell>99</cell><cell>99</cell><cell></cell><cell>99.5</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head></head><label></label><figDesc>Figure 12. Mean throughput improvements on the 140 16-core mixes for a sweep over two architectural parameters. Weighted speedups follow the same trends.while Peekahead scales sublinearly (1.9× per 2× buckets). ALLHULLS dominates Peekahead's run-time, confirming linear asymptotic growth. All previous results use 128 buckets (128-way UMONs), where Peekahead is 17× faster than Lookahead. Peekahead's advantage increases quickly with resolution. Overall, Jigsaw spends less than 0.1% of system cycles in reconfigurations at both 16 and 64 cores, imposing negligible overheads.</figDesc><table><row><cell></cell><cell></cell><cell cols="2">Jigsaw</cell><cell>Vantage</cell><cell></cell><cell>4KB</cell><cell>32KB</cell><cell>64KB</cell></row><row><cell></cell><cell>1.20</cell><cell></cell><cell></cell><cell></cell><cell>1.20</cell></row><row><cell>Throughput vs LRU</cell><cell>1.05 1.10 1.15</cell><cell></cell><cell></cell><cell>Throughput vs LRU</cell><cell>1.05 1.10 1.15</cell></row><row><cell></cell><cell>1.00</cell><cell></cell><cell></cell><cell></cell><cell>1.00</cell></row><row><cell></cell><cell>5</cell><cell>10</cell><cell>25</cell><cell>50 100 250 500</cell><cell>32</cell><cell>64 128 256 512 512 2K</cell></row><row><cell></cell><cell></cell><cell cols="3">M cycles / interval</cell><cell></cell><cell>Associativity</cell></row><row><cell></cell><cell cols="4">(a) Reconfiguration interval</cell><cell cols="2">(b) Jigsaw UMON configuration</cell></row></table><note>To run these experiments, we use the miss curves from the 140 16-core mixes at different resolutions. Conventional Lookahead scales near quadratically (3.2× per 2× buckets),</note></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>ACKNOWLEDGMENTS</head><p>We sincerely thank Deirdre Connolly, Christina Delimitrou, Srini Devadas, Frans Kaashoek, Harshad Kasture, and the anonymous reviewers for their useful feedback on earlier versions of this manuscript. This work was supported in part by DARPA PERFECT contract HR0011-13-2-0005 and Quanta Computer.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">IPC considered harmful for multiprocessor workloads</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Alameldeen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wood</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">26</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">ASR: Adaptive selective replication for CMP caches</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Marty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wood</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MICRO-39</title>
+				<meeting>MICRO-39</meeting>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Managing wire delay in large chipmultiprocessor caches</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wood</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MICRO-37</title>
+				<meeting>MICRO-37</meeting>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Jigsaw: Scalable Software-Defined Caches</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">MIT CSAIL, Tech. Rep</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">The PARSEC benchmark suite: Characterization and architectural implications</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Bienia</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. PACT-17</title>
+				<meeting>PACT-17</meeting>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">PACORA: Performance aware convex optimization for resource allocation</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bird</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Smith</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. HotPar-3</title>
+				<meeting>HotPar-3</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Universal classes of hash functions (extended abstract)</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">L</forename><surname>Carter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">N</forename><surname>Wegman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. STOC-9</title>
+				<meeting>STOC-9</meeting>
+		<imprint>
+			<date type="published" when="1977">1977</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Cooperative caching for chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-33</title>
+				<meeting>ISCA-33</meeting>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Application-specific memory management for embedded systems using software-controlled caches</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Chiou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. DAC-37</title>
+				<meeting>DAC-37</meeting>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Optimizing replication, communication, and capacity allocation in cmps</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chishti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Powell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Vijaykumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-32</title>
+				<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Managing distributed, shared L2 caches through OS-level page allocation</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MICRO-39</title>
+				<meeting>MICRO-39</meeting>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">An adaptive shared/private nuca cache partitioning scheme for chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Dybdahl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Stenstrom</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. HPCA-13</title>
+				<meeting>HPCA-13</meeting>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">A sub-1w to 2w low-power processor for mobile internet devices and ultra-mobile PCs in 45nm hi-k metal gate CMOS</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Gerosa</surname></persName>
+		</author>
+		<editor>ISSCC</editor>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Reactive NUCA: near-optimal block placement and replication in distributed caches</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Hardavellas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-36</title>
+				<meeting>ISCA-36</meeting>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Distributed Cooperative Caching</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Herrero</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>González</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Canal</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. PACT-17</title>
+				<meeting>PACT-17</meeting>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Elastic cooperative caching: an autonomous dynamically adaptive memory hierarchy for chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Herrero</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>González</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Canal</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-37</title>
+				<meeting>ISCA-37</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">FIESTA: A sample-balanced multiprogram workload methodology</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Hilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Eswaran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MoBS</title>
+				<meeting>MoBS</meeting>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">A NUCA substrate for flexible CMP cache sharing</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">Jaehyuk</forename><surname>Huh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Trans. Par. Dist. Sys</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Last Level Cache (LLC) Performance of Data Mining Workloads On A CMP</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Jaleel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mattina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Jacob</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-12</title>
+				<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">An adaptive, non-uniform cache structure for wire-delay dominated on-chip caches</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Burger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Keckler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-10</title>
+				<imprint>
+			<date type="published" when="2002">2002</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Westmere: A family of 32nm IA processors</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Kurd</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISSCC</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">CloudCache: Expanding and shrinking private caches</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">R</forename><surname>Childers</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. HPCA-17</title>
+				<meeting>HPCA-17</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">CoQoS: Coordinating QoS-aware shared resources in NoC-based SoCs</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">J. Par. Dist. Comp</title>
+		<imprint>
+			<biblScope unit="volume">71</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">McPAT: an integrated power, area, and timing modeling framework for multicore and manycore architectures</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Li</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+			<publisher>MICRO-42</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Gaining insights into multicore cache partitioning: Bridging the gap between simulation and real systems</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-14</title>
+				<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">NOC-Out: Microarchitecting a Scale-Out Processor</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Lotfi-Kamran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Grot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MICRO-45</title>
+				<meeting>MICRO-45</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Pin: building customized program analysis tools with dynamic instrumentation</title>
+		<author>
+			<persName><forename type="first">C.-K</forename><surname>Luk</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. PLDI</title>
+				<meeting>PLDI</meeting>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Probabilistic shared cache management (PriSM)</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Manikantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Rajan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Govindarajan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-39</title>
+				<meeting>ISCA-39</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Virtual hierarchies to support server consolidation</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Marty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hill</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-34</title>
+				<meeting>ISCA-34</meeting>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">On-line construction of the convex hull of a simple polyline</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">A</forename><surname>Melkman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Information Processing Letters</title>
+		<imprint>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="1987">1987</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">ESP-NUCA: A low-cost adaptive nonuniform cache architecture</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Merino</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Puente</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gregorio</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. HPCA-16</title>
+				<meeting>HPCA-16</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">1.35V DDR3L power calculator (4Gb x16 chips)</title>
+		<author>
+			<persName><surname>Micron</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Adaptive Spill-Receive for Robust High-Performance Caching in CMPs</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Qureshi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. HPCA-10</title>
+				<meeting>HPCA-10</meeting>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Utility-based cache partitioning: A low-overhead, high-performance, runtime mechanism to partition shared caches</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Qureshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MICRO-39</title>
+				<meeting>MICRO-39</meeting>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Reconfigurable caches and their application to media processing</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Adve</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Jouppi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-27</title>
+				<meeting>ISCA-27</meeting>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">The ZCache: Decoupling Ways and Associativity</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. MICRO-43</title>
+				<meeting>MICRO-43</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Vantage: Scalable and Efficient Fine-Grain Cache Partitioning</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-38</title>
+				<meeting>ISCA-38</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">ZSim: Fast and Accurate Microarchitectural of Thousand-Core Systems</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-40</title>
+				<meeting>ISCA-40</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">A case for two-way skewed-associative caches</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-20</title>
+				<imprint>
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Symbiotic jobscheduling for a simultaneous multithreading processor</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Snavely</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ASPLOS-8</title>
+				<meeting>ASPLOS-8</meeting>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<monogr>
+		<title level="m" type="main">SHARP control: Controlled shared cache management in chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Srikantaiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kandemir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Wang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+			<publisher>MICRO-42</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Managing shared l2 caches on multicore systems in software</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Tam</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">WIOSCA</title>
+				<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Molecular caches: A caching structure for dynamic creation of app-specific heterogeneous cache regions</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Varadarajan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">MICRO-39</title>
+				<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">A Comparison of Capacity Management Schemes for Shared CMP Caches</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Martonosi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">WDDD-7</title>
+				<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">PIPP: promotion/insertion pseudo-partitioning of multicore shared caches</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">H</forename><surname>Loh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. ISCA-36</title>
+				<meeting>ISCA-36</meeting>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Victim replication: Maximizing capacity while hiding wire delay in tiled chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Asanovic</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-32</title>
+				<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

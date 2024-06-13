@@ -1,0 +1,1376 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Sparsified SGD with Memory</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Sebastian</forename><forename type="middle">U</forename><surname>Stich</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Machine Learning and Optimization Laboratory (MLO) EPFL</orgName>
+								<address>
+									<country key="CH">Switzerland</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jean-Baptiste</forename><surname>Cordonnier</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Machine Learning and Optimization Laboratory (MLO) EPFL</orgName>
+								<address>
+									<country key="CH">Switzerland</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Martin</forename><surname>Jaggi</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Machine Learning and Optimization Laboratory (MLO) EPFL</orgName>
+								<address>
+									<country key="CH">Switzerland</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Sparsified SGD with Memory</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="MD5">17B8981A1C407304C685E3D64DCA87B2</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.3" ident="GROBID" when="2023-07-27T06:42+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Huge scale machine learning problems are nowadays tackled by distributed optimization algorithms, i.e. algorithms that leverage the compute power of many devices for training. The communication overhead is a key bottleneck that hinders perfect scalability. Various recent works proposed to use quantization or sparsification techniques to reduce the amount of data that needs to be communicated, for instance by only sending the most significant entries of the stochastic gradient (top-k sparsification). Whilst such schemes showed very promising performance in practice, they have eluded theoretical analysis so far. In this work we analyze Stochastic Gradient Descent (SGD) with k-sparsification or compression (for instance top-k or random-k) and show that this scheme converges at the same rate as vanilla SGD when equipped with error compensation (keeping track of accumulated errors in memory). That is, communication can be reduced by a factor of the dimension of the problem (sometimes even more) whilst still converging at the same rate. We present numerical experiments to illustrate the theoretical findings and the good scalability for distributed applications.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Stochastic Gradient Descent (SGD) <ref type="bibr" target="#b28">[29]</ref> and variants thereof (e.g. <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b15">16]</ref>) are among the most popular optimization algorithms in machine-and deep-learning <ref type="bibr" target="#b4">[5]</ref>. SGD consists of iterations of the form</p><formula xml:id="formula_0">x t+1 := x t -η t g t ,<label>(1)</label></formula><p>for iterates x t , x t+1 ∈ R d , stepsize (or learning rate) η t &gt; 0, and stochastic gradient g t with the property E[g t ] = ∇f (x t ), for a loss function f : R d → R. SGD addresses the computational bottleneck of full gradient descent, as the stochastic gradients can in general be computed much more efficiently than a full gradient ∇f (x t ). However, note that in general both g t and ∇f (x t ) are dense vectors<ref type="foot" target="#foot_0">1</ref> of size d, i.e. SGD does not address the communication bottleneck of gradient descent, which occurs as a roadblock both in distributed as well as parallel training. In the setting of distributed training, communicating the stochastic gradients to the other workers is a major limiting factor for many large scale (deep) learning applications, see e.g. <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b43">44]</ref>. The same bottleneck can also appear for parallel training, e.g. in the increasingly common setting of a single multi-core machine or device, where locking and bandwidth of memory write operations for the common shared parameter x t often forms the main bottleneck, see e.g. <ref type="bibr" target="#b13">[14,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b24">25]</ref>.</p><p>A remedy to address these issues seems to enforce applying smaller and more efficient updates comp(g t ) instead of g t , where comp : R d → R d generates a compression of the gradient, such as by lossy quantization or sparsification. We discuss different schemes below. However, too aggressive compression can hurt the performance, unless it is implemented in a clever way: 1Bit-SGD <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b36">37]</ref> combines gradient quantization with an error compensation technique, which is a memory or feedback mechanism. We in this work leverage this key mechanism but apply it within the more general setting of SGD. We will now sketch how the algorithm uses feedback to correct for errors accumulated in previous iterations. Roughly speaking, the method keeps track of a memory vector m which contains the sum of the information that has been suppressed thus far, i.e. m t+1 := m t + g tcomp(g t ), and injects this information back in the next iteration, by transmitting comp(m t+1 + g t+1 ) instead of only comp(g t+1 ). Note that updates of this kind are not unbiased (even if comp(g t+1 ) would be) and there is also no control over the delay after which the single coordinates are applied. These are some (technical) reasons why there exists no theoretical analysis of this scheme up to now.</p><p>In this paper we give a concise convergence rate analysis for SGD with memory and k-compression operators<ref type="foot" target="#foot_2">2</ref> , such as (but not limited to) top-k sparsification. Our analysis also supports ultra-sparsification operators for which k &lt; 1, i.e. where less than one coordinate of the stochastic gradient is applied on average in <ref type="bibr" target="#b0">(1)</ref>. We not only provide the first convergence result of this method, but the result also shows that the method converges at the same rate as vanilla SGD.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.1">Related Work</head><p>There are several ways to reduce the communication in SGD. For instance by simply increasing the amount of computation before communication, i.e. by using large mini-batches (see e.g. <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b42">43]</ref>), or by designing communication-efficient schemes <ref type="bibr" target="#b44">[45]</ref>. These approaches are a bit orthogonal to the methods we consider in this paper, which focus on quantization or sparsification of the gradient.</p><p>Several papers consider approaches that limit the number of bits to represent floating point numbers <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b23">24,</ref><ref type="bibr" target="#b30">31]</ref>. Recent work proposes adaptive tuning of the compression ratio <ref type="bibr" target="#b6">[7]</ref>. Unbiased quantization operators not only limit the number of bits, but quantize the stochastic gradients in such a way that they are still unbiased estimators of the gradient <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b40">41]</ref>. The ZipML framework also applies this technique to the data <ref type="bibr" target="#b43">[44]</ref>. Sparsification methods reduce the number of non-zero entries in the stochastic gradient <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b39">40]</ref>.</p><p>A very aggressive sparsification method is to keep only very few coordinates of the stochastic gradient by considering only the coordinates with the largest magnitudes <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b8">9]</ref>. In contrast to the unbiased schemes it is clear that such methods can only work by using some kind of error accumulation or feedback procedure, similar to the one the we have already discussed <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b36">37]</ref>, as otherwise certain coordinates could simply never be updated. However, in certain applications no feedback mechanism is needed <ref type="bibr" target="#b37">[38]</ref>. Also more elaborate sparsification schemes have been introduced <ref type="bibr" target="#b20">[21]</ref>.</p><p>Asynchronous updates provide an alternative solution to disguise the communication overhead to a certain amount <ref type="bibr" target="#b18">[19]</ref>. However, those methods usually rely on a sparsity assumption on the updates <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b30">31]</ref>, which is not realistic e.g. in deep learning. We like to advocate that combining gradient sparsification with those asynchronous schemes seems to be a promising approach, as it combines the best of both worlds. Other scenarios that could profit from sparsification are heterogeneous systems or specialized hardware, e.g. accelerators <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b43">44]</ref>.</p><p>Convergence proofs for SGD <ref type="bibr" target="#b28">[29]</ref> typically rely on averaging the iterates <ref type="bibr" target="#b22">[23,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b29">30]</ref>, though convergence of the last iterate can also be proven <ref type="bibr" target="#b33">[34]</ref>. For our convergence proof we rely on averaging techniques that give more weight to more recent iterates <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b33">34]</ref>, as well as the perturbed iterate framework from Mania et al. <ref type="bibr" target="#b21">[22]</ref> and techniques from <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b35">36]</ref>.</p><p>Simultaneous to our work, <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b38">39]</ref> at NeurIPS 2018 propose related schemes. Whilst Tang et al. <ref type="bibr" target="#b38">[39]</ref> only consider unbiased stochastic compression schemes, Alistarh et al. <ref type="bibr" target="#b3">[4]</ref> study biased top-k sparsification. Their scheme also uses a memory vector to compensate for the errors, but their analysis suffers from a slowdown proportional to k, which we can avoid here. Another simultaneous analysis of Wu et al. <ref type="bibr" target="#b41">[42]</ref> at ICML 2018 is restricted to unbiased gradient compression. This scheme also critically relies on an error compensation technique, but in contrast to our work the analysis is restricted to quadratic functions and the scheme introduces two additional hyperparameters that control the feedback mechanism.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.2">Contributions</head><p>We consider finite-sum convex optimization problems f : R d → R of the form</p><formula xml:id="formula_1">f (x) = 1 n n i=1 f i (x) , x := arg min x∈R d f (x) , f := f (x ) ,<label>(2)</label></formula><p>where each f i is L-smooth<ref type="foot" target="#foot_3">3</ref> and f is µ-strongly convex <ref type="foot" target="#foot_4">4</ref> . We consider a sequential sparsified SGD algorithm with error accumulation technique and prove convergence for k-compression operators, 0 &lt; k ≤ d (for instance the sparsification operators top-k or random-k). For appropriately chosen stepsizes and an averaged iterate xT after T steps we show convergence</p><formula xml:id="formula_2">E f (x T ) -f = O G 2 µT + O d 2 k 2 G 2 κ µT 2 + O d 3 k 3 G 2 µT 3 ,<label>(3)</label></formula><formula xml:id="formula_3">for κ = L µ and G 2 ≥ E ∇f i (x t ) 2 .</formula><p>Not only is this, to the best of our knowledge, the first convergence result for sparsified SGD with memory, but the result also shows that the leading term O G 2 µT in the convergence rate is the same term as in the convergence rate as for vanilla SGD. We introduce the method formally in Section 2 and show a sketch of the convergence proof in Section 3. In Section 4 we include a few numerical experiments for illustrative purposes. The experiments highlight that top-k sparsification yields a very effective compression method and does not hurt convergence. We also report results for a parallel multi-core implementation of SGD with memory that show that the algorithm scales as well as asynchronous SGD and drastically decreases the communication cost without sacrificing the rate of convergence. We like to stress that the effectiveness of SGD variants with sparsification techniques has already been demonstrated in practice <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b36">37]</ref>.</p><p>Although we do not yet provide convergence guarantees for parallel and asynchronous variants of the scheme, this is the main application of this method. For instance, we like to highlight that asynchronous SGD schemes <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b24">25]</ref> could profit from the gradient sparsification. To demonstrate this use-case, we include in Section 4 a set of experiments for a multi-core implementation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">SGD with Memory</head><p>In this section we present the sparsified SGD algorithm with memory. First we introduce sparsification and quantization operators which allow us to drastically reduce the communication cost in comparison with vanilla SGD.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Compression and Sparsification Operators</head><p>We consider compression operators that satisfy the following contraction property:</p><formula xml:id="formula_4">Definition 2.1 (k-contraction). For a parameter 0 &lt; k ≤ d, a k-contraction operator is a (possibly randomized) operator comp : R d → R d that satisfies the contraction property E x -comp(x) 2 ≤ 1 - k d x 2 , ∀x ∈ R d .<label>(4)</label></formula><p>The contraction property is sufficient to obtain all mathematical results that are derived in this paper. However, note that (4) does not imply that comp(x) is a necessarily sparse vector. Also dense vectors can satisfy (4). One of the main goals of this work is to derive communication efficient schemes, thus we are particularly interested in operators that also ensure that comp(x) can be encoded much more efficiently than the original x.</p><p>The following two operators are examples of k-contraction operators with the additional property of being k-sparse vectors:</p><formula xml:id="formula_5">Definition 2.2. For a parameter 1 ≤ k ≤ d, the operators top k : R d → R d and rand k : R d × Ω k → R d , where Ω k = [d] k denotes the set of all k element subsets of [d], are defined for x ∈ R d as (top k (x)) i := (x) π(i) , if i ≤ k , 0 otherwise , (rand k (x, ω)) i := (x) i , if i ∈ ω , 0 otherwise , (<label>5</label></formula><formula xml:id="formula_6">)</formula><p>where π is a permutation of [d] such that (|x|) π(i) ≥ (|x|) π(i+1) for i = 1, . . . , d -1. We abbreviate rand k (x) whenever the second argument is chosen uniformly at random, ω ∼ u.a.r. Ω k .</p><p>It is easy to see that both operators satisfy Definition 2.1 of being a k-contraction. For completeness the proof is included in Appendix A.1.</p><p>We note that our setting is more general than simply measuring sparsity in terms of the cardinality, i.e. the non-zero elements of vectors in R d . Instead, Definition 2.1 can also be considered for quantization or e.g. floating point representation of each entry of the vector. In this setting we would for instance measure sparsity in terms of the number of bits that are needed to encode the vector. By this, we can also use stochastic rounding operators (similar as the ones used in <ref type="bibr" target="#b2">[3]</ref>, but with different scaling) as compression operators according to (4). Also gradient dropping <ref type="bibr" target="#b0">[1]</ref>  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Variance Blow-up for Unbiased Updates</head><p>Before introducing SGD with memory we first discuss a motivating example. Consider the following variant of SGD, where (dk) random coordinates of the stochastic gradient are dropped:</p><formula xml:id="formula_7">x t+1 := x t -η t g t , g t := d k • rand k (∇f i (x t )) ,<label>(6)</label></formula><p>where i ∼ u.a.r <ref type="bibr">[n]</ref>. It is important to note that the update is unbiased, i.e. E g t = ∇f (x). For carefully chosen stepsizes η t this algorithm converges at rate O σ 2 t on strongly convex and smooth functions f , where σ 2 is an upper bound on the variance, see for instance <ref type="bibr" target="#b45">[46]</ref>. We have</p><formula xml:id="formula_8">σ 2 = E d k rand k (∇f i (x)) -∇f (x) 2 ≤ E d k rand k (∇f i (x)) 2 ≤ d k E i ∇f i (x) 2 ≤ d k G 2</formula><p>where we used the variance decomposition</p><formula xml:id="formula_9">E X -E X 2 = E X 2 -E X 2 and the standard assumption E i ∇f i (x) 2 ≤ G 2 .</formula><p>Hence, when k is small this algorithm requires d times more iterations to achieve the same error guarantee as vanilla SGD with k = d.</p><p>It is well known that by using mini-batches the variance of the gradient estimator can be reduced. If we consider in (6) the estimator</p><formula xml:id="formula_10">g t := d k • rand k 1 τ i∈Iτ ∇f i (x t ) for τ = k d</formula><p>, and I τ ∼ u.a.r.</p><p>[n] k instead, we have</p><formula xml:id="formula_11">σ 2 = E g t -∇f (x t ) 2 ≤ E d k • rand k 1 τ i∈Iτ ∇f i (x t ) 2 ≤ d kτ E i ∇f i (x t ) 2 ≤ G 2 . (<label>7</label></formula><formula xml:id="formula_12">)</formula><p>This shows that, when using mini-batches of appropriate size, the sparsification of the gradient does not hurt convergence. However, by increasing the mini-batch size, we increase the computation by a factor of d k . These two observations seem to indicate that the factor d k is inevitably lost, either by increased number of iterations or increased computation. However, this is no longer true when the information in <ref type="bibr" target="#b5">(6)</ref> is not dropped, but kept in memory. To illustrate this, assume k = 1 and that index i has not been selected by the rand 1 operator in iterations t = t 0 , • • • , t s-1 , but is selected in iteration t s . Then the memory m ts ∈ R d contains this past information (m ts ) i = ts-1 t=t0 (∇f it (x t )) i . Intuitively, we would expect that the variance of this estimator is now reduced by a factor of s compared to the naïve estimator in <ref type="bibr" target="#b5">(6)</ref>, similar to the mini-batch update in <ref type="bibr" target="#b6">(7)</ref>. Indeed, SGD with memory converges at the same rate as vanilla SGD, as we will demonstrate below. </p><formula xml:id="formula_13">g w t ← comp k (m w t + η t ∇f i w t (x)) 6:</formula><p>x ← xg w t shared memory 7:</p><formula xml:id="formula_14">m w t+1 ← m w t + η t ∇f i w t (x) -g w t 8:</formula><p>end for 9: end parallel for </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">SGD with Memory: Algorithm and Convergence Results</head><p>We consider the following algorithm for parameter 0 &lt; k ≤ d, using a compression operator comp k : R d → R d which is a k-contraction (Definition 2.1)</p><formula xml:id="formula_15">x t+1 := x t -g t , g t := comp k (m t + η t ∇f it (x t )) , m t+1 := m t + η t ∇f it (x t ) -g t ,<label>(8)</label></formula><p>where i t ∼ u.a.r.</p><p>[n], m 0 := 0 and {η t } t≥0 denotes a sequence of stepsizes. The pseudocode is given in Algorithm 1. Note that the gradients get multiplied with the stepsize η t at the timestep t when they put into memory, and not when they are (partially) retrieved from the memory.</p><p>We state the precise convergence result for Algorithm 1 in Theorem 2.4 below. In Remark 2.6 we give a simplified statement in big-O notation for a specific choice of the stepsizes η t . Theorem 2.4.</p><formula xml:id="formula_16">Let f i be L-smooth, f be µ-strongly convex, 0 &lt; k ≤ d, E i ∇f i (x t )</formula><p>2 ≤ G 2 for t = 0, . . . , T -1, where {x t } t≥0 are generated according to (8) for stepsizes η t = 8 µ(a+t) and shift parameter a &gt; 1. Then for α &gt; 4 such that</p><formula xml:id="formula_17">(α+1) d k +ρ ρ+1 ≤ a, with ρ := 4α (α-4)(α+1) 2 , it holds E f (x T ) -f ≤ 4T (T + 2a) µS T G 2 + µa 3 8S T x 0 -x 2 + 64T 1 + 2 L µ µS T 4α α -4 d 2 k 2 G 2 , (<label>9</label></formula><formula xml:id="formula_18">)</formula><p>where xT = 1 S T T -1 t=0 w t x t , for w t = (a + t) 2 , and S T =</p><p>T -1 t=0 w t ≥ 1 3 T 3 . Remark 2.5 (Choice of the shift a). Theorem 2.4 says that for any shift a &gt; 1 there is a parameter α(a) &gt; 4 such that (9) holds. However, for the choice a = O(1) one has to set α such that α α-4 = Ω( d k ) and the last term in (9) will be of order O( d 3 k 3 T 2 ), thus requiring T = Ω( d 1.5 k 1.5 ) steps to yield convergence. For α ≥ 5 we have α α-4 = O(1) and the last term is only of order O( d 2 k 2 T 2 ) instead. However, this requires typically a large shift. Observe</p><formula xml:id="formula_19">(α+1) d k +ρ ρ+1 ≤ 1+(α+1) d k ≤ (α+2) d k , i.e. setting a = (α + 2) d</formula><p>k is enough. We like to stress that in general it is not advisable to set a (α + 2) d k as the first two terms in (9) depend on a. In practice, it often suffices to set a = d k , as we will discuss in Section 4. Remark 2.6. As discussed in Remark 2.5 above, setting α = 5 and a = (α + 2) d k is feasible. With this choice, equation <ref type="bibr" target="#b8">(9)</ref> simplifies to</p><formula xml:id="formula_20">E f (x T ) -f ≤ O G 2 µT + O d 2 k 2 G 2 κ µT 2 + O d 3 k 3 G 2 µT 3 ,<label>(10)</label></formula><p>for κ = L µ . To estimate the second term in (9) we used the property E µ x 0x ≤ 2G for µ-strongly convex f , as derived in [28, <ref type="bibr">Lemma 2]</ref>. We observe that for large T the first term, O( G 2 µT ), is dominating the rate. This is the same term as in the convergence rate of vanilla SGD <ref type="bibr" target="#b16">[17]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Proof Outline</head><p>We now give an outline of the proof. The proofs of the lemmas are given in Appendix A.2.</p><p>Perturbed iterate analysis. Inspired by the perturbed iterate framework in <ref type="bibr" target="#b21">[22]</ref> and <ref type="bibr" target="#b17">[18]</ref> we first define a virtual sequence {x t } t≥0 in the following way:</p><formula xml:id="formula_21">x0 = x 0 , xt+1 = xt -η t ∇f it (x t ) ,<label>(11)</label></formula><p>where the sequences {x t } t≥0 , {η t } t≥0 and {i t } t≥0 are the same as in <ref type="bibr" target="#b7">(8)</ref>. Notice that</p><formula xml:id="formula_22">xt -x t = x 0 - t-1 j=0 η j ∇f ij (x j ) -x 0 - t-1 j=0 g j = m t . (<label>12</label></formula><formula xml:id="formula_23">)</formula><p>Lemma 3.1. Let {x t } t≥0 and {x t } t≥0 be defines as in <ref type="bibr" target="#b7">(8)</ref> and <ref type="bibr" target="#b10">(11)</ref> and let f i be L-smooth and f be µ-strongly convex with</p><formula xml:id="formula_24">E i ∇f i (x t ) 2 ≤ G 2 . Then E xt+1 -x 2 ≤ 1 - η t µ 2 E xt -x 2 + η 2 t G 2 -η t e t + η t (µ + 2L) E m t 2 , (<label>13</label></formula><formula xml:id="formula_25">)</formula><p>where e t := E f (x t )f .</p><p>Bounding the memory. From equation ( <ref type="formula" target="#formula_24">13</ref>) it becomes clear that we should derive an upper bound on E m t 2 . For this we will use the contraction property (4) of the compression operators.</p><p>Lemma 3.2. Let {x t } t≥0 as defined in (8</p><formula xml:id="formula_26">) for 0 &lt; k ≤ d, E i ∇f i (x t )</formula><p>2 ≤ G 2 and stepsizes</p><formula xml:id="formula_27">η t = 8 µ(a+t) with a, α &gt; 4, as in Theorem 2.4. Then E m t 2 ≤ η 2 t 4α α -4 d 2 k 2 G 2 . (<label>14</label></formula><formula xml:id="formula_28">)</formula><p>Optimal averaging. Similar as discussed in <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b33">34]</ref> we have to define a suitable averaging scheme for the iterates {x t } t≥0 to get the optimal convergence rate. In contrast to <ref type="bibr" target="#b16">[17]</ref> that use linearly increasing weights, we use quadratically increasing weights, as for instance <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b35">36]</ref>. Lemma 3.3. Let {a t } t≥0 , a t ≥ 0, {e t } t≥0 , e t ≥ 0, be sequences satisfying</p><formula xml:id="formula_29">a t+1 ≤ 1 - µη t 2 a t + η 2 t A + η 3 t B -η t e t ,<label>(15)</label></formula><p>for η t = 8 µ(a+t) and constants A, B ≥ 0, µ &gt; 0, a &gt; 1. Then</p><formula xml:id="formula_30">1 S T T -1 t=0 w t e t ≤ µa 3 8S T a 0 + 4T (T + 2a) µS T A + 64T µ 2 S T B ,<label>(16)</label></formula><p>for w t = (a + t) 2 and S T :=</p><p>T -1</p><formula xml:id="formula_31">t=0 w t = T 6 2T 2 + 6aT -3T + 6a 2 -6a + 1 ≥ 1 3 T 3 .</formula><p>Proof of Theorem 2.4. The proof of the theorem immediately follows from the three lemmas that we have presented in this section and convexity of f , i.e. we have</p><formula xml:id="formula_32">E f (x T ) -f ≤ 1 S T T -1 t=0 w t e t in (16), for constants A = G 2 and B = (µ + 2L) 4α α-4 d 2 k 2 G 2 .</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Experiments</head><p>We present numerical experiments to illustrate the excellent convergence properties and communication efficiency of MEM-SGD. As the usefulness of SGD with sparsification techniques has already been shown in practical applications <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b36">37]</ref> we focus here on a few particular aspects. First, we verify the impact of the initial learning rate that did come up in the statement of Theorem 2.4. We then compare our method with QSGD <ref type="bibr" target="#b2">[3]</ref> which decreases the communication cost in SGD by using random quantization operators, but without memory. Finally, we show the performance of the parallel SGD depicted in Algorithm 2 in a multi-core setting with shared memory and compare the speed-up to asynchronous SGD.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Experimental Setup</head><p>Models. The experiments focus on the performance of MEM-SGD applied to logistic regression. The associated objective function is</p><formula xml:id="formula_33">1 n n i=1 log(1 + exp(-b i a i x)) + λ 2 x 2</formula><p>, where a i ∈ R d and b i ∈ {-1, +1} are the data samples, and we employ a standard L2-regularizer. The regularization parameter is set to λ = 1/n for both datasets following <ref type="bibr" target="#b31">[32]</ref>. Datasets. We consider a dense dataset, epsilon <ref type="bibr" target="#b34">[35]</ref>, as well as a sparse dataset, RCV1 <ref type="bibr" target="#b19">[20]</ref> where we train on the larger test set. Statistics on the datasets are listed in Table <ref type="table" target="#tab_2">1</ref>.</p><p>Implementation. We use Python3 and the numpy library <ref type="bibr" target="#b14">[15]</ref>. Our code is open-source and publicly available at github.com/epfml/sparsifiedSGD. We emphasize that our high level implementation is not optimized for speed per iteration but for readability and simplicity. We only report convergence per iteration and relative speedups, but not wall-clock time because unequal efforts have been made to speed up the different implementations. Plots additionally show the baseline computed with the standard optimizer LogisticSGD of scikit-learn <ref type="bibr" target="#b25">[26]</ref>. Experiments were run on an Ubuntu 18.04 machine with a 24 cores processor Intel® Xeon® CPU E5-2680 v3 @ 2.50GHz.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Verifying the Theory</head><p>We study the convergence of the method using the stepsizes η t = γ/(λ(t+a)) and hyperparameters γ and a set as in Table <ref type="table" target="#tab_3">2</ref>. We compute the final estimate x as a weighted average of all iterates x t with weights w t = (t + a) 2 as indicated by Theorem 2.4. The results are depicted in Figure <ref type="figure" target="#fig_2">2</ref>. We use k ∈ {1, 2, 3} for epsilon and k ∈ {10, 20, 30} for RCV1 to increase the difference with large number of features. The top k variant consistently outperforms rand k and sometimes outperforms vanilla SGD, which is surprising and might come from feature characteristics of the datasets. We also evaluate the impact of the delay a in the learning rate: setting it to 1 instead of order O(d/k) dramatically hurts the memory and requires time to recover from the high initial learning rate (labeled "without delay" in Figure <ref type="figure" target="#fig_2">2</ref>).</p><p>We experimentally verified the convergence properties of MEM-SGD for different sparsification operators and stepsizes but we want to further evaluate its fundamental benefits in terms of sparsity enforcement and reduction of the communication bottleneck. The gain in communication cost of SGD with memory is very high for dense datasets-using the top 1 strategy on epsilon dataset improves the amount of communication by 10 3 compared to SGD. For the sparse dataset, SGD can readily use the given sparsity of the gradients. Nevertheless, the improvement for top 10 on RCV1 is of approximately an order of magnitude.    </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Comparison with QSGD</head><p>Now we compare MEM-SGD with the QSGD compression scheme <ref type="bibr" target="#b2">[3]</ref> which reduces communication cost by random quantization. The accuracy (and the compression ratio) in QSGD is controlled by a parameter s, corresponding to the number of quantization levels. Ideally, we would like to set the quantization precision in QSGD such that the number of bits transmitted by QSGD and MEM-SGD are identical and compare their convergence properties. However, even for the lowest precision, QSGD needs to send the sign and index of O( √ d) coordinates. It is therefore not possible to reach the compression level of sparsification operators such as top-k or random-k, that only transmit a constant number of bits per iteration (up to logarithmic factors). <ref type="foot" target="#foot_5">5</ref> Hence, we did not enforce this condition and resorted to pick reasonable levels of quantization in QSGD (s = 2 b with b ∈ {2, 4, 8}). Note that b-bits stands for the number of bits used to encode s = 2 b levels but the number of bits transmitted in QSGD can be reduced using Elias coding. As a fair comparison in practice, we chose a standard learning rate γ 0 /(1 + γ 0 λt) -1 <ref type="bibr" target="#b5">[6]</ref>, tuned the hyperparameter γ 0 on a subset of each dataset (see Appendix B). Figure <ref type="figure" target="#fig_3">3</ref> shows that MEM-SGD with top 1 on epsilon and RCV1 converges as fast as QSGD in term of iterations for 8 and 4-bits. As shown in the bottom of Figure <ref type="figure" target="#fig_3">3</ref>, we are transmitting two orders of magnitude fewer bits with the top 1 sparsifier concluding that sparsification offers a much more aggressive and performant strategy than quantization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Multicore experiment</head><p>We implement a parallelized version of MEM-SGD, as depicted in Algorithm 2. The enforced sparsity allows us to do the update in shared memory using a lock-free mechanism as in <ref type="bibr" target="#b24">[25]</ref>. For this experiment we evaluate the final iterate x T instead of the weighted average xT above, and use the learning rate η t ≡ (1 + t) -1 .</p><p>Figure <ref type="figure" target="#fig_4">4</ref> shows the speed-up obtained when increasing the number of cores. We see that both sparsified SGD and vanilla SGD have a linear speed-up, the slopes are dependent of the implementation details. But we observe that PARALLEL-MEM-SGD with a reasonable sparsification parameter k does not suffer of having multiple independent memories. The experiment is run on a single machine with a The colored area depicts the best and worst results of 3 independent runs for each dataset. 24 core processor, hence no inter-node communication is used. The main advantage of our methodovercoming the communication bottleneck-would be even more visible in a multi-node setup. In this asynchronous setup, SGD with memory computes gradients on stale iterates that differ only by a few coordinates. It encounters fewer inconsistent read/write operations than lock free asynchronous SGD and exhibits better scaling properties on the RCV1 dataset. The top k operator performs better than rand k in the sequential setup, but this is not the case in the parallel setup.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Conclusion</head><p>We provide the first concise convergence analysis of sparsified SGD <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b36">37]</ref>. This extremely communication-efficient variant of SGD enforces sparsity of the applied updates by only updating a constant number of coordinates in every iteration. This way, the method overcomes the communication bottleneck of SGD, while still enjoying the same convergence rate in terms of stochastic gradient computations.</p><p>Our experiments verify the drastic reduction in communication cost by demonstrating that MEM-SGD requires one to two orders of magnitude less bits to be communicated than QSGD <ref type="bibr" target="#b2">[3]</ref> while converging to the same accuracy. The experiments show an advantage for the top-k sparsification over random sparsification in the serial setting, but not in the multi-core shared memory implementation. There, both schemes are on par, and show better scaling than a simple shared memory implementation that just writes the unquantized updates in a lock-free asynchronous fashion (like Hogwild! <ref type="bibr" target="#b24">[25]</ref>).</p><p>The theoretical insights to MEM-SGD that were developed here should facilitate the analysis of the same scheme in the parallel (as developped in <ref type="bibr" target="#b7">[8]</ref>) and the distributed setting. It has already been shown in practice that gradient sparsification can be efficiently applied to bandwidth memory limited systems such as multi-GPU training for neural networks <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b36">37]</ref>. By delivering sparsity no matter if the original gradients were sparse or not, our scheme is not only communication efficient, but becomes more eligible for asynchronous implementations as well. While those were so far limited by strict sparsity assumptions (as e.g. in <ref type="bibr" target="#b24">[25]</ref>), our approach might make such methods much more widely applicable.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Left: The MEM-SGD algorithm. Right: Implementation for multi-core experiments.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 :</head><label>2</label><figDesc>Figure2: Convergence MEM-SGD using different sparsification operators compared to full SGD with theoretical learning rates (parameters in Table2).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: MEM-SGD and QSGD convergence comparison. Top row: convergence in number of iterations. Bottom row: cumulated size of the communicated gradients during training. We compute the loss 10 times per epoch and remove the point at 0MB for clarity.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Multicore wall-clock time speed up comparison between MEM-SGD and lock-free SGD.The colored area depicts the best and worst results of 3 independent runs for each dataset.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head></head><label></label><figDesc>I.e. it suffices to transmit on average less than one coordinate per iteration (this would then correspond to a mini-batch update).</figDesc><table /><note><p>trivially satisfies (4), though with different parameter k in each iteration. Remark 2.3 (Ultra-sparsification). We like to highlight that many other operators do satisfy Definition 2.1, not only the two examples given in Definition 2.2. As a notable variant is to pick a random coordinate of a vector with probability k d , for 0 &lt; k ≤ 1, property (4) holds even if k &lt; 1.</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>Algorithm 1 MEM-SGD 1: Initialize variables x 0 and m 0 = 0 2: for t in 0 . . . T -1 do t ← comp k (m t + η t ∇f it (x t )) t+1 ← m t + η t ∇f it (x t )g t 7: end for Algorithm 2 PARALLEL-MEM-SGD 1: Initialize shared variable x and m w 0 = 0, ∀w ∈ [W ] 2: parallel for w in 1 . . . W do</figDesc><table><row><cell>3:</cell><cell>Sample i t uniformly in [n]</cell><cell></cell><cell></cell></row><row><cell>4: 5: 6:</cell><cell>x t+1 ← x t -g t</cell><cell>3: 4:</cell><cell>for t in 0 . . . T -1 do Sample i w t uniformly in [n]</cell></row></table><note><p>g m 5:</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 1 :</head><label>1</label><figDesc>Datasets statistics.</figDesc><table><row><cell></cell><cell></cell><cell cols="2">parameter value</cell></row><row><cell>n 400'000 2'000 d RCV1-test 677'399 47'236 0.15% density epsilon 100%</cell><cell>epsilon RCV1-test</cell><cell>γ a γ a</cell><cell>2 d/k 2 10d/k</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 2 :</head><label>2</label><figDesc>Learning rate η t = γ/(λ(t + a)).</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2</head><label>2</label><figDesc>).</figDesc><table><row><cell></cell><cell>0.34</cell><cell></cell><cell cols="2">epsilon dataset</cell><cell></cell><cell></cell><cell>0.110</cell><cell></cell><cell cols="2">RCV1 dataset</cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>SGD</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>SGD</cell></row><row><cell></cell><cell>0.33</cell><cell></cell><cell></cell><cell></cell><cell>top k=1</cell><cell></cell><cell>0.105</cell><cell></cell><cell></cell><cell></cell><cell>top k=1</cell></row><row><cell>training loss</cell><cell>0.30 0.31 0.32</cell><cell></cell><cell></cell><cell></cell><cell cols="2">rand k=1 QSGD 8bits QSGD 4bits QSGD 2bits baseline</cell><cell>0.095 0.100</cell><cell></cell><cell></cell><cell></cell><cell cols="2">rand k=1 QSGD 8bits QSGD 4bits QSGD 2bits baseline</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.090</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.29</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.085</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.28</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0</cell><cell>2</cell><cell>4</cell><cell>6</cell><cell>8</cell><cell>10</cell><cell>0</cell><cell>2</cell><cell>4</cell><cell>6</cell><cell>8</cell><cell>10</cell></row><row><cell></cell><cell></cell><cell></cell><cell>epoch</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>epoch</cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.34</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.110</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.33</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.105</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>training loss</cell><cell>0.30 0.31 0.32</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.095 0.100</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.090</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.29</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>0.085</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>0.28</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>10 -1</cell><cell>10 0</cell><cell>10 1</cell><cell>10 2</cell><cell>10 3</cell><cell>10 4</cell><cell>10 -1</cell><cell>10 0</cell><cell></cell><cell>10 1</cell><cell>10 2</cell></row><row><cell></cell><cell></cell><cell cols="4">total size of communicated gradients (MB)</cell><cell></cell><cell></cell><cell cols="4">total size of communicated gradients (MB)</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>Note that the stochastic gradients gt are dense vectors for the setting of training neural networks. The gt themselves can be sparse for generalized linear models under the additional assumption that the data is sparse.32nd Conference on Neural Information Processing Systems (NeurIPS</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" xml:id="foot_1"><p>2018), Montréal, Canada.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_2"><p>See Definition 2.1.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_3"><p>fi(y) ≤ fi(x) + ∇fi(x), yx + L 2 yx 2 , ∀x, y ∈ R d , i ∈ [n].</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_4"><p>f (y) ≥ f (x) + ∇f (x), yx + µ 2 yx 2 , ∀x, y ∈ R d .</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_5"><p>Encoding the indices of the top-k or random-k elements can be done with additional O(k log d) bits. Note that log d ≤ 32 ≤ √ d for both our examples.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>We would like to thank Dan Alistarh for insightful discussions in the early stages of this project and Frederik Künstner for his useful comments on the various drafts of this manuscript. We acknowledge funding from SNSF grant 200021_175796, Microsoft Research JRC project 'Coltrain', as well as a Google Focused Research Award.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Sparse communication for distributed gradient descent</title>
+		<author>
+			<persName><forename type="first">Alham</forename><surname>Fikri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aji</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenneth</forename><surname>Heafield</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2017 Conference on Empirical Methods in Natural Language Processing</title>
+		<meeting>the 2017 Conference on Empirical Methods in Natural Language Processing</meeting>
+		<imprint>
+			<publisher>Association for Computational Linguistics</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="440" to="445" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">The convergence of stochastic gradient descent in asynchronous shared memory</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Alistarh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">De</forename><surname>Sa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikola</forename><surname>Konstantinov</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 ACM Symposium on Principles of Distributed Computing, PODC &apos;18</title>
+		<meeting>the 2018 ACM Symposium on Principles of Distributed Computing, PODC &apos;18<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="169" to="178" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">QSGD: Communicationefficient SGD via gradient quantization and encoding</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Alistarh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Demjan</forename><surname>Grubic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jerry</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ryota</forename><surname>Tomioka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Milan</forename><surname>Vojnovic</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">I</forename><surname>Guyon</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">U</forename><forename type="middle">V</forename><surname>Luxburg</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Bengio</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">H</forename><surname>Wallach</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Fergus</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Vishwanathan</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Garnett</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="page" from="1709" to="1720" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">The convergence of sparsified gradient methods</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Alistarh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Torsten</forename><surname>Hoefler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mikael</forename><surname>Johansson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sarit</forename><surname>Khirirat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikola</forename><surname>Konstantinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cédric</forename><surname>Renggli</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018. 2018</date>
+		</imprint>
+	</monogr>
+	<note>to appear and CoRR abs/1809.10505</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Large-scale machine learning with stochastic gradient descent</title>
+		<author>
+			<persName><forename type="first">Léon</forename><surname>Bottou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of COMPSTAT&apos;2010</title>
+		<editor>
+			<persName><forename type="first">Yves</forename><surname>Lechevallier</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Gilbert</forename><surname>Saporta</surname></persName>
+		</editor>
+		<meeting>COMPSTAT&apos;2010<address><addrLine>Heidelberg</addrLine></address></meeting>
+		<imprint>
+			<publisher>Physica-Verlag HD</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="177" to="186" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Stochastic Gradient Descent Tricks</title>
+		<author>
+			<persName><forename type="first">Leon</forename><surname>Bottou</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2012-01">January 2012</date>
+			<publisher>Springer</publisher>
+			<biblScope unit="volume">7700</biblScope>
+			<biblScope unit="page" from="430" to="445" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Adacomp : Adaptive residual gradient compression for data-parallel distributed training</title>
+		<author>
+			<persName><forename type="first">Chia-Yu</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jungwook</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Brand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankur</forename><surname>Agrawal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kailash</forename><surname>Gopalakrishnan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Thirty-Second AAAI Conference on Artificial Intelligence</title>
+		<editor>
+			<persName><forename type="first">Sheila</forename><forename type="middle">A</forename><surname>Mcilraith</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Kilian</forename><forename type="middle">Q</forename><surname>Weinberger</surname></persName>
+		</editor>
+		<meeting>the Thirty-Second AAAI Conference on Artificial Intelligence<address><addrLine>New Orleans, Louisiana, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>AAAI Press</publisher>
+			<date type="published" when="2018">February 2-7, 2018. 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Convex optimization using sparsified stochastic gradient descent with memory</title>
+		<author>
+			<persName><forename type="first">Jean-Baptiste</forename><surname>Cordonnier</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">EPFL</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<pubPlace>Lausanne, Switzerland</pubPlace>
+		</imprint>
+	</monogr>
+	<note type="report_type">Master&apos;s thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Communication quantization for data-parallel training of deep neural networks</title>
+		<author>
+			<persName><forename type="first">Nikoli</forename><surname>Dryden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sam</forename><forename type="middle">Ade</forename><surname>Jacobs</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Moon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><surname>Van Essen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Workshop on Machine Learning in High Performance Computing Environments, MLHPC &apos;16</title>
+		<meeting>the Workshop on Machine Learning in High Performance Computing Environments, MLHPC &apos;16<address><addrLine>Piscataway, NJ, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="8" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Adaptive subgradient methods for online learning and stochastic optimization</title>
+		<author>
+			<persName><forename type="first">John</forename><surname>Duchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Elad</forename><surname>Hazan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yoram</forename><surname>Singer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">JMLR</title>
+		<imprint>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="page" from="2121" to="2159" />
+			<date type="published" when="2011-08">August 2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Efficient use of limited-memory accelerators for linear learning on heterogeneous systems</title>
+		<author>
+			<persName><forename type="first">Celestine</forename><surname>Dünner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Parnell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Jaggi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Advances in Neural Information Processing Systems 30</title>
+		<editor>
+			<persName><forename type="first">I</forename><surname>Guyon</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">U</forename><forename type="middle">V</forename><surname>Luxburg</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Bengio</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">H</forename><surname>Wallach</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Fergus</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Vishwanathan</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Garnett</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="4258" to="4267" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<author>
+			<persName><forename type="first">Priya</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Piotr</forename><surname>Dollár</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ross</forename><forename type="middle">B</forename><surname>Girshick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pieter</forename><surname>Noordhuis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukasz</forename><surname>Wesolowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aapo</forename><surname>Kyrola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Tulloch</surname></persName>
+		</author>
+		<idno>CoRR, abs/1706.02677</idno>
+		<title level="m">Yangqing Jia, and Kaiming He. Accurate, large minibatch SGD: training ImageNet in 1 hour</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Deep learning with limited numerical precision</title>
+		<author>
+			<persName><forename type="first">Suyog</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankur</forename><surname>Agrawal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kailash</forename><surname>Gopalakrishnan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pritish</forename><surname>Narayanan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32Nd International Conference on International Conference on Machine Learning</title>
+		<meeting>the 32Nd International Conference on International Conference on Machine Learning</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="volume">37</biblScope>
+			<biblScope unit="page" from="1737" to="1746" />
+		</imprint>
+	</monogr>
+	<note>ICML&apos;15</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Passcode: Parallel asynchronous stochastic dual co-ordinate descent</title>
+		<author>
+			<persName><forename type="first">Cho-Jui</forename><surname>Hsieh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hsiang-Fu</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Inderjit</forename><surname>Dhillon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Machine Learning</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="2370" to="2379" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">SciPy: Open source scientific tools for Python</title>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Travis</forename><surname>Oliphant</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pearu</forename><surname>Peterson</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Adam: A method for stochastic optimization</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Diederik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jimmy</forename><surname>Kingma</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ba</surname></persName>
+		</author>
+		<idno>CoRR, abs/1412.6980</idno>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<title level="m" type="main">A simpler approach to obtaining an O(1/t) convergence rate for the projected stochastic subgradient method</title>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Lacoste-Julien</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">W</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francis</forename><forename type="middle">R</forename><surname>Bach</surname></persName>
+		</author>
+		<idno>CoRR, abs/1212</idno>
+		<imprint>
+			<date type="published" when="2002">2002. 2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">ASAGA: Asynchronous parallel SAGA</title>
+		<author>
+			<persName><forename type="first">Rémi</forename><surname>Leblond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fabian</forename><surname>Pedregosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Lacoste-Julien</surname></persName>
+		</author>
+		<idno>PMLR</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 20th International Conference on Artificial Intelligence and Statistics</title>
+		<editor>
+			<persName><forename type="first">Aarti</forename><surname>Singh</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Jerry</forename><surname>Zhu</surname></persName>
+		</editor>
+		<meeting>the 20th International Conference on Artificial Intelligence and Statistics<address><addrLine>Fort Lauderdale, FL, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2017-04">Apr 2017</date>
+			<biblScope unit="volume">54</biblScope>
+			<biblScope unit="page" from="20" to="22" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Improved asynchronous parallel optimization analysis for stochastic incremental methods</title>
+		<author>
+			<persName><forename type="first">Rémi</forename><surname>Leblond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fabian</forename><surname>Pedregosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Lacoste-Julien</surname></persName>
+		</author>
+		<idno>CoRR, abs/1801.03749</idno>
+		<imprint>
+			<date type="published" when="2018-01">January 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">RCV1: A new benchmark collection for text categorization research</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">D</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tony</forename><forename type="middle">G</forename><surname>Rose</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fan</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Machine Learning Research</title>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<biblScope unit="page" from="361" to="397" />
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Deep gradient compression: Reducing the communication bandwidth for distributed training</title>
+		<author>
+			<persName><forename type="first">Yujun</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huizi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bill</forename><surname>Dally</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR 2018 -International Conference on Learning Representations</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Perturbed iterate analysis for asynchronous stochastic optimization</title>
+		<author>
+			<persName><forename type="first">Horia</forename><surname>Mania</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xinghao</forename><surname>Pan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dimitris</forename><surname>Papailiopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Recht</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kannan</forename><surname>Ramchandran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><forename type="middle">I</forename><surname>Jordan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIAM Journal on Optimization</title>
+		<imprint>
+			<biblScope unit="volume">27</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="2202" to="2229" />
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Non-asymptotic analysis of stochastic approximation algorithms for machine learning</title>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Moulines</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francis</forename><forename type="middle">R</forename><surname>Bach</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">J</forename><surname>Shawe-Taylor</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><forename type="middle">S</forename><surname>Zemel</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">P</forename><forename type="middle">L</forename><surname>Bartlett</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">F</forename><surname>Pereira</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">K</forename><forename type="middle">Q</forename><surname>Weinberger</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="volume">24</biblScope>
+			<biblScope unit="page" from="451" to="459" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">On-chip training of recurrent neural networks with limited numerical precision</title>
+		<author>
+			<persName><forename type="first">Taesik</forename><surname>Na</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jong</forename><forename type="middle">Hwan</forename><surname>Ko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaeha</forename><surname>Kung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saibal</forename><surname>Mukhopadhyay</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Joint Conference on Neural Networks (IJCNN)</title>
+		<imprint>
+			<date type="published" when="2009">2017. 2009</date>
+			<biblScope unit="page" from="3716" to="3723" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">HOGWILD!: A lock-free approach to parallelizing stochastic gradient descent</title>
+		<author>
+			<persName><forename type="first">Feng</forename><surname>Niu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Recht</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Re</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><forename type="middle">J</forename><surname>Wright</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Proceedings of the 24th International Conference on Neural Information Processing Systems, NIPS&apos;11</title>
+		<meeting><address><addrLine>USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Curran Associates Inc</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="693" to="701" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Scikit-learn: Machine learning in python</title>
+		<author>
+			<persName><forename type="first">Fabian</forename><surname>Pedregosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gaël</forename><surname>Varoquaux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandre</forename><surname>Gramfort</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vincent</forename><surname>Michel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bertrand</forename><surname>Thirion</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Olivier</forename><surname>Grisel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mathieu</forename><surname>Blondel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Prettenhofer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ron</forename><surname>Weiss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vincent</forename><surname>Dubourg</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of machine learning research</title>
+		<imprint>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="page" from="2825" to="2830" />
+			<date type="published" when="2011-10">Oct. 2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Acceleration of stochastic approximation by averaging</title>
+		<author>
+			<persName><forename type="first">Boris</forename><forename type="middle">T</forename><surname>Polyak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anatoli</forename><forename type="middle">B</forename><surname>Juditsky</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIAM Journal on Control and Optimization</title>
+		<imprint>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="838" to="855" />
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Making gradient descent optimal for strongly convex stochastic optimization</title>
+		<author>
+			<persName><forename type="first">Alexander</forename><surname>Rakhlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ohad</forename><surname>Shamir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karthik</forename><surname>Sridharan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 29th International Coference on International Conference on Machine Learning, ICML&apos;12</title>
+		<meeting>the 29th International Coference on International Conference on Machine Learning, ICML&apos;12<address><addrLine>USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Omnipress</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="1571" to="1578" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">A Stochastic Approximation Method</title>
+		<author>
+			<persName><forename type="first">Herbert</forename><surname>Robbins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sutton</forename><surname>Monro</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">The Annals of Mathematical Statistics</title>
+		<imprint>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="400" to="407" />
+			<date type="published" when="1951-09">September 1951</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">Efficient estimations from a slowly convergent Robbins-Monro process</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Ruppert</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1988">1988</date>
+		</imprint>
+		<respStmt>
+			<orgName>Cornell University Operations Research and Industrial Engineering</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Taming the wild: A unified analysis of HOGWILD!-style algorithms</title>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>De Sa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ce</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kunle</forename><surname>Olukotun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Ré</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Proceedings of the 28th International Conference on Neural Information Processing Systems, NIPS&apos;15</title>
+		<meeting><address><addrLine>Cambridge, MA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>MIT Press</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="2674" to="2682" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Minimizing finite sums with the stochastic average gradient</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nicolas</forename><forename type="middle">Le</forename><surname>Roux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francis</forename><surname>Bach</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Math. Program</title>
+		<imprint>
+			<biblScope unit="volume">162</biblScope>
+			<biblScope unit="issue">1-2</biblScope>
+			<biblScope unit="page" from="83" to="112" />
+			<date type="published" when="2017-03">March 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">1-bit stochastic gradient descent and its application to data-parallel distributed training of speech DNNs</title>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Seide</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Fu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jasha</forename><surname>Droppo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gang</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dong</forename><surname>Yu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ISCA</title>
+		<editor>
+			<persName><forename type="first">Haizhou</forename><surname>Li</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Helen</forename><forename type="middle">M</forename><surname>Meng</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Bin</forename><surname>Ma</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Engsiong</forename><surname>Chng</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Lei</forename><surname>Xie</surname></persName>
+		</editor>
+		<imprint>
+			<biblScope unit="page" from="1058" to="1062" />
+			<date type="published" when="2014">2014</date>
+			<publisher>INTERSPEECH</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Stochastic gradient descent for non-smooth optimization: Convergence results and optimal averaging schemes</title>
+		<author>
+			<persName><forename type="first">Ohad</forename><surname>Shamir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tong</forename><surname>Zhang</surname></persName>
+		</author>
+		<idno>PMLR</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 30th International Conference on Machine Learning</title>
+		<editor>
+			<persName><forename type="first">Sanjoy</forename><surname>Dasgupta</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">David</forename><surname>Mcallester</surname></persName>
+		</editor>
+		<meeting>the 30th International Conference on Machine Learning<address><addrLine>Atlanta, Georgia, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2013-06">Jun 2013</date>
+			<biblScope unit="volume">28</biblScope>
+			<biblScope unit="page" from="17" to="19" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Pascal large scale learning challenge</title>
+		<author>
+			<persName><forename type="first">Soren</forename><surname>Sonnenburg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Vojtvech Franc</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Yom-Tov</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Sebag</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1937">1937-1953, 01 2008</date>
+			<biblScope unit="volume">10</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">Local SGD converges fast and communicates little</title>
+		<author>
+			<persName><forename type="first">Sebastian</forename><forename type="middle">U</forename><surname>Stich</surname></persName>
+		</author>
+		<idno>CoRR, abs/1805.09767</idno>
+		<imprint>
+			<date type="published" when="2018-05">May 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Scalable distributed DNN training using commodity GPU cloud computing</title>
+		<author>
+			<persName><forename type="first">Nikko</forename><surname>Strom</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">INTER-SPEECH</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1488" to="1492" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">meProp: Sparsified back propagation for accelerated deep learning with reduced overfitting</title>
+		<author>
+			<persName><forename type="first">Xu</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuancheng</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuming</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Houfeng</forename><surname>Wang</surname></persName>
+		</author>
+		<idno>PMLR</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 34th International Conference on Machine Learning</title>
+		<editor>
+			<persName><forename type="first">Doina</forename><surname>Precup</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yee</forename><forename type="middle">Whye</forename><surname>Teh</surname></persName>
+		</editor>
+		<meeting>the 34th International Conference on Machine Learning<address><addrLine>Sydney, Australia</addrLine></address></meeting>
+		<imprint>
+			<publisher>International Convention Centre</publisher>
+			<date type="published" when="2017-08">Aug 2017</date>
+			<biblScope unit="volume">70</biblScope>
+			<biblScope unit="page" from="6" to="11" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Communication compression for decentralized training</title>
+		<author>
+			<persName><forename type="first">Hanlin</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaoduo</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ce</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Liu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>In NeurIPS 2018, to appear and CoRR abs/1803.06443</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Gradient sparsification for communication-efficient distributed optimization</title>
+		<author>
+			<persName><forename type="first">Jianqiao</forename><surname>Wangni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jialei</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tong</forename><surname>Zhang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>In NeurIPS 2018, to appear and CoRR abs/1710.09854</note>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Terngrad: Ternary gradients to reduce communication in distributed deep learning</title>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Wen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cong</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Feng</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chunpeng</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yandan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiran</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hai</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">I</forename><surname>Guyon</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">U</forename><forename type="middle">V</forename><surname>Luxburg</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Bengio</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">H</forename><surname>Wallach</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Fergus</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">S</forename><surname>Vishwanathan</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><surname>Garnett</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="page" from="1509" to="1519" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Error compensated quantized SGD and its applications to large-scale distributed optimization</title>
+		<author>
+			<persName><forename type="first">Jiaxiang</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Weidong</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Junzhou</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tong</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML 2018 -Proceedings of the 35th International Conference on Machine Learning</title>
+		<imprint>
+			<date type="published" when="2018-07">July 2018</date>
+			<biblScope unit="page" from="5321" to="5329" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<title level="m" type="main">Scaling SGD batch size to 32k for ImageNet training</title>
+		<author>
+			<persName><forename type="first">Yang</forename><surname>You</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Igor</forename><surname>Gitman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Ginsburg</surname></persName>
+		</author>
+		<idno>CoRR, abs/1708.03888</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">ZipML: Training linear models with end-to-end low precision, and a little bit of deep learning</title>
+		<author>
+			<persName><forename type="first">Hantian</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jerry</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaan</forename><surname>Kara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Alistarh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ji</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ce</forename><surname>Zhang</surname></persName>
+		</author>
+		<idno>PMLR</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 34th International Conference on Machine Learning</title>
+		<editor>
+			<persName><forename type="first">Doina</forename><surname>Precup</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Yee</forename><forename type="middle">Whye</forename><surname>Teh</surname></persName>
+		</editor>
+		<meeting>the 34th International Conference on Machine Learning<address><addrLine>Sydney, Australia</addrLine></address></meeting>
+		<imprint>
+			<publisher>International Convention Centre</publisher>
+			<date type="published" when="2017-08">Aug 2017</date>
+			<biblScope unit="volume">70</biblScope>
+			<biblScope unit="page" from="6" to="11" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Communication-efficient algorithms for statistical optimization</title>
+		<author>
+			<persName><forename type="first">Yuchen</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><forename type="middle">J</forename><surname>Wainwright</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">C</forename><surname>Duchi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NIPS -Advances in Neural Information Processing Systems</title>
+		<editor>
+			<persName><forename type="first">F</forename><surname>Pereira</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">C</forename><forename type="middle">J C</forename><surname>Burges</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">L</forename><surname>Bottou</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">K</forename><forename type="middle">Q</forename><surname>Weinberger</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="1502" to="1510" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Stochastic optimization with importance sampling for regularized loss minimization</title>
+		<author>
+			<persName><forename type="first">Peilin</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tong</forename><surname>Zhang</surname></persName>
+		</author>
+		<idno>PMLR</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32nd International Conference on Machine Learning</title>
+		<editor>
+			<persName><forename type="first">Francis</forename><surname>Bach</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">David</forename><surname>Blei</surname></persName>
+		</editor>
+		<meeting>the 32nd International Conference on Machine Learning<address><addrLine>Lille, France</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2015-07">Jul 2015</date>
+			<biblScope unit="volume">37</biblScope>
+			<biblScope unit="page" from="7" to="09" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

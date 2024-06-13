@@ -1,0 +1,850 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Dynamic Pricing and Traffic Engineering for Timely Inter-Datacenter Transfers</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Virajith</forename><surname>Jalaparti</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ivan</forename><surname>Bliznets</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Srikanth</forename><surname>Kandula</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Brendan</forename><surname>Lucier</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Ishai</forename><forename type="middle">Menache</forename><surname>Microsoft</surname></persName>
+						</author>
+						<title level="a" type="main">Dynamic Pricing and Traffic Engineering for Timely Inter-Datacenter Transfers</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/2934872.2934893</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T09:09+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>Inter-datacenter networks</term>
+					<term>dynamic pricing</term>
+					<term>percentile pricing</term>
+					<term>deadline scheduling</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>As more business moves to the cloud, inter-datacenter bandwidth becomes an ever more valuable and congested resource. This bandwidth is typically sold using a fixed price per GB, and transfers are scheduled using traffic engineering mechanisms. However, this separation between the economic and engineering aspects of the problem makes it difficult to steer customer demand to lightly loaded paths and times, which is important for managing costs (typically proportional to peak usage) and providing service guarantees.</p><p>To address these issues, we design and evaluate Pretium -a framework that combines dynamic pricing with traffic engineering for inter-datacenter bandwidth. In Pretium, users specify their required rates or transfer sizes with deadlines, and a price module generates a price quote for different guarantees (promises) on these requests. The price quote is generated using internal prices (which can vary over time and links) which are maintained and periodically updated by Pretium based on history. A supplementary schedule adjustment module gears the agreed-upon network transfers towards an efficient operating point by optimizing timevarying operation costs. Using traces from a large production WAN, we show that Pretium achieves up to 80% of the social welfare of an offline oracular scheme, significantly outperforming usage-based pricing alternatives.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Bandwidth on the wide area network (WAN) is a valuable and important resource. Private WANs, such as the ones connecting the datacenters at Google and Microsoft, carry both (i) user-facing traffic, which typically requires low latency, and (ii) large transfers of business data, which typically have deadlines. Centralized traffic engineering (TE) techniques have been proposed to improve network utilization <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b19">20]</ref> without affecting low latency traffic and with explicit support for deadlines <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b33">34]</ref>. Such techniques crucially depend on detailed traffic information: the priority class of requests, precise latency requirements and/or transfer deadlines, etc. In principle, these features would be provided by the users, but simply asking for this information can have unintended side-effects. Users are incentivized to inflate priorities and tighten deadlines, hoping for better service. The cumulative effect can drastically reduce the overall performance of the system.</p><p>Interviews with internal WAN customers at Microsoft (see Table <ref type="table">1</ref> for a summary) reinforce that customers have strict requirements on many transfers and would pay more for guaranteed deadlines. Unfortunately, such mechanisms often do not exist today. The issue is prevalent also in public WANs, where customers pay for connectivity to cloud providers (e.g., Azure, Google ElasticCloud). The currently dominant method for pricing cloud bandwidth is fixed pricing (Table <ref type="table" target="#tab_3">2</ref>), which does not permit service guarantees such as deadline support for premium customers.</p><p>Another (seemingly unrelated) problem in the development of public WANs is the disconnect between provider costs and the most common pricing models. A large WAN provider can incur annual costs measured in hundreds of millions of dollars. The structure of these costs can be complex and non-linear: bandwidth costs often depend on the 95 th percentile usage of a link, and static capacity costs depend on peak utilization (since the network must be provisioned for such). However, the fixed pricing method currently in use provides no lever to lower peak usage specifically, and no lever to incentivize users to shift demand away from times of peak load.</p><p>We address these problems simultaneously with a framework that combines traffic engineering with dynamic pricing. Our framework has the following goals:</p><p>1. Each user should be presented a menu of prices up front, from which they can select a service level. 2. Prices should align the preferences of individual users with the goals and costs of the platform. 3. Prices should be dynamic, adapting to changes in demand and usage patterns. 4. The pricing model should complement, not preclude, centralized traffic engineering. We achieve these goals with a system called Pretium. Pretium serves both byte requests (e.g., move 10TB from DC 1 to DC 2 before 2AM) and rate requests (e.g., a firm leases 100 VMs in Azure US East and wants 250Mbps bandwidth guaranteed in/out of that datacenter for the duration of the lease). In Pretium, a customer specifies basic information within the request, and is immediately presented with a price quote that provides a menu of service levels (e.g., bandwidth guarantees) and corresponding prices. The customer can then choose a satisfactory point on the menu or modify the request if nothing is appropriate. The selected transfer is then managed by a central scheduler, tasked with upholding the service level guarantees. A key technical challenge in the design of Pretium is the online nature of the problem: price quotes must be generated as requests arrive, and be crafted to steer the system toward good aggregate performance while managing the incentives of individual customers.</p><p>To maintain high system efficiency while respecting user incentives, Pretium combines multiple ideas. First, it updates prices dynamically using a feedback loop. Pretium stores internal prices per link per time, which are used to generate each customer's price quote. Prices are updated periodically using the observed requests, closing the loop. Updates are based on dual pricing, and recent advances in combinatorial market design and statistical learning <ref type="bibr" target="#b5">[6,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b18">19]</ref>. Second, Pretium plans well into the future so it can effectively balance price and service guarantees. It delays binding promised user traffic to the underlying paths until necessary, which allows for rerouting to accommodate later arrivals, link failures and congestion. Third, Pretium resolves the challenge of optimizing complex usage-based costs. Widely-used measures like 95 th percentile usage (across time) of a link are hard to express as a tractable optimization problem. We show that the sum of top 10% usages is a good proxy for 95 th percentile usage, and offer a way to solve the resulting scheduling problem as a succinct LP.</p><p>The net effect is that Pretium is able to efficiently allocate its network capacity, as measured by social welfare, i.e., the total value generated (over all requests served) minus operating costs. <ref type="foot" target="#foot_0">1</ref> Our experiments with traffic traces from a large production WAN show that Pretium achieves 60-80% of the social welfare relative to an aggressive benchmark: an omniscient offline optimization scheme that has full knowledge about future demands including their values <ref type="foot" target="#foot_1">2</ref> . In contrast, baselines that have oracular information but are re-Questions Responses Do any transfers require deadlines? 100% said yes What fraction of transfers have strict deadlines? 60% (on average) Incur penalty on missed strict deadlines? 88% said yes Would you pay extra for guaranteed deadlines? 64% said yes Willing to delay some transfers if price reduced? 81% said yes Willing to use a network that guarantees deadlines, even if price is known only at the start of a transfer? 81% said yes Table <ref type="table">1</ref>: Summary of results from a survey of several WAN customers at Microsoft. stricted to using fixed prices achieve much lower social welfare and profit for the provider. We also find that Pretium outperforms alternative extensions to simple fixed prices, such as two-level pricing (peak vs. off-peak) and demand-driven spot market pricing. We also confirm (both theoretically and through simulations) that Pretium incentivizes reasonable and desirable behavior from customers.</p><p>Our conclusion is that it is necessary to intertwine pricing decisions with TE to best utilize WAN bandwidth. We present one implementation of such an integrated system, Pretium, and verify that it achieves much higher social welfare than the current practice of setting a static pricing policy and performing TE independently. Our contributions are:</p><p>? A novel system for network transfers on the WAN that combines online dynamic pricing and TE. ? By dynamically adapting prices and planning well into the future, Pretium offers a priori price quotes for guaranteed service ( ?4.1). A TE scheme at the back-end ensures that the service guarantees are met despite online arrivals and other network changes. ? A new way to model percentile-based usage costs as a compact set of linear inequalities ( ?4.2). ? An evaluation on the topology and traffic observed on a production WAN of a large enterprise ( ?6).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Background and Motivation</head><p>In this section, we provide necessary background for the motivation and challenges behind Pretium. For this purpose, we will refer to the characteristics of traffic on the interdatacenter WAN of a large enterprise. We also conducted a user-survey of 15 operators and consumers of the WAN (Table <ref type="table">1</ref>). Lack of service guarantees. Public cloud providers charge their user's network traffic as shown in Table <ref type="table" target="#tab_3">2</ref>. In general, traffic leaving the WAN (to the Internet) is charged more than traffic that stays on the WAN. Bulk discounts are offered and costs vary with geography. Note that current pricing schemes are static in time and across users. Cloud providers do not provide guarantees on network bandwidth and/or transferring data within deadlines (i.e., no SLAs). The provider-user engagements for private WANs are not publicly known, in general. In our internal survey, we found no evidence of formal service-level enforcement, although more than half of the customers we interviewed were interested in some form of guarantees (see     Provider cost management. Under the current state-ofthe-art, providers can only imperfectly pass their costs to customers. Although TE algorithms exist to meet customer deadlines, there is no incentive for the customers to report true demands or deadlines. Hence, even if some users have flexible deadlines (Table <ref type="table">1</ref>), the lack of incentives for customers to move load to less busy periods forces the provider to over-provision network capacity (e.g., lease more capacity from the upstream ISPs to keep up with the peak demands). One might argue that compute and storage are more expensive than network on the provider's balance sheet. However, getting the WAN pricing model correct has further implications: (i) the network can become a key differentiator across providers; and (ii) service guarantees on crosssite transfers are becoming increasingly important due to the demand for cloud-backed customer data and services (e.g., iCloud), and real time monitoring and management of services that have a global footprint (e.g., Facebook, Gmail). The need for adaptive pricing. We find that a fixed price per link (or even a different price per hour-of-day) is unlikely to extract most of the gains of fully dynamic prices. Our analysis of data from a large inter-datacenter WAN shows sizable variation in the utilization of WAN links (Figure <ref type="figure" target="#fig_0">1</ref>) -the 90 th percentile is more than 5 times the 10 th percentile utilization for more than 10% of the links, while it is less than 2 times for nearly 70% of the links. Though there is strong periodicity in the traffic, there are significant short-term variations in the volume, due to flash-crowds or link failures. The data also reveals that the extent of multiplexing in inter-datacenter networks is typically smaller than in Internet traffic, i.e., fewer transfers contribute substantial portions of the overall traffic. Consequently, careful resource-management of the WAN could make a difference; e.g., shifting a single large transfer by a few hours could accommodate many smaller competing transfers. To handle such demand variation, prices should react dynamically. Pricing versus auctions. Pretium proceeds by quoting prices to customers upon arrival. An alternative design approach is to elicit bids, execute an auction, and then inform the customers of the outcome. Because of our online setting, standard auctions (such as a VCG auction) are not directly applicable; but there is a rich and relevant literature on incentive-aware online scheduling <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b16">17]</ref> that can possibly be adapted to WAN allocation. Regardless of the feasibility of auctions, we advocate a pricing approach for two reasons. First, an auction forces customers to wait, potentially until their deadlines, to discover their price (or whether their traffic was routed at all). However, our user survey indicates that a priori guarantees on service and price are important (Table <ref type="table">1</ref>). Second, an auction requires users to fully specify and commit to the details of their request in advance, including all possible options of routes, durations, utility, etc. In contrast, Pretium responds with a menu of {price, service guarantee} options, allowing users to iteratively adjust their request if needed (e.g., to explore a different route or time window). Insofar as it is possible to achieve good performance and truthful behavior with a pricing approach, we view it as preferable to an auction. The need to combine traffic engineering with pricing. Pricing can guard existing TE techniques that improve WAN utilization (e.g., <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b19">20]</ref>) against strategic users. By quoting lower prices for more flexible requests (e.g., a request with a shorter deadline would be priced higher than a comparable request with a longer deadline), our pricing method encourages customers to report their true traffic requirements. Further, TE is an important tool for setting the right prices; without careful planning over paths and future times, some linktime pairs may appear more or less busy than they should be. A good TE procedure makes it easy to detect parts of the network that are overloaded and adjusts prices. Hence, Pretium carefully intertwines TE and pricing.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">The WAN Ecosystem</head><p>In this section, we elaborate on the assumptions and notations of the economic model used in this paper. We then provide an example that highlights the benefits of Pretium.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Formal model</head><p>The WAN. We consider a bandwidth provider controlling a network G of interconnected datacenters. Each edge e = (u, v) in G represents a WAN link between datacenters u and v or an egress link between datacenter u and an ISP v. Link e has associated capacity c e , representing the total available bandwidth per unit-time on that link. The Customers. There is a pool of users (customers) who make bandwidth requests. These requests arrive online. A  i is the timestep corresponding to its deadline. A sizeable portion of inter-datacenter transfers have deadlines, and can be modeled using this abstraction <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b21">22]</ref>. For example, periodic index refreshes are expected to be fully available before a certain time of day. Some deadlines can be soft.</p><p>Each request can potentially be routed along multiple paths (|R i | ? 1). While this can result in packet-level reordering, we do not model its effects, assuming existing techniques can be applied to resolve any reordering (e.g., <ref type="bibr" target="#b28">[29]</ref>). Some network transfers may not have a concrete deadline. A common scenario is transfers with a constant rate requirement for a certain period of time. Hence, Pretium supports rate requests in addition to byte requests. For brevity, we omit a detailed model of rate requests, but note that they can be handled as a special case of our solution ( ?4.4). Other portions of the WAN traffic may not be governed by any TE scheme <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b21">22]</ref>. For example, there could be some latency-sensitive requests or short transfers (e.g., in the order of few seconds) that have to be routed immediately without waiting for the TE solution. We call such traffic high-pri and set aside a portion of capacity into the future to accommodate such requests; see ?4.4 for more details.</p><p>Each request has a value v i , which is the most the customer is willing to pay per byte transferred. For simplicity, we assume linear values: the value of a partial transfer is proportional to the quantity of data transferred. Nevertheless, the design principles behind Pretium do not depend on a specific customer-utility model; in ?4.4, we discuss how our solution can be extended for non-linear utilities.</p><p>Finally, we note that we deliberately do not make a clear distinction in this paper between private and public cloud WANs. Pretium can be applied in either setting. In a private cloud, the customers are individuals or groups within a large enterprise, each of whom could be allocated a budget for infrastructure usage (in either real or virtual currency), and are therefore incentivized to minimize WAN transfer costs. In a public cloud, Pretium allows the cloud provider to dynamically set its prices for WAN transfers. Costs. The provider pays a cost to run the network. Operator interviews reveal that some of the WAN links are "private" or "owned", meaning that their cost only changes during capacity planning, which happens a few times each year. The remaining links are charged based on usage. Discussions with operators reveal that pricing based on 95 th percentile usage is a common approach. These links are typically purchased from upstream providers and connect the WAN to the Internet. The 95 th percentile utilization is typically calculated over a fixed time period, such as a day, week or month. Schedules. The provider is in charge of routing/scheduling decisions, hence we use the terms "provider" and "scheduler" interchangeably. At each timestep, the scheduler must choose which data to transfer, and along which paths, subject to capacity constraints. Scheduling is done online: each request arrives at a certain time a i (? t 1 i ), and the provider is unaware of requests before they arrive.</p><p>We write X irt for the number of bytes from request i transmitted along route r ? R i at time t. The quantities X = (X irt ) fully describe a schedule of transfers. We write C(X) for the total cost generated by schedule X. We defer the specific description of C(X) to ?4.2, and note that C(?) can be nonlinear, e.g., modeling 95 th percentile charges. Prices and customer Behavior. The network provider can charge payments to customers. In general, the price of a transfer can depend on the number of bytes transferred, the source and target nodes, the timing of the request, network load, etc. In the implementations we consider, the system exposes the payment rule to each customer in advance of any data transfers. Customers can then choose whether or not to route data at the offered prices and, if so, how much to transfer. Supposing that x i units of data from request i are transmitted within the time interval [t 1 i , t 2 i ], and that the network provider charges a total price of p i (x i ) for this transmission, the utility of customer i is taken to be</p><formula xml:id="formula_0">u i (x i ) = v i ? x i -p i (x i ).</formula><p>Each customer is a self-interested agent aiming to maximize utility. Objectives. We focus primarily on the objective of system efficiency: generating a schedule that maximizes the total value across all customers, minus provider costs. Precisely, the system efficiency of schedule X is</p><formula xml:id="formula_1">i r?Ri t?[t 1 i ,t 2 i ] v i ? X irt -C(X).<label>(1)</label></formula><p>This metric captures the overall efficiency of the network utilization. It is important that costs are accounted for directly in this objective: cost minimization is an important aspect of transfer planning, and it is inefficient to route traffic whose value does not at least outweigh its cost burden. We note that this objective is known in the economic literature as social</p><formula xml:id="formula_2">Request v D [start, end] R 1 : A ? B 8 2 [0,1] R 2 : A ? B 4 2 [0,2] R 3 : A ? D 4 2 [0,1] R 4 : C ? D 1 4 [0,2]</formula><p>v: value per byte, D: demand</p><formula xml:id="formula_3">R 1 R 2 R 3 R 4 Welfare</formula><p>No Price 1 2 1 3 23 Bottom: the number of units of each request scheduled under different pricing methods (all prices per unit transferred), and total welfare of the schedule.</p><p>welfare <ref type="bibr" target="#b32">[33]</ref>, and the optimization in ( <ref type="formula" target="#formula_1">1</ref>) is known as welfare maximization. Welfare is a natural objective for private networks, but is also highly relevant in public cloud settings: social welfare is a generalization of common performance metrics, such as utilization, to a setting with utility-weighted requests and operation costs. <ref type="foot" target="#foot_2">3</ref>As a secondary objective, we also measure the profit of the network provider when evaluating Pretium. This is the sum of payments made by the customers minus costs incurred. The profit of a schedule X is i p i (x i ) -C(X). Limitations. Our model does not feature bulk discounts, which may help, e.g., in attracting new users to the cloud, and utilizing capacity that is already paid for but would go unused otherwise (e.g., <ref type="bibr" target="#b6">[7]</ref>). It is reasonable to assume that bulk discounts would be less relevant in a highly-utilized network with transfer-SLAs, as in Pretium. Furthermore, we do not explicitly model competition between providers. That said, we do assume that the provider is concerned with maximizing the efficiency of its WAN resources, which may be motivated by competitive pressure from other providers <ref type="bibr" target="#b32">[33]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Example</head><p>We use a simple example of a network with four nodes and four requests (Figure <ref type="figure" target="#fig_1">2</ref>) to illustrate the importance of prices in WANs, and showcase the benefits of Pretium. Alternatives. A system without payments cannot distinguish high-value requests from low-value ones, and the optimization problem becomes one of throughput maximization. As a result, only a fraction of the valuable requests (R 1 and R 3 ) is scheduled. Charging a fixed price p per unit sent ensures admission control (customers with value less than p will opt out) but is too coarse to target specific regions and time periods. In our example, a price of 4 per unit achieves the highest welfare but this causes R 1 and R 2 to share the link (A, B), even though R 2 can be deferred to a later time.</p><p>Using different fixed prices on each link in the network, and charging requests the sum of prices on links traversed, allows for the use of higher prices in congested parts of the network, but still fails to respond to temporal shifts in demand. In this case, the optimal link prices are 8 on link (A, B), 2 each on links (A, C) and (C, D), but these prices prevent requests R 2 and R 4 from transmitting in the second timestep when the system is underutilized. Alternatively, one could use a single uniform price but make it vary over time. For instance, one could set higher prices when the system is under heavy load. In our example, prices of 4 and 1 for the two timesteps achieve the best welfare but this again causes (A, B) to be shared by the two requests R 1 and R 2 . Pretium combines both spatial and temporal price differentiation. In Pretium, each link is given a price at every timestep, and these prices can vary over time in response to observed usage patterns. In this example, Pretium could set a price of 8 on link (A, B) for the first timestep but lower it to 4 in the second timestep. This allows R 2 to be deferred to a later time and allows R 1 (of higher value) to finish within its allocated deadline. Similarly, the price on link (C, D) would be set to 4 in the first timestep and lowered to 1 (to allow R 4 ) in the second timestep. Overall, in this example, Pretium can achieve the maximum possible welfare of 34. The next section describes how Pretium determines the prices.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Design of Pretium</head><p>We now turn to a detailed description of Pretium. Pretium consists of three modules, as shown in Figure <ref type="figure" target="#fig_2">3</ref>. A network state datastructure is central to the various modules of Pretium. This maintains the prices for the links and a plan for how to route the accepted requests. Both aspects are maintained for multiple timesteps into the future.  actual routes to install at switches and the amount of rate to allocate to each user on each route in order to achieve the promised service guarantees. SAM is related to recent work on multi-timestep traffic engineering <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b33">34]</ref> but extends it in two ways: (1) it considers potentially non-linear link costs and (2) optimizes for social welfare. Further, by using prices, SAM is mostly protected from strategic users ( ?4.2). Similar to prior work <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b19">20]</ref>, we execute SAM once every few minutes. This leaves enough time to put routes in SDN switches and change rates at the sending servers.</p><p>Finally, once every time window, the price computer (PC) aggregates and analyzes all requests over a recent time period, and updates the baseline link prices. Our logic to set prices is straightforward (we use dual prices); however, our method to learn the anticipated load levels is novel ( ?4.3). We recommend prices be recomputed each hour.</p><p>When building an intertwined TE + pricing scheme, we believe that decoupling the timescales is important. The three modules share the network state but otherwise function independently. A monolithic implementation may be less nimble in responding to the user than the RA. Further, delaying the actual scheduling and routes to SAM lets Pretium react to unexpected faults and congestion. We next describe the details of each of the modules.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Request Admission Interface</head><p>When a customer's request i arrives, Pretium must determine how that request would be served. The customer will be quoted a price menu p i (?), where p i (x) is the price to route x bytes of data. This menu depends on the current state of the network and the request's parameters (source, destination, arrival time, and deadline). A capacity upper bound xi is also reported to the customer: xi is the maximum amount of data that Pretium guarantees can be routed by the deadline. The customer then chooses how much data, x i , to transfer (if any). This decision is viewed as a contract: Pretium guarantees that min{x i , xi } bytes will be routed within the specified time interval. If the customer asks to transfer more than xi , then data beyond xi is routed on best-effort basis.</p><p>Calculating the price quote. The price computer ( ?4.3) maintains, at each point in time, a price-per-byte P e,t for each link in the network e and each future time step t. For request i, p i (x) is defined to be the minimum total price (i.e., sum of edge prices) at which x bytes can be routed within the allowed time interval.</p><p>There is a natural interpretation of p i (?): first route traffic along the minimum-price path/time until the path is saturated -each byte is priced accordingly -then along the path Price Menu: Transfer from S to T time interval <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b1">2]</ref> time interval <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b0">1]</ref> Network (all capacities = 1)</p><p>Figure <ref type="figure">4</ref>: Sample price menus for two different requests, differing only on their deadlines. A shorter deadline leads to higher prices. The maximum possible guarantees (x) are circled.</p><p>with the next lowest price, and so on. As the price per byte only increases, the price schedule p i (?) is a non-decreasing, convex, and piece-wise linear function (Figure <ref type="figure">4</ref>). The fact that Pretium uses minimum-price paths in this calculation is important as it drives its incentive properties ( ?5). It also serves as a link between pricing and TE as lower-price paths will tend to be those that have less congestion ( ?4.3).</p><p>User response. Given the price quote, each user decides how much demand to send. Write</p><formula xml:id="formula_4">? i (x) = p i (x)-p i (x-1)</formula><p>for the marginal price to route byte x. The optimal choice for each customer is to route as much of their demand as possible while the marginal price is at most their value per byte (i.e., ? i (x) ? v i ). We establish this formally in ?5. In this paper, we assume that each request is associated with a fixed deadline. However, one may also envision users with flexible deadlines; e.g., "transfer my entire demand as soon as possible, as long as the price is not too high." Such preferences can be manifested by users resubmitting requests with different deadlines (each deadline would correspond to a different price quote). The analysis and evaluation of Pretium with flexible deadlines, and request rescissions is an interesting direction for future work.</p><p>Preliminary schedule. The customer's chosen transfer is immediately assigned a preliminary schedule, determined by the price computation. Bandwidth is reserved (over multiple timesteps, if needed) for the request on the minimum-price routes that were used to compute p i (x i ), and link utilization is updated accordingly. In this way, the admission interface also performs TE by steering traffic toward low-price paths.</p><p>Capacity Bound x. During periods of high utilization, it may not be possible to route all requests fully. The price quote therefore includes a "maximum countably transfer," xi , the largest transfer that Pretium will guarantee by the specified deadline. The price menu extends beyond xi (Figure <ref type="figure">4</ref>) and if the user chooses a large value x i &gt; xi , only xi data is guaranteed to be routed; any additional data (beyond xi ) is routed on a best-effort basis, at a price of ?( xi ).</p><p>Allowing customers to specify demands beyond xi is important for improving utilization, as additional data may be transferable after schedule adjustment if the amount of highpri traffic is less than anticipated.</p><p>Short-term price adjustments. To increase robustness to sudden demand spikes, we increase link prices in response to heavy, localized congestion. This short-term adjustment complements the price computer ( ?4.3) which operates on a slower timescale and updates all link prices at once. We found that increasing the price of a link by a multiplicative factor if its utilization crosses a threshold is a simple yet efficient rule for controlling short-term demand spikes (e.g., double the price of the last 20% of the link capacity). This short-term adjustment is performed after each request is admitted by the RA module. We note that this price adjustment is functionally equivalent to splitting each network link into parallel links with different prices. Hence, the adjustment does not qualitatively change the complexity of the price menu and user response.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Schedule Adjustment</head><p>The admission interface determines how much data to transfer and performs initial traffic engineering, but the exact routing schedule is flexible. The schedule adjustment module exploits this flexibility by reoptimizing at each timestep. Problem formulation. The schedule adjustor considers all requests whose full demand has not been satisfied and whose deadline has not expired. The objective is to maximize total welfare (values minus costs) while satisfying flow guarantees. This is a non-convex optimization problem, due to the non-convex costs. Write B i? for the total number of bytes transferred before time ? for request i, and g i = min{x i , x i } for the number of bytes guaranteed to be transferred ( ?4.1). As user values v i are unknown, the marginal price from the admission controller, ? i ? ? i (x i ), is used as a proxy. <ref type="foot" target="#foot_3">4</ref> Formally, the objective at timestep ? is maximize</p><formula xml:id="formula_5">i ? ?t?t 2 i r?Ri X irt ? ? i -C(X)<label>(2)</label></formula><p>subject to</p><formula xml:id="formula_6">? ?t?t 2 i r?Ri X irt ? x i -B i? ?i ? ?t?t 2 i r?Ri X irt ? g i -B i? ?i i:? ?t?t 2 i e?r,r?Ri X irt ? c e,t ?t, e,</formula><p>The available capacity for each link c e,t can vary over time.</p><p>As described in ?3, the available capacity depends on the expected volume of high-priority traffic. We emphasize that although (2) uses the marginal prices ? i as a proxy for the expected values, the above program does not encode profit maximization. Intuitively, profitmaximizing prices are typically much higher, in order to extract more revenue from high-valued customers at the expense of lower utilization and overall user satisfaction. Non-convex costs. The term C(X) of ( <ref type="formula" target="#formula_5">2</ref> is an edge-specific constant and y e is the relevant 95 th percentile usage on that link. This makes the optimization problem hard: THEOREM 4.1. Maximizing (2), when C(X) is nonconvex, is an NP-hard optimization problem.</p><p>The proof follows by a reduction from the subset-sum problem <ref type="bibr" target="#b27">[28]</ref>; we omit the details for brevity. Solution. We deal with the above challenge by using an alternate metric that approximates the true costs. Define z e to be the utilization on edge e, averaged over the 10% of time steps in the window with highest utilization. For example, if the window contains 30 timesteps and link e was utilized most on steps 7, 13, and 26, then z e = 1 3 (X e,7 + X e,13 + X e,26 ), where X e,t is the total traffic routed along edge e on step t. Intuitively, z e will be positively biased over the 95 th percentile usage on edge e, y e . The bias will be more significant for heavy-tailed traffic distributions. Using traffic data from our production network, we experimentally found that z e is linearly correlated with y e , over different time periods. This relation is shown in Figure <ref type="figure" target="#fig_4">5</ref> as a scatter ploteach point represents a single link in the network. To validate this assumption further, we used a variety of synthetic distributions (normal, exponential and pareto) to model network traffic. For each distribution, we generated link traffic over time. Given these traffic samples, we calculated z e and y e for each link e, and found them to be linearly correlated, with small difference between the absolute values.</p><p>Following the above analysis, we can solve an approximation of (2) by substituting the 95 th percentile cost by e C e ? z e . The resulting optimization problem can be encoded as a linear program, although the straightforward encoding requires exponentially many constraints (as there are exponentially many ways to choose 10% of the timesteps in a window). We address this issue by using sorting-network inequalities <ref type="bibr" target="#b24">[25]</ref>, which reduces the number of constraints to polynomial without loss in accuracy. THEOREM 4.2. There exists a set of O(kT ) linear constraints which expresses an upper bound on sum of top k values from the set X e,1 , . . . X e,T .</p><p>See the appendix for the construction and proof. We note that our solution improves upon the techniques proposed in <ref type="bibr" target="#b24">[25]</ref> by requiring 40% fewer "sorting" constraints per link (details in appendix). Furthermore, we provide a rigorous proof of correctness, which was missing in <ref type="bibr" target="#b24">[25]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Price Computation</head><p>The price computer maintains temporal link prices {P e,t }. A price is stored for every link, and for every timestep in the current time window (e.g., a day). We write W for the number of timesteps in a time window. Typically, most request deadlines fall within the time window. To provide full flexibility for requests with deadlines beyond the current time window, we simply carry over the same prices to the following time windows. This approach works well when W is chosen in accordance with the periodic pattern of demand.</p><p>Prices are periodically updated at the start of every time window using recent traffic data. The price computer considers a previous reference window. It takes as input all requests that arrived during a certain previous period of time (say T , of length at least W ) that contains the reference window. It solves an offline version of the scheduling problem to calculate the optimal prices, in hindsight, for time period T . These prices, restricted to the reference window, are then used as the updated link prices.</p><p>We allow T to be larger than the reference window because prices can be distorted at the beginning and end of period T (since earlier requests are not included, and requests are not scheduled beyond T ). Allowing T to extend beyond the reference window reduces the impact of this distortion. Reference window selection. There are multiple options for the reference window. One natural choice is the preceding window. If the demand follows a clear diurnal pattern and windows are shorter than 24 hours, one might instead choose the corresponding window from the day before. These simple choices performed well in our simulations ( ?6). Value estimation. As with schedule adjustment, the price computer uses the marginal price-per-byte (? i ) chosen from the price menu as a proxy for the value of a request. Computing prices. Given the input described above, the price computer encodes the offline welfare-optimization problem as an LP. It then solves the dual of that LP, which can be interpreted as assigning prices to each (link, timestep) pair. These prices, restricted to the reference window, will be used as the updated internal link prices.</p><p>This method of computing prices is self-correcting. To see why, suppose the price of a link was set too low. The RA would tend to admit more requests on that link as they will be offered lower prices. This causes increased congestion. When prices are next updated, the optimal offline schedule will address the congestion by diverting jobs away from that link, corresponding to an increase in its dual price. In this way, prices tend to rise for highly-demanded regions of the network at peak usage times. Similarly, if a link is priced too high, fewer requests will be admitted on that link. This reduces congestion and causes the price to fall upon recalculation. Price convergence is discussed further in ?4.4.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Discussion</head><p>Rate requests. So far, we described Pretium under the assumption that users specify byte requests; i.e., transfer a certain number of bytes by a deadline. Pretium handles rate requests via the following extension: model a rate request as a sequence of byte requests, one per timestep. The request admission interface computes prices separately for each time step and quotes a total price by taking a sum over the entire interval. The schedule adjustment module ensures that the rate will be achieved in each timestep. Nonlinear utilities. For simplicity, our model assumes that user utilities are linear in the number of bytes transferred. In practice, some users may have non-linear utilities, including all-or-nothing transfers. But we note that the core functionality of Pretium does not depend on this linearity assumption. In the request admission phase, users can choose a pricing option and transfer amount that maximizes their overall utility, regardless of the nature of their utility function. In particular, a user with low value for a partial transfer can elect not to choose a partial-transfer option from the price menu. If desired, users could also indicate that they are not interested in sending more traffic at the same price (e.g., if their utility function is concave), which would be respected by the schedule adjustment module. The main way that Pretium uses the assumption of linear utilities is in the price computer, which employs linearity during offline price optimization. However, even if customer utilities are not truly linear, we conjecture that prices computed under a linearity assumption will be approximately correct in practice if there are enough requests in the system (i.e., if no single request consumes a significant fraction of the network capacity). A precise analysis of Pretium when customers have non-linear utilities is a direction for future research. Network faults and unexpected increases in high-pri volume. As described earlier, Pretium sets aside some capacity to account for ad hoc high priority traffic; the volume to be set aside is estimated based on historical usage <ref type="bibr" target="#b17">[18]</ref>. When unexpected congestion occurs, perhaps because of more high-pri traffic or network faults, Pretium's schedule adjustment module tries to satisfy all guarantees by spreading the load over other paths and future times. In practice, we find that the likelihood of reneging on guarantees is small. Best-effort requests. The contrary to the above is that there may be less-than-anticipated high-pri volume. As noted already, the schedule adjustor uses the residual capacity at each timestep to route more volume of accepted requests which in some cases lets requests finish before deadline. Though less likely, it is possible that more unused capacity remains. Hence, Pretium can offer a "scavenger" class wherein requests can choose their price and Pretium schedules them in a best-effort manner. Hybrid requests. We note that the above changes allow users to purchase a guarantee x, either for bytes or a rate, and simultaneously make a scavenger class request. Such added flexibility allows users (and their applications) further flexibility to get good service at a low cost. Convergence and Stability of price choice. In the most general case of arbitrary request sizes and arrivals, it is hard to prove strong properties about the online price selection method ( ?4.3) but one can do so under some simplifying assumptions. When requests are drawn from the same underlying distribution of customer demands and if there are suf-ficiently many requests per time window, the price selection will be approximately optimal for the upcoming window as well. See <ref type="bibr" target="#b5">[6]</ref> and Theorem 52 of <ref type="bibr" target="#b18">[19]</ref> for a formalization. Impact of dynamic prices on users. In Pretium, the price of a request is unknown until it is submitted. We take the position that the service guarantee (i.e., achieving the deadline) offsets the drawback of price-uncertainty. Our survey of operators at Microsoft (Table <ref type="table">1</ref>) shows that there is demand for this tradeoff, and many are willing to use such a system. Fairness. The main objective of Pretium is to achieve high social welfare, which balances total customer satisfaction and platform profit. However, Pretium does not explicitly enforce a fairness criterion. For example, a small number of customers with high value and large demand (e.g., large organizations in the public cloud setting) can drive up prices beyond the reach of users with less willingness to pay. To mitigate such scenarios, Pretium can be supplemented with constraints that limit the effect of elephant traffic. For example, the network provider could impose a limit on the amount of bandwidth that can be allocated to any one user. Interplay between the three modules. We conclude by reaffirming the interplay between the three parts of Pretium. In the strictly offline case, when request parameters are known a-priori, the request admitter would work well alone by simply choosing dual prices. The modified price selection method (described above) helps with online request arrivals; it learns the prices based on estimated usage. Further, the schedule adjuster allows for high-pri traffic and offers robustness to unexpected faults or other congestion events.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Incentives and User Behavior</head><p>As discussed earlier, one motivation for Pretium is that in a TE-only setup, customers can receive better service by inflating their values or misrepresenting deadlines. We will show that by combining prices with TE appropriately, Pretium discourages such strategic behavior. Attack model. Each user request consists of the following parameters: {S i , T i , R i , t 1 i , t 2 i , d i }. In order, these are the source, target, allowed routes, begin time, end time, and demand (in bytes). The customer's value (per byte), v i , is private information not reported to Pretium. We allow the user to make changes to every aspect of his request, and even to break it into multiple requests between possibly different sources and targets. Under this attack model, we prove that: THEOREM 5.1. Each user request maximizes utility by reporting only a single request and by truthfully reporting above parameters (under some technical conditions).</p><p>The proof, which appears in the appendix, follows from a standard monotonicity argument. Because the RA interface offers the lowest possible price for each request (by checking all the specified routes and time-periods) any deviation in parameters from their true values will either (a) lead to a nobetter price for the request or (b) cause the request to receive a no-better service, or both.</p><p>There is one caveat, however, which necessitates the "technical conditions" in the theorem statement: if more capacity becomes unexpectedly available (e.g., because of an unanticipated dip in high-pri traffic), the schedule adjustor could choose to route some requests earlier than anticipated. This allows users to strategize. For example, a user could report a later deadline (possibly obtaining a lower price) and still hope to receive full service by the true deadline. However, we verified empirically that the potential gains of manipulation are low, by sampling users and simulating deviations. In typical executions, fewer than 26% of admitted requests could benefit (i.e., increase their utility) by altering their parameters even with omniscient knowledge of the system state, and the average improvement (conditional on being able to benefit) was less than 6%. Due to the risk of missing deadlines, we believe that users are unlikely to misreport for minor potential gains. We hence claim that: CLAIM 1 (INFORMAL). In practice, customers will maximize their expected utility by truthfully reporting the parameters of their requests.</p><p>Further, we offer some constrained versions of Pretium (i.e., the technical conditions referred to in Theorem 5.1) that guarantee strategyproofness. One option is to disable the schedule adjustment module. However, we believe that such dynamic adaptation is useful both for robustness and to get good network utilization. A second option is to enforce that the transferred data can only be used after the stated deadline t 2 i (e.g., if the user specifies a deadline of 5pm, then at least some portion of the data will be unavailable before 5pm even if the transfer completes ahead of schedule). This can be implemented at the network or the application layers by withholding some portions of the transfer until the stated deadline. Intuitively, this helps because the request can never finish before its stated deadline. In the appendix we prove Theorem 5.1 under the assumption that transfers are withheld until their deadlines. In practice, we feel that the unconstrained Pretium is sufficiently strategy-proof and do not recommend implementing these technical conditions.</p><p>Finally, we prove that users respond to price menus in a predictable manner, as described in ?4.1. THEOREM 5.2. Given a quoted price schedule p i (?), customer i maximizes utility by choosing to route min{d i , max{x :</p><formula xml:id="formula_7">? i (x) ? v i }} bytes of data.</formula><p>The proof (omitted due to lack of space) follows from the fact that it is in the user's interest to route as much data as possible, as long as the marginal price is at most v i .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Evaluation</head><p>We evaluated Pretium using simulations by replaying traffic traces that were collected from a large production inter-DC WAN. Our main results are as follows.</p><p>(1) Pretium achieves more than 60% of the optimal welfare, which is 3.5X higher than a region-based fixed pricing scheme. Further, Pretium results in more than 2X higher profit for the provider.</p><p>(2) We demonstrate that the prices picked by Pretium adapt to load variations and that Pretium is robust to variations in network and request characteristics.</p><p>(3) By comparing across a wide set of alternatives, we show that combining TE with pricing offers clear benefits over performing either TE or pricing individually.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Methodology</head><p>Datasets. We collected a month-long traffic trace from a production inter-DC WAN. The network has 106 nodes and 226 edges; each node is a datacenter or a site. The collected traffic trace is sampled NetFlow data and it was difficult to group the various network flows into appropriate user requests. Hence, we convert the network data into a timeseries of traffic matrices between datacenters. Based on operator survey about typical request parameters (size, average request duration, deadline, etc.), we generated requests that closely mimic the observed traffic matrix time-series, while using different distributions for individual values and deadlines (e.g., normal). We note that we do not explicitly model high-pri requests in our simulations. We assume that the bandwidth required for such requests is known a priori (e.g., from historical usage, as in <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b21">22]</ref>), and is appropriately reserved on all links of the network. The link capacity available for Pretium is reduced by this reserved amount. Link costs. Around 15% of the WAN edges are priced based on 95 th percentile usage, calculated over a period of 24 hours. Other links have fixed installation costs which are not included in the social welfare formulation ( ?3.1). Load factor. To examine the performance of Pretium under different levels of network load, we scale the traffic matrix with a load factor; higher or lower values indicate proportionally more or less load. Solver. We built our modules as linear programs and execute them using the Gurobi solver <ref type="bibr" target="#b0">[1]</ref>. Metrics. We evaluate a few different metrics. First, we use Equation 1 to compute the social welfare from carrying traffic i.e., total value minus costs. Second, we examine provider profits. Finally, we report related metrics such as network utilization, and fraction of requests that finish. Baselines. We compare Pretium with various baselines.</p><p>(1) Offline optimal (OPT). We refer to OPT as the best tractable offline solution we could come up with. Specifically, OPT provides an upper bound on the welfare of any TE+pricing scheme that approximates 95 th percentile costs using the scheme described in ?4.2. It assumes knowledge of all future requests and their real values, and solves a linear program which aims to maximize the total welfare (Equation 1). We use the term OPT for simplicity. The true optimal welfare might be higher; however, we cannot compute it precisely due to non-convex 95 th percentile costs ( ?4.2).</p><p>(2) Offline scheduling without pricing (NoPrices). This mimics state-of-the-art TE schemes that do not use prices. Recall that without prices users can strategize in several ways (change deadline, claim higher value or higher demand etc.). Rather than evaluating all strategic options, we consider the following simplification. As such, a scheduler cannot credibly learn the customer values, we offer it full information about requests except for the value. NoPrices solves a single offline LP to maximize the sum of total bytes transferred by the network (assume value=1 for every request) minus the cost incurred. Practical online versions of this scheme (such as Tempus <ref type="bibr" target="#b21">[22]</ref>) would obviously perform worse and hence we do not consider them in our evaluation.  (3) Region-based pricing oracle (RegionOracle). This scheme closely resembles the prices used in practice (Table <ref type="table" target="#tab_3">2</ref>). The network is divided into a few regions (corresponding to U.S., Europe, Asia etc.). Requests within a region pay one price per byte and requests between regions pay a higher price. We try all possible values of these two price numbers, and choose the ones that offer the highest welfare in hindsight. These prices are used to admit requests, and admitted requests are scheduled so as to transfer the maximum amount of bytes before the respective per-request deadlines while accounting for the 95 th percentile network costs.</p><p>(4) Time-of-day based pricing oracle (PeakOracle). In this scheme, we divide the day into two periods: (a) peak period, and (b) off-peak period. These periods are statically chosen based on the traffic traces -the peak period is chosen as the time interval when the network utilization is consistently over the daily average, and the remaining time is set as off-peak. Requests are charged a lower price during the offpeak period, and a higher price during the peak period. As in the case of RegionOracle, we set the prices optimally by searching the space of prices and selecting those that maximize welfare, in hindsight.</p><p>(5) VCGLike spot pricing scheme (VCGLike). This scheme models a spot market that responds to demand. Along with their requests, customers submit bids (b i ) which are assumed to be equal to the value of the requests (v i ). At each timestep, all byte requests are converted into rate requests by calculating the bandwidth r i required to route any remaining demand by the deadline. Then, the provider routes requests, up to their allotted bandwidth, to maximize the declared welfare ( i b i r i ). Finally, each customer is charged their VCG payment. This process is repeated every timestep. Even though VCG payments are used, this scheme is not truthful as byte requests are served over multiple timesteps. Further, it does not account for the costs incurred by the provider.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Benefits of Pretium</head><p>Figure <ref type="figure" target="#fig_6">6</ref> shows the welfare achieved by the above baselines and Pretium, relative to the offline optimal (OPT). The request values are drawn from a normal distribution with standard deviation smaller than the mean. We find that without prices (NoPrices), the welfare can end up being negative. This is because without prices any request can enter the system and there is no incentive to spread the load across lightly-loaded paths or time-periods. Hence, the network costs become high; much higher than the total value from bytes carried. While RegionOracle achieves 1-17% of the optimal welfare, PeakOracle achieves 18-30% of it. This  shows that pricing can increase the overall usefulness of the system. We note that RegionOracle and PeakOracle are oracular schemes rather than practical ones, as they use the true values of all requests to determine prices. While the VCGLike baseline uses the users' bids (equal to their values) to schedule requests, it does not account for provider costs and results in negative welfare at lower load factors. Pretium outperforms all the other baselines and achieves more than 60% of the optimal welfare. The benefits of Pretium stem from using dynamic prices based on demand and network utilization. This is shown in Figure <ref type="figure" target="#fig_8">7a</ref> where Pretium charges higher prices (black solid line) during periods of higher utilization (brown dotted line) on a particular link in the network, for a load factor of 2. Pretium prevents lower valued requests from occupying bandwidth that can be better used to serve requests with higher value.</p><p>Further, to illustrate the benefits of Pretium, Figure <ref type="figure" target="#fig_8">7b</ref> shows a histogram of the total value achieved (y-axis) by different schemes relative to OPT, binned by the value per byte of the requests (x-axis). Correspondingly, Figure <ref type="figure" target="#fig_8">7c</ref> shows the value per byte (x-axis) of each request and the price (y-axis) at which it is admitted into the network. RegionOracle and PeakOracle do not perform well as they set high prices to accept higher valued requests, and do not provide service to requests with low value (value from requests in lower buckets is 0). Pretium overcomes this problem with a richer price structure, resulting in requests with lower value being admitted at lower prices, and charging higher prices to requests with higher value. VCGLike retrieves more value from requests of lower value per byte but performs poorly in terms of welfare as it myopically allocates requests per timestep and ignores the costs incurred. Profits. Figure <ref type="figure">8</ref> shows the profits of Pretium, PeakOracle and VCGLike for the provider, relative to RegionOracle -Pretium achieves more than 2X higher profits. This gap is higher at lower load factors, as RegionOracle sets a high price per byte (to offset the costs on edges) and only a few requests are admitted. As a result, a large portion of the network is under-utilized and the provider's revenue is low. Request completion. Pretium achieves higher request completion compared to the baselines (Figure <ref type="figure">9</ref>) because (a) unlike VCGLike, it plans into the future and (b) unlike NoPrices, PeakOracle and RegionOracle, it schedules requests with lax deadlines and smaller values during periods of low network load. We also note that Pretium provides completion guarantees to requests when admitted but none The separation of price-adaption and traffic engineering (via schedule adjustment) in Pretium, along with the flexibility offered to requests ( ?4) all contribute towards its gains. Figure <ref type="figure" target="#fig_14">11</ref> shows the welfare (relative to OPT) of (a) Pretium without price menus (Pretium-NoMenu), in which all requests either get their entire demand allocated or none, and (b) Pretium without schedule adjustment (Pretium-NoSAM), where the schedule adjustment module in Pretium is skipped. We see that the flexibility Pretium offers with a menu of prices allows it to achieve nearly 1.3X-2X higher welfare (Pretium vs. Pretium-NoMenu in figure). Further, Pretium-NoSAM performs more than 3X times worse than Pretium -a large portion of this difference is because of reoptimizing the schedule at every timestep, accounting for changes in network traffic and taking network costs into account significantly improves performance. Computational overhead. Table <ref type="table" target="#tab_7">4</ref> shows the execution time for each module in Pretium for the above setup. The request admission module (RA), which is on the critical path of every request, and the schedule augmentation module (SAM), which runs every timestep, are fast and take around a second. The price computer takes around 3 seconds but it runs once every 24 hours, and incurs a small overhead to the provider.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Sensitivity analysis</head><p>In this section, we explore the sensitivity of Pretium to variations in link costs, and request value distributions. Link costs. We varied the mean link cost of the network links by over 2X (at a load factor of 1). The welfare (relative   to OPT) obtained by Pretium and RegionOracle is shown in Figure <ref type="figure" target="#fig_10">12</ref>. While the welfare of both schemes reduces with increasing cost, RegionOracle has a significantly higher reduction because it sets higher prices to compensate for the increasing cost. As a result, fewer requests are admitted. Pretium is more robust as it increases the prices only on the higher cost links and retains lower prices on low cost links. Request value distribution. The benefits of Pretium depend on the distribution of request values. Figure <ref type="figure" target="#fig_11">13</ref> shows welfare of Pretium and RegionOracle (relative to OPT) where request values are drawn from (a) pareto and (b) normal distributions with different mean (?) to standard deviation (?) ratios. Figure <ref type="figure" target="#fig_13">14</ref> shows the profits achieved by Pretium relative to RegionOracle for the same distributions. While both the metrics vary with the distributions, we see that Pretium consistently outperforms RegionOracle.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Related Work</head><p>Pricing for communication networks has been studied for over three decades; see <ref type="bibr" target="#b8">[9]</ref> for an extensive survey. Initial applications were motivated by the ATM standard, followed by proposals to incorporate pricing for Internet congestion control (e.g., <ref type="bibr" target="#b22">[23,</ref><ref type="bibr" target="#b25">26,</ref><ref type="bibr" target="#b29">30]</ref>) and inter-ISP transit networks <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b30">31]</ref>. More recently, there has been work on increasing profits of ISPs through flexible pricing structures, leading to better utilization and user satisfaction. TUBE <ref type="bibr" target="#b15">[16]</ref> deals with pricing mobile data. TUBE uses time-dependent dynamic pricing (TDP) instead of traditional per-usage pricing, to offload  delay-tolerant users in peak traffic periods. Similar ideas can be found in <ref type="bibr" target="#b34">[35]</ref>. Our work also incorporates time-varying prices, but our setting and interface are different in that requests specify deadlines and demands, and the provider uses traffic engineering to accommodate multiple requests. <ref type="bibr" target="#b31">[32]</ref> proposes destination-based tiered pricing for transit ISPsbased on both the traffic demand, as well the cost of carrying it; they use three or four tiers. We also offer "tiers" for demand; however, the actual price also depends on current congestion levels and the delay tolerance of users. To the best of our knowledge, we are the first to propose and analyze a pricing framework for WAN traffic.</p><p>The Pretium pricing model and update method is motivated by the theory literature on dynamic pricing and machine learning. The existence of optimal "market" prices is a classical result in economics <ref type="bibr" target="#b2">[3]</ref>, and given sufficient data it is possible to learn those prices <ref type="bibr" target="#b5">[6]</ref>. Hsu et al. <ref type="bibr" target="#b18">[19]</ref> point out that such prices can be used to guide online allocation. An alternative line of work <ref type="bibr" target="#b4">[5,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b11">12]</ref> employs online learning methods to find near-optimal prices, rather than directly computing optimal prices for historical data. Adapting such techniques to WAN allocation is a direction for future work.</p><p>Incentive issues in routing have also been explored on the supply side, where individual routing nodes may act strategically <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b14">15]</ref>. We instead consider consumer incentives and assume a single provider coordinates the entire network.</p><p>Pretium uses traffic engineering (TE) to provide promises to requests, and to augment its promise, taking link costs into account. Traffic Engineering has been a widely studied problem in networking. Notable works include adaptive congestion avoidance <ref type="bibr" target="#b20">[21]</ref>, oblivious routing <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b13">14]</ref>, and finding suitable routing parameters for given protocols (e.g., OSPF <ref type="bibr" target="#b13">[14]</ref>). Recent papers consider the objective of imposing fairness in a shared network <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b10">11]</ref>.</p><p>Traffic engineering for datacenter WANs has been drawn recent attention from both industry and academia <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b23">24]</ref>. SWAN <ref type="bibr" target="#b17">[18]</ref> and B4 <ref type="bibr" target="#b19">[20]</ref> aim to improve the utilization of inter-DC WAN. However, the underlying resource management policies of these systems do not compute longterm allocation schedules and do not offer time-guarantees. From the TE perspective, the most relevant work to ours is Tempus <ref type="bibr" target="#b21">[22]</ref> which introduces a TE framework which incorporates request demands and deadlines, and allows for guaranteed transfers. However, Tempus does not incorporate (non-linear) link costs into the scheduling framework, and does not consider pricing. To the best of our knowledge, our method of modeling link percentile costs through the sum-of-k proxy ( ?4.2) is novel.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">Conclusion</head><p>In this paper, we present Pretium, a framework that combines dynamic pricing with traffic engineering for interdatacenter WANs. While Pretium maintains an internal timevarying price for each link in the network, it provides a simple interface to users -each user specifies her request demand and deadline, and can choose a promise from a price quote, based on her preferences. A subsequent schedule adjustment module runs periodically to reoptimize flow allocations to manage available capacity and usage costs. Pretium uses the information of historical demands and prices accepted by users to dynamically estimate future demands and update prices. This allows Pretium to quote higher prices during periods of high demand, preferentially serving requests with higher value and shifting traffic with lower value to low utilization periods. Experiments with production WAN traces show that Pretium achieves up to 80% of the welfare of an offline oracular scheme, significantly outperforming various baselines, even when the latter have oracle information on request values and future demands.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Appendix</head><p>Proof of Theorem 4.2. Inspired by the bubble sort algorithm, we construct a set of O(kT ) constraints and show that the construction results in an upper bound S e on the sum of the k largest utilization levels in each link. Since we are maximizing i t:t 1 i ?t?t 2 i r:r?Ri</p><formula xml:id="formula_8">X irt ? ? i -e C e S e ,</formula><p>we are minimizing each S e and the upper bound becomes tight as required. We will omit subscript e from our notation.We proceed in k iterations: in the first, we "bubble" the largest element, then the second largest, etc.. Our constraints mimic the bubbling operations -for each two numbers x, y to be compared, we have a linear comparator, which is manifested through the following inequalities:</p><p>x + y = m + M, m ? x, m ? y. Note this implies M ? max{x, y} and m ? min{x, y}. We note that <ref type="bibr" target="#b24">[25]</ref> uses five sorting constraints in their solution; hence, our construction results in 40% less constraints per link, which is substantial especially for large networks. Let f i j denote the minimum of the two outputs of the j-th comparator at the i-th iteration, and let F i j denote the maximum of the two values. We use the convention f 0 j = f j for all j ? {1, 2, . . . T }. Accordingly, our first comparator at the first iteration is given by</p><formula xml:id="formula_9">f 0 1 + f 0 2 = f 1 1 + F 1 1 , f 1 1 ? f 0 1 , f 1 1 ? f 0 2 .</formula><p>As in bubble sort, the maximum output is pushed to the next comparator, i.e., the rest of the constraints for this iteration have following form: f 0 j + F 1 j-2 = f 1 j-1 + F 1 j-1 , f 1 j-1 ? f 0 j , f 1 j-1 ? F 1 j-2 , for every j ? {3, 4, . . . T }. Using all the above constraints, it can be easily shown that</p><formula xml:id="formula_10">F 1 T -1 ? max{f 0 1 , f 0 2 . . . f 0 T }<label>(3)</label></formula><formula xml:id="formula_11">f 0 1 + f 0 2 + ? ? ? + f 0 T = f 1 1 + f 1 2 + . . . f 1 T -1 + F 1</formula><p>T -1 (4) Proceeding iteratively, we use (T -i) comparators in the i-th iteration (all outputs of iteration i excluding F i T -i , are inputs for iteration i + 1). Using (4) inductively, we have the following equality after k iterations</p><formula xml:id="formula_12">f 0 1 +? ? ?+f 0 T = f k 1 +. . . f k T -k +F k T -k +F k-1 T -k+1 +? ? ?+F 1 T -1 .</formula><p>(5) Finally, we add the constraint S ?</p><formula xml:id="formula_13">F k T -k + F k-1 T -k+1 + ? ? ? + F 1</formula><p>T -1 . Note that we have a total of O(kT ) equalities/inequalities.</p><p>In order to formally prove that S is not smaller than sum of k largest elements we need the following lemma: The lemma's proof follows by a charging argument and is omitted here due to lack of space.</p><p>We are now ready to prove the theorem. We let Y 0 be the set of indices corresponding to the T -k smallest elements among f 0 1 , f 0 2 , . . . f 0 T . And then consequently construct Y 1 , Y 2 . . . Y k . We obtain that Y k = {1, 2, . . . T -k}. It means that f k 1 + f k 2 + . . . f k T -k is not larger than the sum of T -k-smallest numbers from f 0 1 , f 0 2 , . . . f 0 T . This together with <ref type="bibr" target="#b4">(5)</ref> guarantees that</p><formula xml:id="formula_14">F k T -k + F k-1 T -k+1 + ? ? ? + F 1</formula><p>T -1 is greater or equal to sum of k largest elements from f 0 1 , f 0 2 , . . . f 0 T . Proof of Theorem 5.1. We will prove that each user request maximizes utility by reporting its request truthfully, if the data being transferred is made unavailable during the period [t 1 i , t 2 i ] (this unavailability is the technical assumption alluded to in the statement of Theorem 5.1). It is never beneficial to misreport S i or T i , nor to report [ t1 i , t2 i ] ? [t 1 i , t 2 i ], since the user has no value for data routed incorrectly, early, or late. So assume [ t1 i , t2 i ] ? [t 1 i , t 2 i ] and let pi (?) be the corresponding price menu. We claim that pi (x) ? p i (x) for all x: this is because p i (x) has only a larger pool of (route, time) pairs over which to minimize price. This means that reporting ( t1 i , t2 i ) and requesting x is no better than reporting (t 1 i , t 2 i ) and requesting x. Finally, we argue that it is utility-optimal to report only a single request. Breaking a request from S i to T i into multihop requests (e.g., S i to A, then A to T i ) only restricts the set of routes that can be selected, and hence only increases price (as above). Next consider making multiple requests, each from S i to T i . Since link prices can only increase between requests made in the same timestep, the total payment over all requests can be only greater than the payment of making only a single (truthful) request of the same total size.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Ratio of 90 th percentile to 10 th percentile link utilization shown as a cumulative distribution function.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>FixedFigure 2 :</head><label>2</label><figDesc>Figure 2: Example illustrating the impact of pricing. Top: the network (all links have capacity 2 units) and request specifications.Bottom: the number of units of each request scheduled under different pricing methods (all prices per unit transferred), and total welfare of the schedule.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Overview of Pretium.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Scatter plot of 95 th percentile and average of top 10% utilization values. Each point corresponds to a link.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Welfare relative to OPT at different load factors.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head></head><label></label><figDesc>Temporal variation of prices and utilization on a single network link. Price charged vs. value of request.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Dynamic prices help increase welfare achieved by Pretium.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 8 :Figure 9 :Figure 10 :Figure 11 :</head><label>891011</label><figDesc>Figure 8: Profits of different schemes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: Varying mean link cost, at load factor 1.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 13 :</head><label>13</label><figDesc>Figure 13: Welfare achieved for value distributions with different mean (?) to standard deviation (?) ratios, at load factor 1.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 14 :</head><label>14</label><figDesc>Figure 14: Profits of Pretium for value distributions with different mean (?) to standard deviation (?) ratios, at load factor 1.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>LEMMA 1 .</head><label>1</label><figDesc>For any i and any set of indicesY i {1, 2 . . . T -i} we can find a subset of indices Y i+1 ? {1, 2 . . . T -i -1} such that |Y i | = |Y i+1 | and j?Yi f i j ? j ?Yi+1 f i+1 j .</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table</head><label></label><figDesc></figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 2 :</head><label>2</label><figDesc>Pricing for WAN bandwidth by cloud providers (current as of 1/25/2016).</figDesc><table><row><cell>Cumulative fraction (over links)</cell><cell>0.5 0.6 0.7 0.8 0.9 1</cell><cell>1</cell><cell>10</cell><cell>100</cell></row><row><cell></cell><cell></cell><cell cols="3">90th to 10th percentile ratio</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 3 :</head><label>3</label><figDesc>Summary of notation. byte request, indexed by i, has a quantity of data d i to be routed. The request indicates the source S i and target T i ; data must be transmitted along a set of admissible paths (or routes) R i from S i to T i . The request specifies a time interval in which the data can be routed.</figDesc><table><row><cell>We discretize time</cell></row><row><cell>into timesteps, where each timestep corresponds to, for ex-</cell></row><row><cell>ample, a five-minute interval. Accordingly, the time inter-</cell></row><row><cell>val of each request i is translated to [t 1 i , t 2 i ], where t 1 i is the</cell></row><row><cell>timestep corresponding to the start time of the request, and</cell></row><row><cell>t 2</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head></head><label></label><figDesc>Each of the above modules works at a different timescale. The request admitter (RA) responds with a price quote online to every new request. The RA executes a multi-timestep TE to identify the least expensive way to schedule different portions of the user transfer. Price quotes are computed by it in a manner that ensures truthful behavior from users ( ?4.1).RA lets the user pick a price and a service guarantee. Then, once per timestep, the schedule adjustor (SAM) figures out the</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell cols="2">Accepted</cell></row><row><cell>Request Details:</cell><cell></cell><cell cols="2">Request interface</cell><cell>requests</cell><cell>Schedule Adjustor</cell></row><row><cell cols="2">{src, dest, start, deadline}</cell><cell cols="2">(at each request arrival)</cell><cell></cell><cell>(every timestep)</cell></row><row><cell>Price Price quote</cell><cell></cell><cell>Initial flows</cell><cell>Prices: {? ?,? }</cell><cell cols="2">state Network Existing flows</cell><cell>Updated flows</cell></row><row><cell>Transfer size</cell><cell cols="5">Price computer (including price paid) Request details prices: {? ?,? }</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">(start of each window)</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>2. The schedule adjustment module (SAM) ( ?4.2) runs at</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>each timestep to decide the actual routing and schedul-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>ing for that timestep. This module can update the</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>plans for future timesteps. Its goal is to maximize wel-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>fare (total value minus cost) while respecting a priori</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>guarantees on service (e.g., deadlines).</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>3. The price computer (PC) ( ?4.3) updates the prices for</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>each link and for each future timestep. While RA up-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>dates prices after accepting individual requests, the PC</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>module anticipates future load levels (based on histor-</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>ical usage and current demand levels) and performs a</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>more holistic optimization to set prices.</cell></row></table><note><p>1. The request admission interface (RA) ( ?4.1) is the user interface. In response to a transfer request, it uses the network state to generate a price quote for routing different guaranteed amounts of request data. Customers can choose how much data they wish to transfer. A preliminary routing schedule (or plan) is chosen.</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 4 :</head><label>4</label><figDesc>Runtimes of different modules in Pretium.of the other schemes provide such guarantees. Network utilization. Pretium performs schedule adjustment every timestep to minimize the incurred costs ( ?4). This, in turn, reduces the spikes in link utilization. Figure10shows the CDF of the 90 th percentile link utilization for the different schemes. Pretium reduces the median link's 90 th percentile utilization by nearly 30% compared to RegionOracle. It further reduces the maximum utilization on about 16% links (not shown) by 25%, representing significant savings in WAN bandwidth. Benefits of different modules in Pretium.</figDesc><table><row><cell>Module</cell><cell cols="2">Run time (sec) Median 95 th %'ile</cell></row><row><cell>RA (for each request)</cell><cell>0.59</cell><cell>0.62</cell></row><row><cell>SAM (for every 5 minute timestep)</cell><cell>0.99</cell><cell>1.08</cell></row><row><cell cols="2">PC (for every 24 hour time window) 3.17</cell><cell>3.3</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>This is the natural generalization of many commonly-used metrics, such as utilization maximization and congestion minimization, to a setting with utility-weighted requests and operation costs.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>The offline scheme solves an LP with the full benefit of hindsight (complete information), and is nearly optimal. The deviation from optimality is due to linearizing the operation costs, which is required for tractability ( ?4).</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2"><p>Another natural objective for public networks is profit maximization. However, we note that it is important to account for market competition when optimizing for profit. We take the position that the cloud market is highly competitive, and hence a profit-seeking provider will anyway be driven to optimize for welfare<ref type="bibr" target="#b32">[33]</ref>.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3"><p>The use of marginal prices for estimating user values is motivated by The-</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" xml:id="foot_4"><p>orem 5.2, which implies that users will set these quantities equal if possible.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>Acknowledgments</head><p>We thank <rs type="person">Michael Schapira</rs>, <rs type="person">Mohit Singh</rs>, our shepherd <rs type="person">Bruce Maggs</rs> and the Sigcomm reviewers for their useful feedback.</p></div>
+			</div>			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<ptr target="http://www.gurobi.com/" />
+		<title level="m">Gurobi Optimization</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Making Intra-Domain Routing Robust to Changing and Uncertain Traffic Demands</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Applegate</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Cohen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Existence of an Equilibrium for a Competitive Economy</title>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">J</forename><surname>Arrow</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Debreu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Econometrica: Journal of the Econometric Society</title>
+		<imprint>
+			<biblScope unit="page" from="265" to="290" />
+			<date type="published" when="1954">1954</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Reducing Truth-telling Online Mechanisms to Online Optimization</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Awerbuch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Azar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Meyerson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">STOC</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Dynamic Pricing with Limited Supply</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Babaioff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Dughmi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kleinberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Slivkins</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EC</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Reducing Mechanism Design to Algorithm Design via Machine Learning</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">F</forename><surname>Balcan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Blum</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">D</forename><surname>Hartline</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Mansour</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">J. of Computer and System Sciences</title>
+		<imprint>
+			<biblScope unit="volume">74</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<biblScope unit="page" from="1245" to="1270" />
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Economics of Traffic Attraction by Transit Providers</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bangera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Gorinsky</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Networking Conference</title>
+		<imprint>
+			<date type="published" when="2014-06">2014. June 2014</date>
+			<biblScope unit="page" from="1" to="9" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Online Learning in Online Auctions</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Blum</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Rudra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Wu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SODA</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Pricing Communication Networks: Economics, Technology and Modelling</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Courcoubetis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Weber</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+			<publisher>Wiley Online Library</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Upward Max Min Fairness</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Danna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Hassidim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Mansour</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Raz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Segalov</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">INFOCOM</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">A Practical Algorithm for Balancing the Max-Min Fairness and Throughput Objectives in Traffic Engineering</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Danna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Mandal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Singh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">INFOCOM</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">The Adwords Problem: Online Keyword Matching with Budgeted Bidders Under Random Permutations</title>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">R</forename><surname>Devanur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">P</forename><surname>Hayes</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EC</title>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">A BGP-based Mechanism for Lowest-cost Routing</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Feigenbaum</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Papadimitriou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Sami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shenker</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Distributed Computing</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="61" to="72" />
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Internet Traffic Engineering by Optimizing OSPF Weights in a Changing World</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Fortz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Thorup</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">INFOCOM</title>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Incentive Compatibility and Dynamics of Congestion Control</title>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">B</forename><surname>Godfrey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Schapira</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zohar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shenker</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGMETRICS</title>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">TUBE: Time-dependent Pricing for Mobile Data</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Joe-Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Im</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chiang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Online Auctions with Re-usable Goods</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">T</forename><surname>Hajiaghayi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Kleinberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mahdian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">C</forename><surname>Parkes</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EC</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Achieving High Utilization with Software-Driven WAN</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">Y</forename><surname>Hong</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hsu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Morgenstern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">M</forename><surname>Rogers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Vohra</surname></persName>
+		</author>
+		<idno>abs/1511.00925</idno>
+		<title level="m">Do prices coordinate markets? CoRR</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Experience with a Globally-Deployed Software Defined WAN</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jain</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="volume">4</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Walking the Tightrope: Responsive Yet Stable Traffic Engineering</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kandula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Katabi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Davie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Charny</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Calendaring for Wide Area Networks</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kandula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Menache</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Schwartz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">R</forename><surname>Babbula</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Rate Control for Communication Networks: Shadow Prices, Proportional Fairness and Stability</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Kelly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Maulloo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Tan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of the Operational Research Society</title>
+		<imprint>
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Inter-datacenter Bulk Transfers with Netstitcher</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Laoutaris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Sirivianos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Rodriguez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Traffic Engineering with Forward Fault Correction</title>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">H</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Optimization Flow Control, I: Basic Algorithm and Convergence</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Low</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Lapsley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE/ACM Transactions on Networking</title>
+		<imprint>
+			<date type="published" when="1999-12">Dec 1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Internet Economics: The Use of Shapley Value for ISP Settlement</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">T B</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Chiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">C S</forename><surname>Lui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Misra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Rubenstein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE/ACM Transactions on Networking</title>
+		<imprint>
+			<date type="published" when="2010-06">June 2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m" type="main">Computers and Intractability: A Guide to the Theory of NP-completeness</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">G</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">J</forename><surname>David</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1979">1979</date>
+			<publisher>W.H Freeman</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">How Hard Can It Be? Designing and Implementing a Deployable Multipath TCP</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Raiciu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NSDI</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">Pricing in Computer Networks: Reshaping the Research Agenda</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Shenker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Clark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Estrin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Herzog</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1996-04">Apr. 1996</date>
+			<publisher>ACM SIGCOMM CCR</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">MINT: A Market for INternet Transit</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Valancius</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Feamster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Johari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vazirani</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM CONEXT</title>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">How Many Tiers?: Pricing in the Internet Transit Market</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Valancius</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Lumezanu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Feamster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Johari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">V</forename><surname>Vazirani</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">Microeconomic Analysis. Norton International edition</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Varian</surname></persName>
+		</author>
+		<editor>W.W. Norton</editor>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Guaranteeing Deadlines for Inter-datacenter Transfers</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Eurosys</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">The Effectiveness of Time Dependent Pricing in Controlling Usage Incentives in Wireless Data Network</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

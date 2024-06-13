@@ -1,0 +1,631 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Exploiting Coroutines to Attack the &quot;Killer Nanoseconds&quot;</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Christopher</forename><surname>Jonathan</surname></persName>
+							<email>cjonathan@cs.umn.edu</email>
+							<affiliation key="aff0">
+								<orgName type="institution">University of Minnesota</orgName>
+								<address>
+									<country>? Microsoft</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Umar</forename><surname>Farooq Minhas</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">James</forename><surname>Hunter</surname></persName>
+							<email>jahunter@microsoft.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Justin</forename><surname>Levandoski</surname></persName>
+							<email>justinle@microsoft.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Gor</forename><surname>Nishanov</surname></persName>
+							<email>gorn@microsoft.com</email>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<orgName type="department">The 44th International Conference on Very Large Data Bases</orgName>
+								<address>
+									<postCode>2018</postCode>
+									<settlement>August, Rio de Janeiro</settlement>
+									<country key="BR">Brazil</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Exploiting Coroutines to Attack the &quot;Killer Nanoseconds&quot;</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.14778/3236187.3236216</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:44+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Database systems use many pointer-based data structures, including hash tables and B+-trees, which require extensive "pointerchasing." Each pointer dereference, e.g., during a hash probe or a B+-tree traversal, can result in a CPU cache miss, stalling the CPU. Recent work has shown that CPU stalls due to main memory accesses are a significant source of overhead, even for cacheconscious data structures, and has proposed techniques to reduce this overhead, by hiding memory-stall latency. In this work, we compare and contrast the state-of-the-art approaches to reduce CPU stalls due to cache misses for pointer-intensive data structures. We present an in-depth experimental evaluation and a detailed analysis using four popular data structures: hash table, binary search, Masstree, and Bw-tree. Our focus is on understanding the practicality of using coroutines to improve throughput of such data structures. The implementation, experiments, and analysis presented in this paper promote a deeper understanding of how to exploit coroutines-based approaches to build highly efficient systems.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">INTRODUCTION</head><p>Modern main-memory databases <ref type="bibr" target="#b12">[14,</ref><ref type="bibr" target="#b23">25,</ref><ref type="bibr" target="#b24">26]</ref> store their data completely in low-latency volatile DRAM (or non-volatile RAM). Such a design removes the disk-I/O bottleneck that has plagued traditional database systems for decades. However, main memory still has a higher latency than CPU caches, so main-memory databases suffer from a memory-access bottleneck <ref type="bibr" target="#b7">[9,</ref><ref type="bibr" target="#b18">20]</ref>. The data structures employed by many in-memory database systems are pointer-based, e.g., a B+-tree <ref type="bibr" target="#b8">[10,</ref><ref type="bibr" target="#b17">19,</ref><ref type="bibr" target="#b21">23]</ref> or a hash table. Consider a get(key) operation on a B+-tree index used by a modern, in-memory keyvalue store (KVS). Such an operation dereferences several pointers while traversing the B+-tree from root to leaf, resulting in the * Work performed while at Microsoft Research.</p><p>well-known issue of pointer chasing <ref type="bibr" target="#b14">[16]</ref>. Each of these pointer dereferences can stall the CPU, if the data being accessed is not already in the CPU cache. Furthermore, most of a given operation's CPU instructions and pointer dereferences are dependent on earlier pointer dereferences, and thus cannot be issued in parallel. Consequently, CPU memory-access stalls are a significant performance bottleneck for any system (not just database systems) that relies on pointer-intensive data structures <ref type="bibr" target="#b16">[18,</ref><ref type="bibr" target="#b20">22]</ref>. Our goal is to study an approach that uses coroutines to address this bottleneck.</p><p>Recently, many software-based prefetching techniques have been proposed <ref type="bibr" target="#b10">[12,</ref><ref type="bibr" target="#b15">17,</ref><ref type="bibr" target="#b16">18,</ref><ref type="bibr" target="#b20">22]</ref> to mitigate CPU stalls due to mainmemory accesses. The main idea behind these techniques is simple, yet very powerful. For multiple independent instruction streams (e.g., a multi-get operation in an index <ref type="bibr" target="#b20">[22]</ref>), one can issue memory prefetches, in parallel-thus exploiting memory-level hardware parallelism. When one instruction stream is about to dereference a memory pointer, it issues a software prefetch of the memory address being pointed to and context-switches to the next independent stream, resuming the original operation later. This effectively creates a distance between when a memory address is prefetched and when it is actually dereferenced, making it highly probable that when the memory is accessed, it will be available in a CPU cache.</p><p>To implement the above solution, many proposed techniques <ref type="bibr" target="#b10">[12,</ref><ref type="bibr" target="#b15">17,</ref><ref type="bibr" target="#b16">18]</ref> require an almost complete rewrite of the existing code, for example, by requiring the developer to hand-code a state machine <ref type="bibr" target="#b16">[18]</ref>. In many cases, the synchronous version of the code needs to be transformed into an asynchronous version. The resulting code looks very different from the synchronous version of the same code, which is still the preferred choice <ref type="bibr" target="#b9">[11]</ref>. Thus, in order to get better performance, these approaches sacrifice code simplicity, understandability, and maintainability.</p><p>To address the shortcomings noted above, an even more recent approach to "interleaving" exploits stackless coroutines <ref type="bibr" target="#b20">[22]</ref>which are also the focus of this work. A stackless coroutine is a special function that can suspend its execution, returning control to its caller, before it runs to completion. At a later time, after some condition has been met, the caller can resume executing the function from its last suspension point. Stackless coroutines, referred to as coroutines from this point onwards, provide an extremely lightweight mechanism for switching contexts, with a suspend or resume overhead comparable to the overhead of an indirect function call (or return). Further, if a coroutine is inlined, this overhead is zero. Thus, coroutines prove to be a highly efficient mechanism for "interleaving." Also, with coroutines, developers just need to specify suspension points within their synchronous implementation at places where a cache miss is likely. The compiler automatically generates the code needed to suspend and resume the operationsaving and restoring the state of the operation, respectively. Thus, in effect, coroutines allow the programmer to hide memory latency without extensively rewriting code, as is required by existing techniques <ref type="bibr" target="#b10">[12,</ref><ref type="bibr" target="#b15">17,</ref><ref type="bibr" target="#b16">18]</ref>.</p><p>Coroutines are an experimental feature in C++, implemented in the Clang 6.0.0 <ref type="bibr" target="#b1">[1]</ref> and 2017 Microsoft Visual Studio (MSVC) <ref type="bibr">[6]</ref> compilers. Coroutines are currently a Technical Specification; if they are accepted as part of the upcoming C++ standard <ref type="bibr">[7]</ref>, they will be available widely. Therefore, it is important to understand their performance characteristics and how they apply to building systems-one of the goals of this work.</p><p>We note that one of the key requirements to hide CPU stalls due to memory accesses is the ability to "batch" (or group) multiple operations against a data structure and issue them at once. Above, we presented a "multi-get" operation against a B+-tree, or a hash table, as an example. In <ref type="bibr" target="#b20">[22]</ref>, the authors present index joins for executing IN-predicate queries in SAP HANA as another example, where the values in the IN-predicate list are synonymous to a multi-get operation against the index. More generally, in multi-tenant cloud environments, where many modern database systems operate, it is possible to "batch" requests from multiple users and exploit "interleaving" to improve performance.</p><p>We summarize this paper's contributions as follows. We present an in-depth experimental evaluation of coroutine-based approaches to hide memory access latency. We implement multiple data structures that are commonly used in many systems, using coroutines, and compare their performance with state-of-the-art techniques. Specifically, we perform our evaluation on four different case studies, which can be grouped into two main categories: (1) basic data structures, which include hash-index and binary search, where we build on and expand the analyses presented in <ref type="bibr" target="#b16">[18]</ref> and <ref type="bibr" target="#b20">[22]</ref>; and (2) complex data structures, as used in the state-of-the-art inmemory databases Masstree <ref type="bibr" target="#b19">[21]</ref> and Bw-tree <ref type="bibr" target="#b17">[19]</ref>, where we believe we are the first to implement and evaluate these approaches. Overall, this paper promotes a deeper understanding of how to exploit coroutines-based approaches to build highly efficient systems.</p><p>The rest of the paper is organized as follows: Section 2 provides background on software-based prefetching techniques. Section 3 and Section 4 present an in-depth experimental evaluation of coroutine-based techniques to hide memory stall latencies for simple data structures and complex data structures, respectively. These sections also present our analysis of every approach, both at a micro-architectural and a macro level. Section 5 summarizes our findings and further discusses the practical applicability of coroutines-based approaches. Section 6 concludes the paper.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">BACKGROUND &amp; RELATED WORK</head><p>In-memory database systems commonly use pointer-based data structures, rather than the page-based indirection found in diskbased systems. These indexes are usually in the form of either hashbased indexes-e.g., Redis <ref type="bibr" target="#b6">[8]</ref> and RAMCloud <ref type="bibr" target="#b22">[24]</ref>-or tree-based indexes-e.g., Bw-tree <ref type="bibr" target="#b17">[19]</ref>, Masstree <ref type="bibr" target="#b19">[21]</ref>, and CSB + -tree <ref type="bibr" target="#b21">[23]</ref>. Generally, hash tables are better for point lookups, while trees are better for range queries. Previous work <ref type="bibr" target="#b14">[16]</ref> has shown that CPU stalls due to main memory accesses are a significant performance bottleneck for pointer-based data structures, on current hardware. As a result, multiple techniques have been proposed, in the last few years, to address this bottleneck <ref type="bibr" target="#b10">[12,</ref><ref type="bibr" target="#b16">18,</ref><ref type="bibr" target="#b20">22]</ref>.</p><p>The main idea behind these techniques is to execute N operations on a pointer-based data structure at once (e.g., a multi-get operation on a key-value store). Each operation oi, where 1 ? i ? N , issues a software prefetch of the memory that it is going to access. But before actually accessing that memory (e.g., by dereferencing a pointer), it does a context-switch to the next operation oi+1, rather return value[] 25: end procedure than waiting for the memory it prefetched to arrive at the CPU cache. By the time the process returns to oi, with high probability, the prefetched memory will be present in CPU caches, and thus oi can continue its execution, avoiding a CPU stall.</p><p>Throughout the rest of this section, we present state-of-the-art techniques that are tailored around the main idea of "interleaving" different execution (or instruction) streams, to avoid CPU stalls. In particular, we use the example of a hash index probe to show how each approach tackles the problem.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Group Prefetching</head><p>Group Prefetching (GP) <ref type="bibr" target="#b10">[12]</ref> is a loop-transformation approach that rearranges N identical operations into M predefined code stages. Then, each operation goes through the same code stage at the same time, with overall execution interleaving between different operations. Once all N operations finish executing the first code stage, all N operations move to the second code stage, and so on until all N operations have executed M code stages.</p><p>The main advantage of GP is that the code is written in a "semi-synchronous" manner: GP code follows an operation's synchronous model, except that it executes the operation on N keys in parallel, rather than on one key at a time. As all N operations execute the same code stage before moving to the next one, GP does not need to "remember" the stage that each operation is currently executing. However, GP has two main disadvantages: (1) we need to know the number of pre-defined code stages (M ) in advance, which is not always possible, and (2) if one of the N operations terminates early-e.g., because a condition has been met-GP cannot start another operation in its place, because the new operation would be executing a different code stage than the others. This second disadvantage introduces many "no-op" operations into the GP pipeline, hurting overall performance <ref type="bibr" target="#b16">[18]</ref> when the workload is skewed.</p><p>Algorithm 1 shows pseudocode for the GP approach for probing a hash index. The input to the algorithm is a set of keys to be probed, i.e., N keys, and the hash index. There are a total of 2 return result state[] 30: end procedure code stages in hash index probing. In the first stage (Lines 5-8), the algorithm applies the hash function to get the base node for all N keys and then prefetches them. As noted earlier, the main idea is that when we access the base node at a later time, with high probability it will have been prefetched into the CPU cache. In the second stage (Lines 10-23), the algorithm compares all N keys with the keys of the corresponding prefetched nodes. If a match is found for a key or if there are no more nodes to be fetched, then that operation terminates (early exit). For each unmatched key, the algorithm issues a prefetch for the next node.</p><p>The main disadvantage of GP is that when an operation oi has already found its payload, GP just switches from oi to the next operation oi+1 without initializing a new operation (Lines 12-13). As a result, the number of code stages that GP executes for all N operations is equal to the longest chain of nodes that an operation needs to traverse, regardless of whether the other N -1 operations have finished. As we show later in the experimental section, GP works well for data structures which have a regular access pattern, but not for data structures with irregular (or skewed) access patterns.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Asynchronous Memory Access Chaining</head><p>Asynchronous Memory Access Chaining (AMAC) <ref type="bibr" target="#b16">[18]</ref> transforms a set of operations into a set of state machines, storing each operation's state in a circular buffer. An operation, right before it stalls-e.g., after prefetching the next memory address-does a context-switch to the next operation. By transforming operations into a set of state machines, AMAC allows different operations to execute different code stages at the same time. This is because the circular buffer stores each operation's current state. Furthermore, once an operation terminates, we can immediately start another operation, without waiting for other operations to terminate. How-ever, the main disadvantage of AMAC is that transforming a synchronous operation into a state machine requires a complete rewrite of the code, and the resulting code does not look anything like the original, "synchronous" version, hence, sacrificing code readability and maintainability.</p><p>Algorithm 2 shows pseudocode for the AMAC approach for probing a hash index. The group size parameter, is the number of concurrently executing instruction streams (or operations). AMAC stores the context of each operation in a circular buffer, of size group size, where the algorithm loops through every operation in the buffer and executes the relevant stage of each operation. There are 2 main stages in the AMAC version of hash index probe. The first stage (Lines 12-16) initializes a new probe for the next key that the algorithm is going to probe. In this stage, AMAC applies the hash function to the key to find the base node, issues a software prefetch for the base node, and transitions to the next stage. The second stage (Lines 17-27) compares the key with the prefetched node's key. If both keys match, AMAC starts a new probe in the place of the current operation by transitioning to the first stage of the algorithm. Otherwise, it issues a software prefetch for the next node and switches to the next operation in the circular buffer. By doing so, unlike GP, AMAC does not need to wait for every probe operation in the circular buffer to finish before it starts a new probe.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Coroutines</head><p>A key requirement for efficient "interleaving" is that a contextswitch must take less time than a memory stall. Otherwise, switching contexts adds more overhead than originally imposed by the memory stalls. This requirement renders many existing multithreading techniques useless, including light-weight, user-mode threads, known as fibers [4] or stackful coroutines <ref type="foot" target="#foot_0">1</ref> .</p><p>As shown earlier, GP and AMAC satisfy this requirement by carefully hand-coding highly-efficient code, which sacrifices developer productivity. However, synchronous programming is strongly preferred as it is simpler to understand, hence easier to implement, maintain, and debug <ref type="bibr" target="#b9">[11]</ref>.The key question becomes: how can we achieve the high performance of GP and AMAC, while maintaining high developer productivity? Coroutines, described below, use the compiler to achieve the same high efficiency as AMAC, at a fraction of the development cost.</p><p>A coroutine <ref type="bibr" target="#b11">[13]</ref> is a "resumable function" that can suspend its execution, returning to its caller before it completes. A coroutine can be seen as a generalization of a subroutine: a subroutine is just a coroutine that does not suspend its execution, and that returns to its caller once it completes. When a coroutine suspends its execution, it provides its caller a coroutine handle, which the caller can later use to resume the coroutine's execution.</p><p>A key feature of coroutines is that, by adding a bit of bookkeeping to coroutines' suspend and resume hooks, the developer no longer needs to put all code inside a single function. A coroutine can be called by another coroutine; and both the callee and the caller can be suspended and resumed at multiple suspension points. This feature allows the developer to add coroutines to existing code quickly and easily, as we show later.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3.1">Using Coroutines in C++</head><p>While coroutines have been around for more than 50 years, they are not yet a standard feature of C++. A coroutines specification for C++ has been published by ISO <ref type="bibr" target="#b2">[2]</ref> and is under review to become part of the C++20 standard. As of this writing, coroutines support With C++ coroutines enabled, the compiler turns any function that contains any of the keywords co yield, co return, or co await into a coroutine; we use only the latter two keywords in this paper. Keyword co return is roughly functionally equivalent to return, and keyword co await will optionally suspend the coroutine, as directed by the object being awaited. This is everything the application developer needs to know to get started with coroutines.</p><p>Behind the scenes, the compiler generates code to allocate and manage a coroutine frame for each coroutine call, and provides several hooks around co await and co return, which a library developer can use to keep track of the coroutine's state. (Section 4.1 describes a small library we wrote.) Coroutines are stackless, so they must potentially allocate frames for each coroutine call, which could be slow; in practice, our experiments show that the cost of managing coroutine frames can be made insignificant.</p><p>In their current form, C++ coroutines provide only minimal language support. Library developers need to define coroutine types, and each coroutine must return an awaitable-an object that can be co await-ed. The simplest way to use coroutines is to use the C++ standard future library and co return a type std::future&lt;type&gt;. Unfortunately, this is also the least efficient way. We experimentally verified that, when using std::future, excessive heap allocations significantly degrade performance. However,we expect that ready-to-use coroutine libraries will be available, in the future.</p><p>To get better performance, library developers also need to define custom awaitable types. In this paper, we define two different types of awaitables: -A simple awaitable that returns control to the coroutine's caller when the coroutine is suspended. We use this approach for experiments related to existing work <ref type="bibr" target="#b20">[22]</ref>.</p><p>-A task&lt;type&gt; library that supports call chains of tasks, returns control to the root task's caller when the leaf task is suspended, and resumes the entire call chain at the leaf task's suspension point, when the root task is resumed. We use this approach to add coroutines to an existing software project, Masstree.</p><p>An awaitable can choose whether to execute immediately or suspend. Because CPUs currently do not indicate whether a given address can be found in cache, we always suspend after prefetching an address. As suggested in <ref type="bibr" target="#b20">[22]</ref>, future processors could significantly reduce the overhead for addresses already in CPU cache by providing a conditional CPU branch instruction.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3.2">Interleaving with Coroutines</head><p>A recent research effort combines the advantages of GP (preserving the "semi-synchronous" programming model) and AMAC (de- Clang version 6.0.0 coupled execution) by using coroutines <ref type="bibr" target="#b20">[22]</ref>. With coroutines, developers only need to add suspend statements to an operation's synchronous implementation. The compiler then generates contextswitching code-i.e., it generates efficient code to save the coroutine's state at the suspension point and restore that state when the coroutine is later resumed. (Note that the coroutines defined in <ref type="bibr" target="#b20">[22]</ref> do not call other coroutines, which we show is possible, and is needed for most practical use cases.) In other words, while GP and AMAC require the developer to implement a state machine for interleaved operations, coroutines take that significant burden from the developer and hand it to the compiler.</p><p>In general, the coroutines approach is similar to AMAC because we interleave multiple coroutines at the same time. However, rather than transforming the operation ourselves into a state machine, with coroutines we just add a suspension point to the synchronous execution of the code after every prefetch. Then, the compiler ensures that the coroutine suspends itself, returning to the caller, which will resume the next suspended coroutine.</p><p>Algorithm 3 shows pseudocode for a coroutine-based implementation of a hash index probe. The main idea is similar to AMAC, where we set up a circular buffer to maintain each operation's state. In this case, the state is a coroutine, so we do not need to transform the operation into a state machine or manage its stages manually. Instead, we rely on the compiler to save each operation's state when the coroutine suspends itself. On initializing a new key probe, we initialize a coroutine and store it in the circular buffer. The coroutine has two suspension points (Lines 4 and 10), where the coroutine suspends itself and returns back to the caller. When a coroutine suspends itself, the caller will retrieve the next coroutine from the circular buffer and resume it. When a coroutine finishes its execution-i.e., it has found the matching key, or there are no more nodes to fetch-it returns back to the caller, allowing the caller to replace it with a new coroutine, for the next key probe.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">SIMPLE DATA STRUCTURES</head><p>In this section, we present our experimental evaluation comparing GP-, AMAC-, and Coroutines-based (Coro) approaches to hide memory stall latency for two widely-used, simple data structures: hash table and binary search on a sorted integer array. Our focus is on a quantitative comparison using throughput as our main metric. In Section 4, we also comment on qualitative aspects such as the impact of different approaches on developer's productivity.</p><p>We run all of our experiments on machines running Windows with identical hardware, as shown in Table <ref type="table" target="#tab_3">1</ref>. As coroutines are currently an experimental feature in two C++ compilers-MSVC and Clang-we conduct experiments with both to evaluate compiler differences. For all the experiments reported in this paper, we take an average of at least three runs. We use MM HINT NTA for the prefetch instruction, similar to previous work <ref type="bibr" target="#b16">[18,</ref><ref type="bibr" target="#b20">22]</ref>. We ex-  plored other prefetch hints, but found the performance difference to be insignificant on the simple data structures we examine.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Hash Table</head><p>The hash table is a universal data structure. Specifically, in database systems, hash tables are used to implement the popular hash-join and hash-group-by algorithms. Given the importance of hash tables, we start our experimental evaluation by examining the performance of probing a hash table under different prefetch-based (or interleaving) approaches to hide memory latency. For our experiments, we use a canonical implementation of a hash table that uses open hashing: i.e., we use separate chaining (implemented as a linked list) to handle collisions.</p><p>We use 4 byte integer keys and 100,000 buckets. Table <ref type="table" target="#tab_4">2</ref> presents the average size of our collision lists. Note that our hash table does not store duplicate keys, so the number of keys stored in the hash table is less than the input size. For these experiments, the payload size has little effect on performance, since it is fetched only once per operation, i.e., after the probe finds the matching key. We compare a na?ve implementation, with no prefetches, to GP, AMAC, and Coro. Our goal is not simply to reproduce the results in <ref type="bibr" target="#b16">[18]</ref>, but rather to expand the analysis from <ref type="bibr" target="#b16">[18]</ref> to an additional interleaving technique, coroutines, and a second compiler, Clang.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.1">Single Threaded, Varying Group Size</head><p>The goal of our first experiment is to understand how group (or batch) size affects the performance of prefetch-based approaches to hash probe. We also study how the distribution of keys used to build and probe the hash table affects performance, to establish how database operators like hash-join and hash-group-by will perform when presented with uniform or skewed workloads-common in practice. To isolate these effects, we run these experiments on a single thread. Figures <ref type="figure">1</ref> and<ref type="figure">2</ref> present results for the Clang and MSVC compilers, respectively, with group size on the x-axis and throughput, in million operations per second, on the y-axis.</p><p>Figure <ref type="figure">1</ref>(a) shows throughput for Clang using a small data set (0.5 MB) that fits entirely in L3 cache. This experiment uses uniform distribution for the build and probe phases. The results show that, when the hash table fits entirely in the CPU caches, all of the interleaving approaches performed worse than the na?ve approach. Na?ve is up-to 2.7x 2.9x, and 5.1x faster than GP, AMAC, and Coro, respectively. In this case, the extra instructions for prefetching and interleaving are pure overhead. Of the three interleaving approaches, GP performs the best, because GP has the lowest overhead, in terms of the state that it needs to maintain for interleaving, while AMAC outperforms Coro because Coro's instruction overhead is higher than AMAC's. (Each coroutine has its own coroutine frame, which, with current compilers, requires more bookkeeping than an AMAC state.) The optimal group size is around 3 for AMAC and Coro, and around 12 for GP, roughly the same as in <ref type="bibr" target="#b16">[18]</ref>.</p><p>Figure <ref type="figure">2</ref>(a) shows results for the same experiment, using MSVC. Na?ve throughput drops by 17%, and Coro performance is also lower. This illustrates an important point: when the workload is small enough to avoid memory stalls, the compiler makes a big difference.</p><p>Figures <ref type="figure">1(b</ref>) and 2(b) show the results with the small dataset, for Clang and MSVC, respectively, but now using Zipfian ("Zipf") distribution to build and probe the hash table, with Zipfian constant = 0.99. A Zipf distribution is skewed, with some keys more likely to be chosen than others, making the CPU caches much more effective; thus, we see an increase in the throughput for all approaches, although the results are otherwise similar to Figures <ref type="figure">1(a</ref>) and 2(a). Again, MSVC's na?ve performance is significantly lower than Clang's.</p><p>Figure <ref type="figure">1</ref>(c) presents the results for uniform distribution with Clang using a hash table with 10 million integers, which without duplicates is approximately 390 MB in memory-much bigger than L3 cache. In this case, all the "interleaving" approaches perform significantly better than the na?ve approach. Na?ve is slower by up to 7.5x, 8.4x, and 8.2x as compared to GP, AMAC, and Coro, respectively. Figure <ref type="figure">2</ref>(c) gives the performance with MSVC compiler. From both figures, we can see that the performance is similar to Clang although MSVC's Coro is slower than Clang's.   Although the distribution is uniform, this workload's access pattern is very skewed, since each hash bucket holds an average of 63 keys. Traversing a hash bucket involves a linear search through a linked list, so the number of prefetches per operations varies from 1 to 63. This skew hurts GP's performance, relative to the other two interleaving techniques, as originally reported in <ref type="bibr" target="#b16">[18]</ref>. It also causes throughput for all three interleaving approaches to continue to increase with the group size, well beyond a group size of 10.</p><p>Inequality 1 from <ref type="bibr" target="#b20">[22]</ref> relates optimal group size to computation, memory-stall, and context-switch durations, while Section 5.4.2 of <ref type="bibr" target="#b20">[22]</ref> discusses line-fill buffers. The CPUs we tested have 10 line-fill buffers <ref type="bibr" target="#b4">[5]</ref>, limiting outstanding memory accesses to 10. We note that Inequality 1 does not apply to our experiment, since its access pattern is skewed. Further, we observe that performance continues to increase even after all 10 line-fill buffers are used, because although the hash table and the first few buckets in every chain fit in L3, the remaining buckets do not. This means that some hash probes are satisfied from L3, while others must obtain one or more buckets from DRAM. Figures <ref type="figure">1(c</ref>) and 2(c) show that maximum interleaving performance is reached when there are &gt; 10 outstanding prefetches, because multiple prefetches from L3 will complete while waiting for one prefetch from DRAM. Using a large dataset with 10 million integers (120 MB in memory), with Zipf distribution, shown in Figures <ref type="figure">1(d</ref>) and 2(d), yields similar results. The difference is that the skew is now more pronounced, since the CPU caches now hold buckets for the most popular keys.</p><p>In Figures <ref type="figure">1</ref> and<ref type="figure">2</ref>, Coro performs significantly worse on MSVC than on Clang. We attribute this difference to the differences in compiler support for generating coroutines code. More specifically, these results show that Clang compiler generates better optimized code for Coro, as compared to the MSVC compiler. We believe MSVC's coroutines specific optimizations are less mature, at the time of this writing, and are expected to improve.</p><p>To pinpoint the source of overhead for na?ve, we show a microarchitectural analysis using Intel VTune for MSVC in Figure <ref type="figure" target="#fig_3">5</ref>. We use a methodology similar to that described in <ref type="bibr" target="#b20">[22]</ref>. Figure <ref type="figure" target="#fig_3">5</ref> presents percentage of CPU cycles spent on each stage of the instruction pipeline. In particular, "Memory" denotes the percentage of CPU cycles wasted because the CPU was waiting for data to arrive from main memory. For the large dataset, for both uniform and Zipf, na?ve is bounded by main memory accesses. For GP, AMAC, and Coro, CPU stalls due to main memory accesses were significantly less, showing the effectiveness of these approaches.</p><p>In summary, this experiment shows that GP, AMAC, and Coro improve hash probe throughput, under uniform and Zipf distributions, due to reduced CPU stalls (Figure <ref type="figure" target="#fig_3">5</ref>). The GP approach suffers when using Zipf distribution due to the irregular access pattern. And finally, the Clang compiler generates more efficient code for the Coro approach. We see this consistently in all the results presented throughout the paper.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.2">Scalability with Number of Threads</head><p>In this next experiment, we want to study the scalability properties of these different approaches for hash probes. Based on the results of the previous experiment, we chose a group size of 30, per thread, for all the prefetch-based approaches. We chose this group size not because it is optimal, but because Figures <ref type="figure">1</ref> and<ref type="figure">2</ref> show that performance is insensitive to group size around 30. The optimal group size depends on the workload, which is generally not known in advance. We varied the number of threads from 2 to 28 using up-to 14 physical cores, with two hardware threads per core. We used the large dataset from the previous experiment with uniform and Zipf distributions.</p><p>We present the results in Figure <ref type="figure">3</ref>. For all these figures, we present the number of threads on the x-axis, and the per-thread throughput on the y-axis. These figures show that performance scales almost linearly with the number of threads, for na?ve and the three interleaving approaches, although MSVC, Zipf shows a drop in AMAC performance between 14 and 16 hardware threads. This  means that the advantages of interleaving apply even when using more than a single thread. For both Clang and MSVC, all three interleaving approaches maintain a significant advantage over na?ve.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.3">Varying Input Size</head><p>The goal of our next experiment is to study the impact of data size on throughput of various approaches. We varied the size of the hash table from 1 million to 50 million records, and used uniform and Zipf distribution to build and probe the hash index. We fixed the number of threads at 28, with 30 groups per thread. Figure <ref type="figure">4</ref> shows our results, with the number of records on the x-axis, and total throughput on the y-axis.</p><p>Figure <ref type="figure">4</ref>(a) presents the results using Clang for uniform distribution. At 1 million keys, na?ve has fully exhausted L1D, L2, and L3 caches; so prefetching is sometimes profitable. This is why AMAC and GP are faster than na?ve by about 1.5x and 1.3x, respectively. Coro performs similarly to na?ve, because its contextswitching overhead outweighs its prefetching benefits, since most probes can be fulfilled by L3 cache. At 5 million keys and higher, all three interleaving approaches significantly outperform the na?ve approach since most probes go to DRAM. Figure <ref type="figure">4</ref>(c) is similar.</p><p>Using a skewed distribution, as shown in Figures <ref type="figure">4(b</ref>) and 4(d), makes prefetching less profitable, since popular keys are already in the CPU caches. And similar to the case when all the data fits in the CPU caches, we pay the overhead of interleaving without getting any benefit. For example, Coro with the MSVC compiler, at 5M records, Zipf distribution, is slower than the na?ve approach, while the other two interleaving approaches are faster.</p><p>In summary, this experiment shows that the advantages of hiding memory stall latency during hash probe hold over a range of data sizes. At smaller scales, interleaving approaches represent pureoverhead, but as the data sizes grow out of the CPU caches, they provide a significant performance boost over the na?ve approach. When using the Clang compiler, AMAC and Coro continue to be the most performant. This shows that, by using Coro, we can reap most of the performance benefits of the AMAC approach while maintaining very high developer productivity.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Binary Search</head><p>We now present our results with different approaches for binary search over a sorted integer array (4-byte keys), without duplicates. For all the experiments, we fill the sorted arrays with sequentiallygenerated keys. We present results using both uniform and Zipf distributions to generate search keys. Our experimental methodology follows the same pattern as for the hash probe results presented in the previous section. We use an integer array of size 0.5 MB and 1 GB for the small and large dataset, respectively. We used a hybrid, branching binary search implementation, where the loop body contains an equality test, allowing for early exit. That test almost always evaluates to false, making the branch highly predictable. We intend the comparison (&lt; vs. &gt;) to compile into a conditional move, as in <ref type="bibr" target="#b20">[22]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.1">Single Threaded, Varying Group Size</head><p>To study the impact of varying group size on binary search throughput, we conduct an experiment with varying group size using a single thread. Figures <ref type="figure">6</ref> and<ref type="figure" target="#fig_5">7</ref> present the results of these experiments compiled with Clang and MSVC compilers, respectively. In all of these figures, we present the group size on the x-axis and the throughput, in million operations per second, on the y-axis.</p><p>Consider Figure <ref type="figure">6</ref>(a), which shows the throughput of binary search using the Clang compiler with a small uniformly distributed data set. This data set is small enough (0.5 MB) that it fits entirely in CPU caches. When the integer array fits entirely in the CPU caches, for all group sizes, the interleaving approaches perform worse than the na?ve approach, because the cost of interleaving outweighs the benefits of prefetching memory from L3 cache. Na?ve is up to 1.4x, 1.4x, and 1.8x faster than GP, AMAC, and Coro, respectively. Similar to hash probe, overall, GP performs the best among the interleaving approaches, since it has the lowest overhead as mentioned in <ref type="bibr" target="#b20">[22]</ref>. Figure <ref type="figure" target="#fig_5">7</ref>(a) shows the result of this experiment with MSVC. In this case, na?ve is up to 1.7x, 1.9x, and 1.9x faster than GP, AMAC, and Coro, respectively. Another notable difference is that Coro now performs worse than AMAC due to inefficiencies in the MSVC compiler.</p><p>Even more notable, the na?ve approach compiled by MSVC is much faster than compiled by Clang for small uniform and Zipf datasets, but much slower for large uniform and Zipf datasets. The MSVC compiler generates a highly-predictable branch and a conditional move, as we intended, but the Clang compiler generates a second, unpredictable branch, instead. For binary search, the choice of compiler can make a big difference. While na?ve and   Coro performance vary between the two compilers, AMAC performance does not-the two compilers generate similar AMAC code.</p><p>Figures <ref type="figure">6(b</ref>) and 7(b) show results with the small dataset but now using Zipf distribution for generating the search keys. Since a Zipf distribution means that search keys are likely to be in L1D or L2 cache, the relative advantage of prefetching is much lower than for a uniform distribution, causing the interleaving approaches to perform much worse than the na?ve approach. Now moving onto a 1 GB dataset, which is much larger than L3 cache, Figure <ref type="figure">6</ref>(c) and 7(c) show that all the interleaving approaches perform significantly better than the na?ve approach, when using a uniform distribution. Also, the optimal group size is around 8-12 groups, roughly confirming the results in <ref type="bibr" target="#b20">[22]</ref>.</p><p>When using a large dataset with Zipf distribution with Clang, shown in Figures <ref type="figure">6(d</ref>) and 7(d), Clang na?ve performance is within 25% of Clang's Coro and AMAC, while MSVC na?ve performance is around half of MSVC's AMAC. As discussed above, MSVC and Clang compile our na?ve approach into very different code.</p><p>GP shows better performance than the other interleaving techniques, because the access pattern of binary search is not heavily skewed: half of the sorted array's keys are in the binary search tree's leaf level, a quarter are in the next level up, and so on. GP performance increases beyond a group size of 15, because the Zipf distribution means that where a key sits in the memory hierarchy is heavily skewed.</p><p>The micro-architectural analysis presented in Figure <ref type="figure" target="#fig_8">9</ref> also confirms that for large data set, na?ve is memory bound 85% of the time, while GP, AMAC, and Coro are memory bound for only 7%, 8%, and 25%, respectively, showing their effectiveness.</p><p>In summary, this experiment shows that all three approaches to hide memory stall latency improve binary search throughput, when the data does not fit in the CPU caches, under both uniform and Zipf distributions. Also, interestingly, na?ve performs really well when the search keys are generated using a Zipf distribution. Using Zipf effectively reduces the working set size, resulting in a more effective utilization of the CPU caches.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.2">Scalability with Number of Threads</head><p>We next study how different approaches scale for binary search. Based on the results of the previous experiment, we fix a group size of 20 per thread for all approaches. This is not the optimal group size-which varies between 5, for GP on a small, uniform and 30, for GP on a large, Zipf dataset-but rather a point at which performance is insensitive to changes in group size. We vary the number of threads from 2 to 28 using up to 14 physical cores, with two hardware threads each. We use the large dataset with uniform and Zipf distributions. Figure <ref type="figure" target="#fig_7">8</ref> shows the results, with number of threads on the x-axis, and per-thread throughput on the y-axis.</p><p>Focusing on the results presented in Figure <ref type="figure" target="#fig_7">8</ref>(a), using Clang with uniform distribution, we see that all the approaches scale nicely with increasing threads. And na?ve is up to 2.4x, 2.3x, and 2.2x slower as compared to GP, AMAC, and Coro respectively. When using Zipf distribution, shown in Figure <ref type="figure" target="#fig_7">8</ref>(b), na?ve performs similar to AMAC while performing roughly 20% faster than Coro. The reason is that the Zipf distribution utilizes CPU caches much more effectively, as noted earlier.</p><p>MSVC results for this experiment are presented in Figures <ref type="figure" target="#fig_7">8(c</ref>) and 8(d) for uniform and Zipf distribution, respectively. For the uniform dataset, Coro is on average 36% and 28% slower than AMAC, and GP, respectively. For the Zipf case, Coro is on average 10.4%, 46.8%, and 41% slower than na?ve, AMAC, and GP, respectively. We believe that this behavior is mainly caused by both: (1) suboptimal support of coroutines in MSVC and (2) effectivenes of CPU caches with Zipf distribution.</p><p>In summary, this experiment shows that for Clang, all the approaches scale nicely with the number of threads, and maintain a significant advantage over the na?ve case for the uniform case.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.3">Varying Input Size</head><p>The goal of our next experiment is to study the impact of data size on binary search throughput. More specifically, we aim to highlight the cross-over point at which the data goes from being able to fit entirely in CPU caches to having to spill to DRAM, and how that impacts throughput. We vary the size of the integer array from 0.5 MB to 2 GB, and use uniform and Zipf distribution. We fix the number of threads to 28, with 20 groups per thread. Figure <ref type="figure" target="#fig_9">10</ref> shows the results, with the size of the sorted integer array on the x-axis (log scale), and the total throughput on the y-axis.</p><p>Figure <ref type="figure" target="#fig_9">10</ref>(a) presents the results using Clang for uniform distribution. At 0.5 MB, unsurprisingly, na?ve is the fastest and is about 1.4x, 1.7x, and 1.9x faster than GP, AMAC, and Coro, respectively. At this point, around half of the array-i.e., all but the leaf level of the binary search tree-can fit in L2 cache. However, we see a performance drop from na?ve at 2 MB, where the last two levels of the binary search tree no longer fit in L2 cache. Na?ve continues to be slightly faster than the interleaving approaches so long as the dataset fits in L3 cache-which, on our machines, is 35 MB per socket. Therefore, as expected, we see a cross-over point between 32 MB and 64 MB. After the cross-over point, na?ve is on average 2.2x, 2.1x, and 1.9x slower than GP, AMAC, and Coro, respectively. Starting at 4 MB, GP continues to outperform all other approaches, before and after the cross-over point. This confirms the results reported for GP being the best overall approach for binary search in <ref type="bibr" target="#b20">[22]</ref>. As noted there, binary search is the best case for GP since all the different "interleaved" executions execute the same code path, which reduces the number of executed instructions. Further, in this case GP's overhead is minimal as the state that needs to be maintained is negligible. When using a Zipf distribution, as shown in Figure <ref type="figure" target="#fig_9">10</ref>(b), at 0.5 MB, na?ve outperforms GP, AMAC, and Coro, by 2.2x, 2.6x, and 3.6x, respectively. However in this case, na?ve is able to maintain its performance for most of the array sizes where GP and AMAC are only able to outperform na?ve when the array size is larger than 256 MB and 1 GB, respectively. Meanwhile, Coro is unable to outperform na?ve even with an array size of 2 GB. Again, this is because CPU caches become much more effective with Zipf distribution, thus, benefiting na?ve.</p><p>Once again, MSVC shows mixed results for this experiment as presented in Figures <ref type="figure" target="#fig_9">10(c</ref>) and 10(d) for uniform and Zipf distribution, respectively. With uniform distribution, as expected, we see na?ve's throughput drop after the cross-over point. In the case of Zipf distribution, the performance of every approach with MSVC follows our findings with the ones in Clang.</p><p>In summary, this experiment highlights the impact of varying data sizes on binary search with different approaches. We see a clear cross-over point from all data fitting in CPU caches to spilling to DRAM. We show how throughput for different approaches is impacted before and after the cross-over point with uniform distribution. At smaller scales, "interleaving" approaches represent pureoverhead, but as the data sizes grow out of the CPU caches, they provide a significant performance boost over the na?ve approach. Meanwhile, na?ve is able to perform well even when the entire array does not fit in the CPU cache in the case of Zipf distribution. The reason is that most probes will only access certain part of the array, which makes CPU caches become more effective.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">COMPLEX DATA STRUCTURES</head><p>In this section, we show how to modify two widely-used complex data structures, Masstree in Section 4.1 and Bw-tree in Section 4.2, to incorporate coroutines in their complex code-bases. In doing so, our goal is to highlight the qualitative advantages of using a coroutines-based approach in practice. Further, we evaluate the effectiveness of interleaving to hide memory stall latency for Masstree and Bw-tree using the same methodology and experimental setup used in the previous sections.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Masstree</head><p>Masstree is a high-performance, in-memory, key-value store. Masstree splits keys into 8-byte chunks and stores each chunk in a B+-tree. Each B+-tree node is a few CPU cache lines in size. Masstree prefetches each node before processing it, and each node is small enough that Masstree will touch all of the prefetched cache lines when it actually processes the node. (Note that Masstree prefetches using MM HINT T0, which prefetches memory into all three levels of the CPU cache, rather than MM HINT NTA; this distinction matters to the NUMA results we discuss in Section 4.1.2.) By prefetching each node, Masstree can effectively execute instructions for free while waiting for the node to be prefetched. The problem is finding useful instructions to execute: the current node cannot be processed until it is available in the CPU cache, and the next node cannot be prefetched until the current node is processed. This problem is not specific to Masstree-it is fundamental to all B+-trees-but it makes Masstree (and any B+-tree) a good candidate for coroutines. Coroutines provide an easy, inexpensive way to get more useful instructions to execute, by interleaving multiple top-level get() or put() operations on the same hardware thread.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.1">Adding coroutines to Masstree</head><p>Masstree is written in C++ and makes extensive use of C++ templates. Masstree implements a top-level get() or put() operation over several small template functions, with different template parameters, defined inside several header files. Organizing the code in this modular way makes it easy to read and modify, while the C++ compiler will inline these small template functions, generating a fast executable.</p><p>Existing research on coroutines for hiding memory stalls <ref type="bibr" target="#b20">[22]</ref> focused on turning a single function into a coroutine, but adding coroutines to Masstree requires either <ref type="bibr" target="#b1">(1)</ref> rewriting Masstree so that it uses a single, large function rather than many small, modular, functions; or (2) suspending and resuming an entire call chain of coroutines. The first option is infeasible: it would require substantial developer resources to de-modularize Masstree, and the resulting code would be much harder to understand and maintain.</p><p>We chose the second option. To add coroutines to Masstree, we implemented a new task&lt;type&gt; class (based on the same principles as <ref type="bibr" target="#b3">[3]</ref>) and replaced the default suspend always class. Our task&lt;type&gt; class allows a function of return type T to be mechanically turned into a coroutine of return type task&lt;T&gt;, where each coroutine can co await calls to other task&lt;type&gt; coroutines. When the leaf task in a call chain is suspended, control returns to the root task's caller-in our case, a benchmark driver executing a simple round-robin scheduler. Then the driver can do other work, such as resuming another coroutine.</p><p>Eventually, the driver will resume the suspended root task, which will actually resume the leaf task at its suspension point. The leaf task maintains a pointer to its caller, so when it exits (using co return), its caller will resume. Our benchmark driver reads the result off a root task if it has exited, and resumes it otherwise.</p><p>Using our task&lt;type&gt; class, we turned the relevant Masstree functions into nestable coroutines. This process is fairly simple:</p><p>? We added a suspension point (i.e., co await suspend always;) after every prefetch. This turns functions that prefetch into coroutines. ? For every function (except the driver) that calls a coroutine, we inserted keyword co await between the function call and its result. This turns callers into coroutines.  ? We changed the return type of every function that we turned into a coroutine from type T to task&lt;T&gt;. ? For every function that we turned into a coroutine, we replaced keyword return in its definition with co return. We also modified our benchmark driver so that each thread maintains an array of tasks, resuming each in turn. Adding coroutines to Masstree and modifying our benchmark driver took us around three developer hours. We compiled the result using Clang. Benchmarks Setup. To see what effect coroutines had on Masstree performance, we ran the YCSB-B benchmark (95% reads, 5% writes) on 8-byte keys, with 8-byte values, using YCSB's Zipf distribution, where the distribution of read and write keys is skewed. We used a database of 250 million records.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.2">Vary Group Size</head><p>Every workload will have a sweet spot of in-flight operations, where there are enough coroutines to cover memory latency from the slowest relevant level of the memory hierarchy, but not so many that they spill out of CPU cache. Since we are using a Zipf distribution, Masstree's leaf nodes that hold popular keys will be in one of the CPU caches (which level of CPU cache depends on how popular they are), while unpopular leaf nodes will have to be loaded from DRAM. The Zipf distribution's skew means that the optimal group size will be &gt; 10, the number of line-fill buffers, since we can execute several prefetches from L3 cache while waiting for one prefetch from DRAM to complete.</p><p>In Figure <ref type="figure" target="#fig_11">11</ref>(a) we vary the group size from 1 to 50 coroutines per thread, on a single hardware thread. The coroutines approach is able to achieve 3x the performance of an unmodified Masstree, with a group size of 30 to 50 coroutines per thread.</p><p>In Figure <ref type="figure" target="#fig_11">11</ref>(b), we vary the group size from 1 to 200 coroutines per thread, on a full, single CPU. (The CPU has 14 cores, and we use all 28 of its hardware threads.) With coroutines, Masstree performance improves by 1.7x to 1.8x, from 12 to 200 coroutines per thread. Figure <ref type="figure" target="#fig_11">11(c)</ref> shows the effects of non-uniform memory access (NUMA), as we fully use two CPUs. In this case, we see a local maximum at 12 coroutines per thread, with 1.4x the performance of an unmodified Masstree. Using 12 coroutines per thread hides memory latency within a single NUMA node. But we also see performance increasing to 1.6x to 1.7x beyond 150 coroutines per thread.</p><p>NUMA extends the trade-off one makes when varying the number of coroutines per thread. We used Intel VTune to explore this trade-off further; see Figure <ref type="figure" target="#fig_0">12</ref>. Going from an unmodified Masstree to one that uses 30 coroutines per thread reduces the CPU time per operation by 27%, most of which can be attributed to reduced time spent accessing the CPU cache and DRAM. Going from 30 coroutines to 200 coroutines reduces the CPU time per operation by an additional 19%. As the chart shows, L2 and L3 stalls increase as DRAM stalls decrease. Because we have more coroutines, state is forced out of L1 cache into L2 and L3-but we are able to hide more DRAM latency, resulting in a net win. (Had Masstree prefetched using MM HINT NTA, rather than MM HINT T0, state forced out of L1 cache would have been evicted to DRAM, and we would not have seen a performance gain at 200 coroutines. The optimal hint, in this case, would have been MM HINT T1, since our group size is large enough that the data we prefetched won't fit in L1 cache anyway, but we intentionally made no modifications to Masstree beyond adding coroutines.)  <ref type="bibr">11(d)</ref> shows performance on a single CPU as the number of hardware threads ranges from 2 to 28. The threads are pinned so that every 2 threads fill a CPU core. Adding coroutines to Masstree yields performance between 1.7x (at 26 threads) and 2.1x (at 4 threads) that of an unmodified Masstree. The performance gain is still significant at 28 hardware threads, fully using all 14 cores of our test CPU. The stair-step "Coro" curve shows the interaction between coroutines and hyper-threading, which allows the CPU to schedule two hardware threads using the same CPU core. Hyperthreading gives some of the benefits of coroutines, and vice versa, but combining both yields the best overall performance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.3">Scalability with Number of Threads</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Bw-tree</head><p>The Bw-tree is a latch-free B+-tree originally proposed by Microsoft Research <ref type="bibr" target="#b17">[19]</ref>, that has since been deployed in several Microsoft products and adopted by open source projects <ref type="foot" target="#foot_1">2</ref> . In this section, we evaluate the different interleaving approaches, using the Bw-tree as a representative of a class of highly-efficient, hardwareconscious B+trees. We tried adding coroutines to the Bw-tree in two different ways.</p><p>Our first approach was similar to AMAC, in that we moved all get(key) logic into a single function. Since the Bw-tree spends a significant amount of time stalled waiting for deltas to be brought into CPU cache, we modified our single get() function to suspend after prefetching the next delta.</p><p>Our second approach was to modify the Bw-tree the same way we modified Masstree, which we believe would perform significantly better than the first. However, we ran into a compiler bug in MSVC that prevents us from evaluating it; and, due to various dependencies, we were not able to compile the Bw-tree with Clang.</p><p>Unlike with Masstree, we also spent significant effort to add AMAC and GP to the Bw-tree. As an example, the resulting AMAC code has 10 stages, and does not look anything like the original, non-interleaved code we started with. Our first coroutines approach is a lot more readable, mostly resembling the noninterleaved code. This, once again, demonstrates the developer productivity benefits of coroutines, when applying interleaving techniques to state-of-the-art data structures. We next present our results for Bw-tree using MSVC on Windows, using our first coroutines approach. We prefill the Bw-tree with 25 million records, each of which has an 8-byte key and an 8-byte value. We then run a random read write workload for 30 seconds, with 95% reads, 5% updates, using a uniform distribution, and measure the throughput. Each data point reported is an average of 3 runs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.1">Varying Group Size</head><p>In the first experiment, we want to study the impact of varying group size on throughput, first using a single thread and later expanding it to multi-threaded tests. For the figures in this section, we present the different group sizes on the x-axis, and the y-axis shows the throughput in million operations per second.</p><p>Figure <ref type="figure" target="#fig_13">13</ref>(a) presents the single-threaded results. For the single group case, as expected, na?ve is 1.3x, 1.06x, and 1.1x faster than GP, AMAC, and Coro, respectively. The reason is that interleaving only adds additional overhead without giving any benefits with a group size of 1. For group sizes &gt;2, na?ve is up-to 1.4x, 1.5x, and 1.3x slower than GP, AMAC, and Coro, respectively. Overall, AMAC is the fastest and is 1.43x, 1.15x, and 1.22x faster on average than na?ve, GP, and Coro. As we have seen from both the hash probe and binary search experiments, we believe that the Coro approach, if optimized properly by the compiler, can achieve at least as much performance as the AMAC approach, without the added code complexity.</p><p>Figure <ref type="figure" target="#fig_13">13</ref>(b) presents the results with 28 threads, and varying group sizes. In this case as well, AMAC beats all the other approaches and is 1.24x, 1.15x, and 1.17x faster on average than na?ve, GP, and Coro, respectively. But as noted in the singlethreaded case, given that AMAC is able to improve the throughput of Bw-tree by up-to 50% than na?ve, we believe that the Coro approach can match that performance once the MSVC compiler issues are resolved.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.2">Scalability with Number of Threads</head><p>Figure <ref type="figure" target="#fig_13">13</ref>(c) presents the result of an experiment with varying number of threads from 1 to 28. We fix the group size per thread to 12 for all approaches, based on the results from the previous section. We see that GP, AMAC, and Coro scale better than na?ve. And once again AMAC beats all the other approaches, by achieving an average of 1.5x, 1.1x, and 1.2x speedup over na?ve, GP, and Coro, respectively.</p><p>In summary, for a state-of-the-art Bw-tree implementation, overall, AMAC performs the best, beating na?ve by up-to 1.7x. This shows the potential of interleaving approaches to improve throughput for an already highly-optimized, hardware-conscious B+-tree. Notably, the Coro approach lags behind due to compiler issues. However, given the high performance of coroutines generated by the Clang compiler, as seen in the Masstree experiments, we expect to see similar gains for Bw-Tree.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">DISCUSSION</head><p>The effectiveness of software prefetching relies on being able to do other work between the time when memory is prefetched and when it is read. In some cases (for example, when traversing an inmemory data structure-such as during a binary search or a hash join) data dependencies within an operation mean that there is no other work to do. Because subsequent CPU instructions, within the same traversal operation, need to read the memory that was prefetched, the CPU ends up stalling on the memory read after executing only a handful of instructions. In these cases, software prefetching works, and incrementally improves performance, but ultimately there is not enough distance between the prefetch and the fetch for it to have a large impact.</p><p>All of the techniques examined in this paper address this fundamental problem by performing several traversal operations simultaneously or by "interleaving". By doing so, the CPU can issue the next prefetch, for the next traversal operation, while waiting for the current prefetch to complete. One question is whether the requirement to "batch" multiple operations to exploit these techniques is realistic. Generally, in multi-tenant cloud environments, where many modern (database) systems operate, it is possible to batch requests from multiple users and exploit interleaving to improve overall system performance. More specifically, in <ref type="bibr" target="#b20">[22]</ref>, the authors present index joins for executing IN-predicate queries in SAP HANA as another example, where the values in the IN-predicate list are synonymous with a multi-get operation against the index. Batching is also common in other parts of a database engine. For example, some database systems already have a batch (instead of a tuple-at-a-time) interface between the query processing engine and the storage engine, which can be exploited for interleaving.</p><p>Another, inexpensive, way to hide memory latency is to make use of hardware threads provided by the CPU. In this paper, we used Intel CPUs, which offer only two hardware threads per CPU core. However, our experiments show that performance improves significantly, beyond two hardware threads, when we use coroutines. In other words, two hardware threads are not enough to hide memory latency for the workloads we tested. Using coroutines requires slightly more programmer effort than simply enabling (hardware or software) threads, but-as this paper and previous work <ref type="bibr" target="#b20">[22]</ref> show-much less effort than a hand-rolled solution (GP or AMAC). In summary, coroutines offer a performance improvement, on widely-used CPUs, beyond two hardware threads with a fraction of the development effort.</p><p>This paper and previous work <ref type="bibr" target="#b16">[18,</ref><ref type="bibr" target="#b20">22]</ref> show that using interleaving approaches significantly improves performance. Also, by using even a relatively small group size, one can achieve most of the performance benefit from interleaving approaches. We further note that the improvement can be overstated, on x64 CPUs, by disabling hyper-threading. We have shown in this paper that coroutines, in particular, improve performance significantly even when taking advantage of hyper-threading. Previous work <ref type="bibr" target="#b20">[22]</ref> analyzes the impact of cache misses in detail, including TLB misses; we refer the interested reader to that paper for a detailed microarchitectural analysis of software prefetching using coroutines, and to <ref type="bibr" target="#b13">[15]</ref> for an excellent background on prefetching in general. Note that <ref type="bibr" target="#b20">[22]</ref> ran experiments on Intel's Haswell architecture, while we ran experiments on the successor architecture, Broadwell-and Kaby Lake CPUs are now available. There may be some differences in performance depending on the architecture used, which is to be expected.</p><p>We also note that previous work <ref type="bibr" target="#b20">[22]</ref> has focused on MSVC's implementation of coroutines, but now a newer, more mature, implementation is available in Clang. In this paper, we compared MSVC coroutines to Clang coroutines and found that the latter currently offers much better performance (more below). It would be useful to repeat these experiments once MSVC improves optimizations specific for coroutines, which is a work in progress. As our results show, particularly for the na?ve implementations, performance depends on the choice of compiler. And although we did not report them in this paper, we also ran all of our experiments with Clang on Linux, where performance was similar to Clang on Windows, but Coro was roughly 10% faster in that case.</p><p>In Section 3.1 and 3.2 we showed the benefits of the different interleaving approaches for simple data structures. Further, in Section 4.1, we showed that adding coroutines to Masstree-which is a relatively complex data structure-improved performance significantly, both on a single CPU and across NUMA. Adding coroutines to Masstree was straightforward and did not negatively affect the Masstree code base. To do this, we implemented a simple task&lt;T&gt; class, modeled on the similar class in C#. Using the task&lt;T&gt; class allowed us to suspend and resume chains of nested function calls, rather than just a single function. To the best of our knowledge, we are the first to demonstrate the use of coroutines for chains of nested function calls, which are common in practice.</p><p>Another practical consideration is the interaction between the coroutines-based code and existing components, such as a scheduler, of a (database) system. Our benchmark driver uses a simple round-robin scheduler. As a practical example, previous work <ref type="bibr" target="#b20">[22]</ref> has already shown how to incorporate coroutines in SAP HANA to speedup IN-predicate queries. Furthermore, that work shows how simple "sequential" and "interleaved" schedulers can be implemented to run code sequentially or with coroutines (interleaved). The main idea is that when the expected benefit of interleaving is small, e.g., when there is not enough work to overlap, a sequential execution performs better. A key advantage of the coroutines-based approach is that by simply passing in an additional flag (true or false) to the index lookup operation, the same code can be made to run sequentially or interleaved, thus minimizing the impact on the rest of the system. This would not have been possible for AMAC or GP, since they require an almost complete rewrite of the code.</p><p>Last, Table <ref type="table" target="#tab_5">3</ref> shows the maximum performance gain of a particular approach was able to achieve for a given data structure and compiler combinations in comparison to naive. We present the most important highlights below:</p><p>High Efficiency, High Developer Productivity: In terms of performance, the coroutines-based approach matches the performance of the AMAC-based approach when using Clang. Meanwhile, Coro beats na?ve by up-to 3.2x in our Masstree experiment, with a trivial code change. This proves that for a wide variety of scenarios, we can reap all the benefits of "interleaving" and prefetching, without sacrificing developer productivity.</p><p>Performance Gains vs. Data Structure: Software prefetching significantly improves performance in all the scenarios we considered. However, the performance gain varies by data structure. For hash probe, binary search, Masstree, and Bw-tree we see a speedup of up-to 8.4x, 3.5x, 3.2x, and 1.7x, respectively, over na?ve.</p><p>Compiler Support for Coroutines: As shown, coroutines support in the two popular compilers, namely Clang and MSVC, is not equally mature. Our results show that, in terms of its relative performance to other interleaving approaches, Clang-compiled Coro performs better than the MSVC. We draw two conclusions: (1) Clang's Coro performance proves that getting good performance (over hand-coded, hand-tuned AMAC code) is possible with compiler support, and (2) we are in early days for coroutines in C++. As the coroutines proposal for C++20 moves forward, making coroutines more main-stream, we expect the quality of coroutine code generation and the availability of coroutine libraries to improve. Therefore, we expect that Coro will be able to match or exceed the performance of handcrafted interleaving solutions, in the future.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">CONCLUSION</head><p>In this work, we started with the goal of implementing and evaluating coroutines-based data structures to hide memory stall latency. We presented an in-depth evaluation of coroutines-based approaches for hash probe, binary search, Masstree, and Bw-tree. We compared no-prefetch (na?ve) with existing state-of-the-art software prefetching approaches namely GP and AMAC. We show that all of these approaches perform significantly better than the na?ve approach. In some cases (e.g., hash probe), these approaches are better by a factor of 8. We also confirm that with coroutines, in most cases, we can match or beat the performance of hand-written, hand-tuned AMAC (or GP) code at a tiny fraction of the development cost. And our implementation and evaluation verify the applicability of coroutines-based approaches across simple and complex data structures. Further, to the best of our knowledge, we are the first to demonstrate multi-function coroutines, and to evaluate the effectiveness of coroutines to hide memory latency when hyperthreading is turned on and across NUMA nodes. Finally, we summarized our findings, which provide a guideline for system builders to exploit coroutines in designing highly efficient systems.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :Figure 2 :</head><label>12</label><figDesc>Figure 1: Clang Hash Index Probe 1 Thread Varying Group Size</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :Figure 4 :</head><label>34</label><figDesc>Figure 3: Hash Index Probe Varying Number of Threads with 30 Groups, Large Dataset</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Hash Probe Microarchitectural Analysis</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>Figure 6: Clang Binary Search 1 Thread Varying Group Size</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: MSVC Binary Search 1 Thread Varying Group Size</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Large Binary Search Varying Number of Threads with 20 Groups, Large Dataset</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Binary Search Microarchitectural Analysis</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Binary Search Varying Input Size with 20 Groups, 28 Threads</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Masstree Experiments</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure</head><label></label><figDesc>Figure 11(d)  shows performance on a single CPU as the number of hardware threads ranges from 2 to 28. The threads are pinned so that every 2 threads fill a CPU core. Adding coroutines to Masstree yields performance between 1.7x (at 26 threads) and 2.1x (at 4 threads) that of an unmodified Masstree. The performance gain is still significant at 28 hardware threads, fully using all 14 cores of our test CPU. The stair-step "Coro" curve shows the interaction between coroutines and hyper-threading, which allows the CPU to schedule two hardware threads using the same CPU core. Hyperthreading gives some of the benefits of coroutines, and vice versa, but combining both yields the best overall performance.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 13 :</head><label>13</label><figDesc>Figure 12: Masstree Microarchitectural Analysis</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 1 :</head><label>1</label><figDesc>Experimental Setup</figDesc><table><row><cell>Processor</cell><cell>Intel Xeon E5-2690 v4</cell></row><row><cell># of Sockets</cell><cell>2</cell></row><row><cell># of Cores</cell><cell>28 @ 2.60 Ghz</cell></row><row><cell>L1 I/D Cache (per Core)</cell><cell>32 KB/32 KB</cell></row><row><cell>L2 Cache (per Core)</cell><cell>256 KB</cell></row><row><cell>L3 Cache (per Socket)</cell><cell>35MB</cell></row><row><cell>DRAM</cell><cell>256GB</cell></row><row><cell>OS</cell><cell>Windows Server 2016 Data Center</cell></row><row><cell></cell><cell>Microsoft Visual Studio</cell></row><row><cell>Compilers</cell><cell>Enterprise 2017 (version 15.4)</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2 :</head><label>2</label><figDesc>Average Number of Records Per Hash Bucket</figDesc><table><row><cell>Input Size</cell><cell>Uniform</cell><cell>Zipf</cell></row><row><cell>0.13M keys (small)</cell><cell>0.83</cell><cell>0.32</cell></row><row><cell>1M keys</cell><cell>6.33</cell><cell>2.23</cell></row><row><cell>5M keys</cell><cell cols="2">31.60 10.45</cell></row><row><cell>10M keys (large)</cell><cell cols="2">63.21 20.33</cell></row><row><cell>50M keys</cell><cell cols="2">316.04 95.90</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 3 :</head><label>3</label><figDesc>Maximum Improvement over Na?ve</figDesc><table><row><cell></cell><cell>Compiler</cell><cell cols="3">Technique GP AMAC Coro</cell></row><row><cell>Hash Probe</cell><cell>Clang MSVC</cell><cell>7.5 7.8</cell><cell>8.4 8.5</cell><cell>8.2 7.3</cell></row><row><cell>Binary Search</cell><cell>Clang MSVC</cell><cell>2.1 3.1</cell><cell>2.3 3.5</cell><cell>2.3 2.6</cell></row><row><cell>MassTree</cell><cell>Clang</cell><cell>-</cell><cell>-</cell><cell>3.2</cell></row><row><cell>Bw-tree</cell><cell>MSVC</cell><cell>1.7</cell><cell>1.7</cell><cell>1.4</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>Stackful coroutines are up to 93% slower than stackless coroutines on Windows.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>Available for download at: https://github.com/ cmu-db/peloton/tree/master/src/index</p></note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>References</surname></persName>
+		</author>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<ptr target="https://clang.llvm.org/" />
+		<title level="m">The Clang project</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Iso</forename><surname>Coroutines</surname></persName>
+		</author>
+		<ptr target="https://www.iso.org/standard/73008.html" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Cppcoro</surname></persName>
+		</author>
+		<ptr target="https://github.com/lewissbaker/cppcoro" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<ptr target="https://software.intel.com/sites/default/files/managed/9e/bc/64-ia-32-architectures-optimization-manual.pdf" />
+		<title level="m">Intel 64 and IA-32 architectures optimization reference manual</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Programming languages-C++ extensions for coroutines. proposed draft technical specification ISO/IEC DTS</title>
+		<ptr target="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/n4680.pdf" />
+		<imprint>
+			<biblScope unit="page">22277</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Redis</surname></persName>
+		</author>
+		<ptr target="https://redis.io/" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">DBMSs on a modern processor: Where does time go?</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">J</forename><surname>Dewitt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Wood</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">PVLDB</title>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="266" to="277" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Bztree: A high-performance latch-free range index for non-volatile memory</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Arulraj</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Levandoski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">U</forename><forename type="middle">F</forename><surname>Minhas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Larson</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="page" from="553" to="565" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Attack of the killer microseconds</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Barroso</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Marty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Patterson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">CACM</title>
+		<imprint>
+			<biblScope unit="volume">60</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="48" to="54" />
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Improving hash join performance through prefetching</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">TODS</title>
+		<imprint>
+			<biblScope unit="volume">32</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page">17</biblScope>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Design of a separable transition-diagram compiler</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">E</forename><surname>Conway</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<biblScope unit="issue">7</biblScope>
+			<biblScope unit="page" from="396" to="408" />
+			<date type="published" when="1963">1963</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Hekaton: SQL Server&apos;s memory-optimized OLTP engine</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Diaconu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Freedman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Ismert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Larson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Mittal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Stonecipher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Verma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zwilling</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="1243" to="1254" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">What every programmer should know about memory</title>
+		<author>
+			<persName><forename type="first">U</forename><surname>Drepper</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2007">2007. 2007</date>
+			<publisher>Red Hat, Inc</publisher>
+			<biblScope unit="volume">11</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">MemC3: Compact and concurrent MemCache with dumber caching and smarter hashing</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kaminsky</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">NSDI</title>
+		<imprint>
+			<biblScope unit="volume">13</biblScope>
+			<biblScope unit="page" from="371" to="384" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">FAST: Fast architecture sensitive tree search on modern CPUs and GPUs</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chhugani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Satish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Sedlar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">D</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Kaldewey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">W</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">A</forename><surname>Brandt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dubey</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Asynchronous memory access chaining</title>
+		<author>
+			<persName><forename type="first">O</forename><surname>Kocberber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Grot</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PVLDB</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="252" to="263" />
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">The Bw-Tree: A B-tree for new hardware platforms</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">J</forename><surname>Levandoski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">B</forename><surname>Lomet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sengupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICDE</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Optimizing database achitecture for the new bottleneck: Memory access</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Manegold</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">A</forename><surname>Boncz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">L</forename><surname>Kersten</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">VLDBJ</title>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Cache craftiness for fast multicore key-value storage</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Kohler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">T</forename><surname>Morris</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Eurosys</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Interleaving with coroutines: A practical approach for robust index joins</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Psaropoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Legler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>May</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PVLDB</title>
+		<imprint>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="230" to="242" />
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Making B+-trees cache conscious in main memory</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Rao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">A</forename><surname>Ross</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Log-structured memory for DRAM-based storage</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">M</forename><surname>Rumble</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Kejriwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">K</forename><surname>Ousterhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">FAST</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">SAP HANA: The evolution from a modern main-memory data platform to an enterprise application platform</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sikka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>F?rber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Goel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Lehner</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PVLDB</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<biblScope unit="page" from="1184" to="1185" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">The VoltDB main memory DBMS</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stonebraker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Weisberg</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Data Eng. Bull</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

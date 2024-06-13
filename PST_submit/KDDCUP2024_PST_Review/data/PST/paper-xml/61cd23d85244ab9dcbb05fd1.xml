@@ -1,0 +1,842 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Profile Guided Optimization without Profiles: A Machine Learning Approach</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2021-12-30">December 30, 2021</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Nadav</forename><surname>Rotem</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Inc</forename><forename type="middle">Chris</forename><surname>Cummins</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Meta</forename><surname>Ai</surname></persName>
+						</author>
+						<title level="a" type="main">Profile Guided Optimization without Profiles: A Machine Learning Approach</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2021-12-30">December 30, 2021</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2112.14679v1[cs.PL]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T13:44+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Profile guided optimization is an effective technique for improving the optimization ability of compilers based on dynamic behavior, but collecting profile data is expensive, cumbersome, and requires regular updating to remain fresh.</p><p>We present a novel statistical approach to inferring branch probabilities that improves the performance of programs that are compiled without profile guided optimizations. We perform offline training using information that is collected from a large corpus of binaries that have branch probabilities information. The learned model is used by the compiler to predict the branch probabilities of regular uninstrumented programs, which the compiler can then use to inform optimization decisions.</p><p>We integrate our technique directly in LLVM, supplementing the existing human-engineered compiler heuristics. We evaluate our technique on a suite of benchmarks, demonstrating some gains over compiling without profile information. In deployment, our technique requires no profiling runs and has negligible effect on compilation time.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Compiler optimizers are structured as a long pipeline, where each stage (pass) in the pipeline transforms the intermediate representation (IR). Optimization passes employ different heuristics for making decisions about the optimization that they perform. For example, the loop unroller has a set of rules for deciding when and how to unroll loops. The compiler has thousands of heuristics and threshold parameters that predict profitability of transformations and balance between performance gains and the cost of compile time.</p><p>In this work we replace parts of LLVM's Branch-ProbabilityInfo (BPI) heuristics, which have been developed over the last decade by dozens of engineers, with a 1 // Calculate Edge Weights using "Pointer Heuristics". 2 // Predict a comparison between two pointer or pointer 3 // and NULL will fail. 4 bool BranchProbabilityInfo:: learned model. BPI contains hundreds of rules such as "backedges in loops are hot" and "branches to terminators are cold" which are coded in C++. Listing 1 presents one of the rules that BPI uses. We replace these rules with a pre-computed decision tree that uses inputs that are collected from the program. It is difficult to tune compiler parameters by measuring the performance of the generated code. System noise and lack of causality are two of the challenges. To work around this difficulty we formulate a learning task for which deterministic ground-truth labels are readily available. We aim to predict branch probabilities as they are recorded in the program metadata. The mechanism of instrumentation and collection of branch probabilities are already implemented in the compiler, and we can use them to collect information about branch behavior. The availability of ground-truth branch probabilities allows us to turn the problem of replacing BPI into a supervised learning problem. In this paper we present a new compiler pass that annotates branch probabilities and does not rely on profile collection. LLVM's BPI uses the branch probabilities metadata instead of heuristics if the information is available. Our system inspects millions of branches from different programs and constructs a predictive model that can assign branch probabilities to unseen branches.</p><p>Our focus in this work is to develop a practical solution that can be deployed at scale. For this reason we require that our technique integrate seamlessly into the compiler, add minimal overhead to the compilation pipeline, and be interpretable to aid in development. We chose not to use deep neural networks because of their runtime performance and difficulty of integration. Instead we use gradient-boosted trees <ref type="bibr" target="#b0">[1]</ref> to generate interpretable decision trees. We use the XGBoost <ref type="bibr" target="#b1">[2]</ref> library for generating decision trees. Decision trees are similar to the structure of compiler heuristics, except that the rules and numeric thresholds are automatically computed. Figure <ref type="figure" target="#fig_1">1</ref> shows a decision tree that was automatically generated by the system.</p><p>Unlike LLVM's BPI analysis the rules that our system generates don't need to be expressed in human language. They can be more complex, can combine more inputs, and can use numbers that are not perfectly round. The code that constructs the decision tree is significantly simpler compared to LLVM's BPI which is implemented in thousands of lines of code that contain different human readable rules.</p><p>We make the following contributions:</p><p>• We develop a novel statistical approach for predicting branch probabilities from static program features without access to profile information.</p><p>• We implement our approach for LLVM. We develop a feature extraction pass for LLVM and construct boosted decision tree models from a corpus of training profiles, embedding the constructed model in a new pass for LLVM.</p><p>• We evaluate our approach on a suite of open source benchmarks. Without access to profile information, and with negligible compilation overhead, we achieve significant performance gains on some programs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Prediction Guided Optimization</head><p>We present a novel technique to statically predict the branch weights of programs without access to profile information. This section describes the design and implementation of the system. In the first stage a regular compiler uses the PGO workflow to compile many programs of different kinds. During this phase a new compiler pass collects information about each branch in the code (this is the feature list, denoted by X). The compiler also records the branch probabilities which are provided by the PGO workflow (this is the label, denoted by Y). In the context of this discussion we refer to inputs as Features, which are individual inputs to our prediction engine. The compiler saves this information in a large file on disk. Next, an offline script processes the data and generates a model that can answer the question: given some information about the branch, what are the most likely branch probabilities? The model is compiled into C code and integrated into the production compiler.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Overview of our Approach</head><p>Phase II (regular online compilation): In this phase the compiler, which is equipped with a new analysis, compiles regular files without using the PGO workflow. The new model that was generated in the first phase provides branch probability information that allows the compiler to make better decisions and generate faster code.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Feature Collection</head><p>In order to generate accurate the branch probabilities our analysis needs to collect information about how branches behave in different programs. Just like LLVM's BPI analysis we collects many features using C++ code. We ask questions such as, "how many instructions are in each one of the basic blocks that the branch points to", and "does the right destination block dominate the branch". We also collect information about the presence of certain instructions such as return and exception handling instructions. We also record information about the loop nest, information about the parent block and position within the function. The pass collects 54 features that we list in Appendix A. All of the features are stored in a vector of floating point numbers. During the offline training phase, both the feature-vector and the true branch probabilities are saved into a file. From this point the features don't have an assigned meaning and are just numbers. To ensure a broad sample of the space we collect information from over a million branches. In our training suite we compile many programs from different domains: llvm-test-suite, abseil, bash, box2d, bzip2, diffutils, distorm, fmt, graphviz, grep, hermes, json-nlohmann, leveldb, libpng, libuv, clang, lua, myhtml, oggvorbis, povray, python, sela, sqlite, z3. We generate representative profile information by running sample inputs. We ignore branches with too few samples.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Training a Model</head><p>In the previous stage the compiler saved a large file with millions of rows. Each row describes the probability of a branch and many features that describe the branch and the program. We then use standard data science techniques to generate a model of gradient-boosted trees.</p><p>A dataset with n examples and m features is defined as:</p><formula xml:id="formula_0">D = {x i , y i } (|D| = n, x i ∈ R m , y i ∈ R).</formula><p>A tree-ensemble with K additive functions that predict the label probability:</p><formula xml:id="formula_1">y i = K ∑ k=1 f k (X i )</formula><p>Where each decision tree maps the feature list to a single value.</p><p>f : R m → R  Listing 2: The decision tree traversal code generated by our approach.</p><p>To prepare the data we convert the branch probability values that represent the ratio between the left-andright into 11 classes that represent the probabilities 0..1 in jumps of 0.1. We shuffle our data and split it to training and testing sets using a 10 : 1 split. XGBoost is used to generate the decision trees. We use the logloss evaluation metric and the softmax learning objective. It takes less than a minute to train on data sets with millions of samples.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.4">Code generation</head><p>After we finished training our model we need to convert it into C code that can be included in the compiler. At inference time, the feature-vector that was collected for each branch is used by the inference procedure to traverse the decision tree and reach the desired outcome. Decision trees, such as the one in Figure <ref type="figure" target="#fig_1">1</ref>, turn right or left depending on the values in the feature list and on the condition at each intersection.</p><p>The gradient-boosted trees that we use are an ensemble of weak prediction models. This means that several simple trees are combined to generate a good prediction. The probability of each label in the prediction is the accumulation of several decision trees that process the same input. We convert each tree into a flat vector and generate a small interpreter that can walk down the tree. At inference time we process each of the trees and accumulate them into the right bucket. Finally, we iterate over the 11 labels and find the label with the highest probability. Figure <ref type="figure" target="#fig_2">2</ref> shows the code that is generated for a single tree. The generated code can be compiled as part of the LLVM compiler and serve different passes and analysis. The X axis is ground truth class, the Y axis is predicted class, and cells are brighter with higher density.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.5">Inference</head><p>This section describes the online use of the compiler. In the system that we've implemented the only difference to the compiler is a new pass that can assign branch probabilities based on program structure. During runtime the analysis collects information on the branches in the program in a feature vector and passes them to the inference method that was generated off-line. The inference method returns a value that represents the ratio between the left branch and the right branch.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Implementation</head><p>Our training system distilled a database of around 200MB into a model that was around 2MB. The model does not increase the dynamic memory usage of the compiler because the decision tree tables are stored in readonly memory. The total inference code added to LLVM amounts to less than one kilobyte of code. The time it takes to infer the properties of a branch depends on the depth of the decision trees and the number of trees, and there is a tradeoff between accuracy and performance. However since the decision trees are small and the traversal is efficient, the overall inference time is very low. The model we trained and evaluate in Section 4 can run 250, 000 inference requests per second on a single x86 core. The 3-label model can run 1, 600, 000 inferences per second. This can be further optimized <ref type="bibr" target="#b2">[3]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Evaluation</head><p>We evaluate our technique in two sets of experiments. In the first, we evaluate the predictive performance of our Figure <ref type="figure" target="#fig_4">4</ref>: Speedup of programs compiled using our technique over compilation without profile guided optimization. In both cases the compiler does not have access to profile information. The geometric mean speedup of our approach is 1.016. branch weight model. In the second, we evaluate the runtime performance of programs compiled using our predicted branch weights and compare it to the performance of programs compiled without any profile information and using ground-truth profiles.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Predicting Branch Weights</head><p>We use a hold out testing set of 10% unseen branches to assess whether our model can accurately predict branch weight. We discretize the space of branch weights into 11 bins: [0, 0.1, 0.2, . . . , 1.0]. Figure <ref type="figure" target="#fig_6">3</ref> provides an overview of the results. In 75% of cases the model predicts the correct probability weight class. This figure depends on the size and number of the decision trees.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Compilation Performance</head><p>We tested our system on a number of different programs from different domains. Figure <ref type="figure" target="#fig_4">4</ref> shows the effectiveness of the system on a number of workloads. In this benchmark we evaluate regular compilation of programs (without PGO or LTO) using the default optimization compilation flag. The only difference between the runs was the flag that enabled the new pass.</p><p>The new optimization pass improves the performance of 6 of the 10 workloads, compared to compiling without profile guided optimization. The gains in changes are in the range of −7% for bzip2 to +16% for Python.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Related work</head><p>Profile guided optimization is a well-established technique for improving compile time optimization decisions <ref type="bibr" target="#b3">[4]</ref>. Profile information is collected using instrumentation or sampling of the executable, and the collected data can only be used to optimize the executables on which it was trained. Compilers such as LLVM <ref type="bibr" target="#b4">[5]</ref> and BOLT <ref type="bibr" target="#b5">[6]</ref> use profile guided optimizations to optimize and perform efficient layout of code.</p><p>Despite the performance improvements offered by profile guided optimization, it is cumbersome to integrate into build systems and adds significant overhead. Significant engineering infrastructure is needed to provide deep integration with large evolving codebases <ref type="bibr" target="#b6">[7]</ref>.</p><p>We propose a novel technique to overcome the limitations of profile guided optimization using machine learning. The application of machine learning to compiler optimizations is well studied and shows promise in eliminating the human developed heuristics, as surveyed in <ref type="bibr" target="#b7">[8]</ref> and <ref type="bibr" target="#b8">[9]</ref>.</p><p>The most commonly used technique is supervised learning. Supervised learning has been applied to a range of problems such as loop unrolling <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b10">11]</ref>, instruction scheduling <ref type="bibr" target="#b11">[12]</ref>, program partitioning <ref type="bibr" target="#b12">[13]</ref>, heterogeneous device mapping <ref type="bibr" target="#b13">[14,</ref><ref type="bibr" target="#b14">15]</ref>, function inlining <ref type="bibr" target="#b15">[16]</ref>, and various optimization heuristics in GCC <ref type="bibr" target="#b16">[17]</ref>.</p><p>Supervised machine learning algorithms operate on labeled data, but it's not easy to extract the labeled data from compilers. In some specific domains, such as code generation for linear algebra primitives, there is a fixed compilation pipeline and a program that is reasonable to measure <ref type="bibr" target="#b17">[18]</ref>. In traditional compilers, the size of the optimization space and the complexity of the optimization pipelines may make it prohibitively expensive to collect training data, as it requires exhaustively compiling and measuring each program with every combination of optimization decision to determine the best performance. In contrast, our approach enables every measurement of a program to be used to produce ground truth labels for branch probability.</p><p>Another challenge is that measurement noise makes it difficult to evaluate the performance of program. This is especially significant for very small measurements such as the runtime of individual basic blocks <ref type="bibr" target="#b18">[19]</ref>. In <ref type="bibr" target="#b19">[20]</ref>, noise in measurements is used a prediction target. Some projects rely on proxy metrics such as static analysis of the generated binaries or code size <ref type="bibr" target="#b20">[21,</ref><ref type="bibr" target="#b21">22]</ref>. In contrast to these works, our approach enables noise-free ground truth measurements to be collected.</p><p>A key challenge in supervised learning is feature design. The quality of a learned model is limited by the quality of the features used. Many prior works used handcrafted vectors of numeric features <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b11">12]</ref>, however selecting which values to include in a feature vector is a time consuming and error prone task. An automatic approach to feature selection was proposed in <ref type="bibr" target="#b22">[23]</ref> but this requires a cumbersome grammar to be written to describe the space of features to search over. More recently, deep learning techniques inspired by natural language modeling <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b23">24]</ref> and graph learning <ref type="bibr" target="#b14">[15,</ref><ref type="bibr" target="#b24">25]</ref> have been proposed to simplify the task of feature engineering by automatically inferring high-level features from low-level input representations, however these techniques sacrifice interpretability as the inferred latent representations are hard to reason about. Our approach aims to strike a balance between interpretability and feature engineering cost by pairing a large number of the readily available values from LLVM's static analyses with a machine learning algorithm that automatically ranks and prunes features.</p><p>There is active research around the differentiation of whole programs <ref type="bibr" target="#b25">[26]</ref>, but as of today the whole compilation pipeline is not differentiable. A different approach is to optimize compilers using reinforcement learning. Cummins et al. <ref type="bibr" target="#b21">[22]</ref> formulate a suite of compiler optimization problems as environments for reinforcement learning. Ameer et al. <ref type="bibr" target="#b27">[27]</ref> use reinforcement learning to make vectorization decisions in the LLVM vectorizer <ref type="bibr" target="#b28">[28]</ref>. The MLGO project <ref type="bibr" target="#b20">[21]</ref> is a framework for integrating neural networks into LLVM, targeting the function inlining heuristic. Compared to these works which target individual optimizations at a time, our technique enables a single learned model to benefit the entire compiler by predicting branch weight metadata that is available to all optimization passes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusions</head><p>We investigated the problem of leveraging data science techniques for generating branch probabilities in uninstrumented programs. We proposed a fast and simple system that use gradient-boosted trees. We tested the proposed system and demonstrated significant performance wins on several important workloads with very low compile times and zero additional memory overhead.</p><p>The proposed system is easy to train and integrate and can be the first step in the direction of applying data science techniques to compiler engineering. The work presented in this paper is the result of experimentation in a huge design space. There are opportunities for improvement on top of the existing work in every stage, and there are many tradeoffs that need to be explored.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A Feature list</head><p>This section lists the features that are extracted from each branch and from the current, left and right basic blocks. The feature extraction code is written in C++ that converts them into a vector of floating point numbers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Type</head><p>List </p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>5 7 8Listing 1 :</head><label>71</label><figDesc>calcPointerHeuristics(const BasicBlock * BB) { 6 const BranchInst * BI = dyn_cast&lt;BranchInst&gt;(..); Value * Cond = BI-&gt;getCondition(); 9 ICmpInst * CI = dyn_cast&lt;ICmpInst&gt;(Cond); 10 if (!CI || !CI-&gt;isEquality()) An example hand-crafted rule from LLVM's BranchProbabilityInfo (BPI) analysis pass. The BPI analysis contains hundreds of such rules developed over a decade. Our technique replaces these rules with automatically constructed decision trees.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: We use profiles collected from training programs to automatically construct decision trees to predict branch weight information for programs for which we do not have profile information. This figure shows one such decision tree.</figDesc><graphic url="image-1.png" coords="2,65.75,62.76,240.24,68.03" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2</head><label>2</label><figDesc>Figure 2 presents the overall compilation flow. The system operates in two stages: offline training, and online use.Phase I (offline training): In the first stage a regular compiler uses the PGO workflow to compile many programs of different kinds. During this phase a new compiler pass collects information about each branch in the code (this is the feature list, denoted by X). The compiler also records the branch probabilities which are provided by the PGO workflow (this is the label, denoted by Y). In the context of this discussion we refer to inputs as Features, which are individual inputs to our prediction engine. The compiler saves this information in a large file on disk. Next, an offline script processes the data and generates a model that can answer the question: given some information about the branch, what are the most likely branch probabilities? The model is compiled into C code and integrated into the production compiler.Phase II (regular online compilation): In this phase the compiler, which is equipped with a new analysis, compiles regular files without using the PGO workflow. The new model that was generated in the first phase provides branch probability information that allows the compiler to make better decisions and generate faster code.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Overview of our approach. During offline training, static features and profiled branch weights are collected from a corpus of training programs and used to automatically construct a model that is then embedded in the compiler. Online, the features of unseen programs are extracted and the model infers branch weights.</figDesc><graphic url="image-2.png" coords="3,65.75,62.77,240.24,135.94" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>1 4 int</head><label>4</label><figDesc>float intrp(const float * input, 2 const short * F, const float * C, 3 const short * L, const short * R) { idx] == -1) return C[idx]; // Found it! 7 if (input[F[idx]] &lt; C[idx]) // Check condition. 8 idx = L[idx]; // Go left. 9 else 10 idx = R[idx]; // Go right. 11 } 12 } 13 // Feature index, condition, left, right: 14 const short F0[] = {12, 26, 34, 28, 47, 18, 45, ... 15 const float C0[] = {0.5, 0.5, 7.5, 1.5, 0.5, 0.5, ... 16 const short L0[] = {1, 3, 5, 7, 9, 11, 13, 15,17, ... 17 const short R0[] = {2, 4, 6, 8, 10, 12, 14, 16, ...</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>18 19</head><label>18</label><figDesc>float tree0(const float * input) { 20 return intrp(input, F0, C0, L0, R0); 21 }</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Distribution of branch weight prediction errors. The X axis is ground truth class, the Y axis is predicted class, and cells are brighter with higher density.</figDesc><graphic url="image-3.png" coords="4,65.75,62.77,240.25,156.21" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head></head><label></label><figDesc>International Conference on Parallel Architectures and Compilation Techniques, PACT '10, page 307-318, New York, NY, USA, 2010. Association for Computing Machinery.</figDesc><table><row><cell>the 19th</cell><cell></cell></row><row><cell></cell><cell>of features</cell></row><row><cell>Branch Features</cell><cell>is_entry_block</cell></row><row><cell></cell><cell>num_blocks_in_fn</cell></row><row><cell></cell><cell>condition_cmp</cell></row><row><cell></cell><cell>condition_predicate</cell></row><row><cell></cell><cell>condition_in_block</cell></row><row><cell></cell><cell>predicate_is_eq</cell></row><row><cell></cell><cell>predicate_is_fp</cell></row><row><cell></cell><cell>cmp_to_const</cell></row><row><cell></cell><cell>left_self_edge</cell></row><row><cell></cell><cell>right_self_edge</cell></row><row><cell></cell><cell>left_is_backedge</cell></row><row><cell></cell><cell>right_is_backedge</cell></row><row><cell></cell><cell>right_points_to_left</cell></row><row><cell></cell><cell>left_points_to_right</cell></row><row><cell></cell><cell>loop_depth</cell></row><row><cell></cell><cell>is_loop_header</cell></row><row><cell></cell><cell>is_left_exiting</cell></row><row><cell></cell><cell>is_right_exiting</cell></row><row><cell></cell><cell>dominates_left</cell></row><row><cell></cell><cell>dominates_right</cell></row><row><cell></cell><cell>dominated_by_left</cell></row><row><cell></cell><cell>dominated_by_right</cell></row><row><cell></cell><cell>num_blocks_dominated</cell></row><row><cell cols="2">Basic Block Features num_instr</cell></row><row><cell></cell><cell>num_phis</cell></row><row><cell></cell><cell>num_calls</cell></row><row><cell></cell><cell>num_loads</cell></row><row><cell></cell><cell>num_stores</cell></row><row><cell></cell><cell>num_preds</cell></row><row><cell></cell><cell>num_succ</cell></row><row><cell></cell><cell>ends_with_unreachable</cell></row><row><cell></cell><cell>ends_with_return</cell></row><row><cell></cell><cell>ends_with_cond_branch</cell></row><row><cell></cell><cell>ends_with_branch</cell></row></table></figure>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Greedy function approximation: A gradient boosting machine</title>
+		<author>
+			<persName><forename type="first">Jerome</forename><forename type="middle">H</forename><surname>Friedman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">The Annals of Statistics</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="1189" to="1232" />
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">Xgboost: A scalable tree boosting system</title>
+		<author>
+			<persName><forename type="first">Tianqi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carlos</forename><surname>Guestrin</surname></persName>
+		</author>
+		<idno>CoRR, abs/1603.02754</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Rapidscorer: Fast tree ensemble evaluation by maximizing compactness in data level parallelization</title>
+		<author>
+			<persName><forename type="first">Hucheng</forename><surname>Ting Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Will</forename><forename type="middle">Y</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bin</forename><surname>Zou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruofei</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery &amp; Data Mining</title>
+				<meeting>the 24th ACM SIGKDD International Conference on Knowledge Discovery &amp; Data Mining</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">Profile guided compiler optimizations</title>
+		<author>
+			<persName><forename type="first">Rajiv</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eduard</forename><surname>Mehofer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youtao</forename><surname>Zhang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2002">2002</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Llvm: A compilation framework for lifelong program analysis &amp; transformation</title>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Lattner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vikram</forename><surname>Adve</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Symposium on Code Generation and Optimization: Feedback-Directed and Runtime Optimization, CGO &apos;04</title>
+				<meeting>the International Symposium on Code Generation and Optimization: Feedback-Directed and Runtime Optimization, CGO &apos;04<address><addrLine>USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="volume">75</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">BOLT: A practical binary optimizer for data centers and beyond</title>
+		<author>
+			<persName><forename type="first">Maksim</forename><surname>Panchenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rafael</forename><surname>Auler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bill</forename><surname>Nell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guilherme</forename><surname>Ottoni</surname></persName>
+		</author>
+		<idno>CoRR, abs/1807.06735</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Profiling a warehouse-scale computer</title>
+		<author>
+			<persName><forename type="first">Svilen</forename><surname>Kanev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Juan</forename><forename type="middle">Pablo</forename><surname>Darago</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kim</forename><surname>Hazelwood</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tipp</forename><surname>Parthasarathy Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Moseley</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gu-Yeon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Brooks</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 42nd Annual International Symposium on Computer Architecture</title>
+				<meeting>the 42nd Annual International Symposium on Computer Architecture</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="158" to="169" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">A survey on compiler autotuning using machine learning</title>
+		<author>
+			<persName><forename type="first">William</forename><surname>Amir Hossein Ashouri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Killian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gianluca</forename><surname>Cavazos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cristina</forename><surname>Palermo</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Silvano</surname></persName>
+		</author>
+		<idno>CoRR, abs/1801.04405</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Machine Learning in Compilers: Past, Present and Future</title>
+		<author>
+			<persName><forename type="first">Hugh</forename><surname>Leather</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Cummins</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">FDL</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Predicting unroll factors using supervised classification</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Stephenson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saman</forename><surname>Amarasinghe</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Symposium on Code Generation and Optimization, CGO &apos;05</title>
+				<meeting>the International Symposium on Code Generation and Optimization, CGO &apos;05<address><addrLine>USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="123" to="134" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">End-to-end Deep Learning of Optimization Heuristics</title>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Cummins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pavlos</forename><surname>Petoumenos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zheng</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hugh</forename><surname>Leather</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">PACT</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Learning to schedule straight-line code</title>
+		<author>
+			<persName><forename type="first">Eliot</forename><surname>Moss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Utgoff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Cavazos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carla</forename><surname>Brodley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Scheeff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Doina</forename><surname>Precup</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Darko</forename><surname>Stefanović</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1997 Conference on Advances in Neural Information Processing Systems 10, NIPS &apos;97</title>
+				<meeting>the 1997 Conference on Advances in Neural Information Processing Systems 10, NIPS &apos;97<address><addrLine>Cambridge, MA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>MIT Press</publisher>
+			<date type="published" when="1998">1998</date>
+			<biblScope unit="page" from="929" to="935" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Partitioning streaming parallelism for multi-cores: A machine learning based approach</title>
+		<author>
+			<persName><forename type="first">Zheng</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><forename type="middle">P</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><surname>O'boyle</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of</title>
+				<meeting>null</meeting>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Neural Code Comprehension: A Learnable Representation of Code Semantics</title>
+		<author>
+			<persName><forename type="first">Tal</forename><surname>Ben-Nun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alice</forename><forename type="middle">Shoshana</forename><surname>Jakobovits</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Torsten</forename><surname>Hoefler</surname></persName>
+		</author>
+		<editor>NeurIPS</editor>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">ProGraML: A Graph-based Program Representation for Data Flow Analysis and Compiler Optimizations</title>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Cummins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zacharias</forename><surname>Fisches</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tal</forename><surname>Ben-Nun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Torsten</forename><surname>Hoefler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O'</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hugh</forename><surname>Boyle</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Leather</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Methodspecific dynamic compilation using logistic regression</title>
+		<author>
+			<persName><forename type="first">John</forename><surname>Cavazos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><forename type="middle">P</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><surname>O'boyle</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIGPLAN Not</title>
+		<imprint>
+			<biblScope unit="volume">41</biblScope>
+			<biblScope unit="issue">10</biblScope>
+			<biblScope unit="page" from="229" to="240" />
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Eric Courtois, and François Bodin. Milepost gcc: machine learning based research compiler</title>
+		<author>
+			<persName><forename type="first">Grigori</forename><surname>Fursin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cupertino</forename><surname>Miranda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Olivier</forename><surname>Temam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mircea</forename><surname>Namolaru</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ayal</forename><surname>Zaks</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bilha</forename><surname>Mendelson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edwin</forename><surname>Bonilla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Thomson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hugh</forename><surname>Leather</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Williams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O'</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phil</forename><surname>Boyle</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Barnard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the GCC Developers&apos; Summit</title>
+				<meeting>the GCC Developers&apos; Summit<address><addrLine>Elton Ashton</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2008">2008. 2008</date>
+			<biblScope unit="volume">06</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Ansor : Generating high-performance tensor programs for deep learning</title>
+		<author>
+			<persName><forename type="first">Lianmin</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chengfan</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Minmin</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhao</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cody</forename><forename type="middle">Hao</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ameer</forename><surname>Haj-Ali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yida</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jun</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Danyang</forename><surname>Zhuo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Koushik</forename><surname>Sen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><forename type="middle">E</forename><surname>Gonzalez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ion</forename><surname>Stoica</surname></persName>
+		</author>
+		<idno>CoRR, abs/2006.06762</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Ithemal: Accurate, Portable and Fast Basic Block Throughput Estimation using Deep Neural Networks</title>
+		<author>
+			<persName><forename type="first">Charith</forename><surname>Mendis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Renda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saman</forename><surname>Amarasinghe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Carbin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<title level="m" type="main">Value Learning for Throughput Optimization of Deep Learning Workloads</title>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Cummins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Horace</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hugh</forename><surname>Leather</surname></persName>
+		</author>
+		<editor>MLSys</editor>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">MLGO: a machine learning guided compiler optimizations framework</title>
+		<author>
+			<persName><forename type="first">Yundi</forename><surname>Mircea Trofin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eugene</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zinan</forename><surname>Brevdo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krzysztof</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Choromanski</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Li</surname></persName>
+		</author>
+		<idno>CoRR, abs/2101.04808</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Cummins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bram</forename><surname>Wasti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiadong</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brandon</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Ansel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sahir</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Somya</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jia</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Olivier</forename><surname>Teytaud</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Steiner</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2109.08267</idno>
+		<title level="m">Yuandong Tian, and Hugh Leather. CompilerGym: Robust, Performant Compiler Optimization Environments for AI Research</title>
+				<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Automatic feature generation for machine learningbased optimising compilation</title>
+		<author>
+			<persName><forename type="first">Hugh</forename><surname>Leather</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edwin</forename><surname>Bonilla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O'</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Boyle</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Architecture and Code Optimization (TACO)</title>
+		<imprint>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="1" to="32" />
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Learning and Evaluating Contextual Embedding of Source Code</title>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Kanade</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Petros</forename><surname>Maniatis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gogul</forename><surname>Balakrishnan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kensen</forename><surname>Shi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Compiler-based graph representations for deep learning models of code</title>
+		<author>
+			<persName><forename type="first">Alexander</forename><surname>Brauckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrés</forename><surname>Goens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sebastian</forename><surname>Ertel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeronimo</forename><surname>Castrillon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CC</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Differentiable monte carlo ray tracing through edge sampling</title>
+		<author>
+			<persName><forename type="first">Tzu-Mao</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miika</forename><surname>Aittala</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frédo</forename><surname>Durand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaakko</forename><surname>Lehtinen</surname></persName>
+		</author>
+		<imprint>
+			<publisher>ACM</publisher>
+			<pubPlace>Trans</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<author>
+			<persName><surname>Graph</surname></persName>
+		</author>
+		<title level="m">Proc. SIGGRAPH Asia)</title>
+				<meeting>SIGGRAPH Asia)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="volume">37</biblScope>
+			<biblScope unit="page">11</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m" type="main">Neurovectorizer: End-to-end vectorization with deep reinforcement learning</title>
+		<author>
+			<persName><forename type="first">Ameer</forename><surname>Haj-Ali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nesreen</forename><forename type="middle">K</forename><surname>Ahmed</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Theodore</forename><forename type="middle">L</forename><surname>Willke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sophia</forename><surname>Yakun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krste</forename><surname>Shao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ion</forename><surname>Asanovic</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Stoica</surname></persName>
+		</author>
+		<idno>CoRR, abs/1909.13639</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Vectorization in LLVM</title>
+		<author>
+			<persName><forename type="first">Nadav</forename><surname>Rotem</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arnold</forename><surname>Schwaighofer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">LLVM Developers&apos; Meeting</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

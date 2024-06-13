@@ -1,0 +1,1776 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">BGL: GPU-Efficient GNN Training by Optimizing Graph Data I/O and Preprocessing</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2021-12-16">16 Dec 2021</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Tianfeng</forename><surname>Liu</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Tsinghua University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Yangrui</forename><surname>Chen</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">The University of Hong Kong</orgName>
+								<address>
+									<addrLine>3 ByteDance</addrLine>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Dan</forename><surname>Li</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Tsinghua University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Chuan</forename><surname>Wu</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">The University of Hong Kong</orgName>
+								<address>
+									<addrLine>3 ByteDance</addrLine>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Yibo</forename><surname>Zhu</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Jun</forename><surname>He</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Yanghua</forename><surname>Peng</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Hongzheng</forename><surname>Chen</surname></persName>
+							<affiliation key="aff2">
+								<orgName type="institution">Cornell University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Hongzhi</forename><surname>Chen</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Chuanxiong</forename><surname>Guo</surname></persName>
+						</author>
+						<title level="a" type="main">BGL: GPU-Efficient GNN Training by Optimizing Graph Data I/O and Preprocessing</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2021-12-16">16 Dec 2021</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2112.08541v1[cs.LG]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:36+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Graph neural networks (GNNs) have extended the success of deep neural networks (DNNs) to non-Euclidean graph data, achieving ground-breaking performance on various tasks such as node classification and graph property prediction. Nonetheless, existing systems are inefficient to train large graphs with billions of nodes and edges with GPUs. The main bottlenecks are the process of preparing data for GPUs -subgraph sampling and feature retrieving. This paper proposes BGL, a distributed GNN training system designed to address the bottlenecks with a few key ideas. First, we propose a dynamic cache engine to minimize feature retrieving traffic. By a co-design of caching policy and the order of sampling, we find a sweet spot of low overhead and high cache hit ratio. Second, we improve the graph partition algorithm to reduce cross-partition communication during subgraph sampling. Finally, careful resource isolation reduces contention between different data preprocessing stages. Extensive experiments on various GNN models and large graph datasets show that BGL significantly outperforms existing GNN training systems by 20.68x on average.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Graphs, such as social networks <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b34">35]</ref>, molecular networks <ref type="bibr" target="#b17">[18]</ref>, knowledge graphs <ref type="bibr" target="#b19">[20]</ref> and academic networks <ref type="bibr" target="#b44">[45]</ref>, provide a natural way to model a set of objects and their relationships.Recently, there is increasing interest in extending deep learning methods for graph data. Graph Neural Networks (GNNs) <ref type="bibr" target="#b20">[21,</ref><ref type="bibr" target="#b34">35,</ref><ref type="bibr" target="#b43">44]</ref> have been proposed and shown to outperform traditional graph learning methods <ref type="bibr" target="#b47">[48,</ref><ref type="bibr" target="#b53">54,</ref><ref type="bibr" target="#b55">56]</ref> in various applications such as node classification <ref type="bibr" target="#b34">[35]</ref>, link prediction <ref type="bibr" target="#b52">[53]</ref> and graph property prediction <ref type="bibr" target="#b48">[49]</ref>. Real-world graphs can be huge. For example, the user-to-item graph at Pinterest contains over 2 billion entities and 17 billion edges with 18 TB data size <ref type="bibr" target="#b49">[50]</ref>. As a major online service provider, we also observe over 100 TB size of * These authors have contributed equally to this work. graph data, which consists of 2 billion nodes and 2 trillion edges. Such large sizes make it impossible to load the entire graph into GPU memory (at tens of GB) or CPU memory (at hundreds of GB), hence turning down proposals that adopt full graph training on GPUs <ref type="bibr" target="#b51">[52]</ref>. Recent works <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b49">50]</ref> have resorted to mini-batch sampling-based GNN training. Instead of loading the whole graph entirely, neighborhood information is aggregated on subgraphs. A web-scale graph is partitioned among distributed graph store servers over multiple machines.</p><p>The training proceeds in iterations, each with three stages: <ref type="bibr" target="#b0">(1)</ref> sampling subgraphs stored in distributed graph store servers, (2) feature retrieving for the subgraphs, and (3) forward and backward computation of the GNN model.</p><p>The first two stages, which we refer to as data I/O and preprocessing, are often the performance bottlenecks in such sampling-based GNN training. After analyzing popular GNN training frameworks (e.g., DGL <ref type="bibr" target="#b45">[46]</ref>, PyG <ref type="bibr" target="#b15">[16]</ref> and Euler <ref type="bibr" target="#b1">[2]</ref>), we made two key observations. (i) High data traffic for retrieving training samples: when the subgraph being sampled is stored across multiple graph store servers, there can be frequent cross-partition communication for sampling; retrieving corresponding features from the storage to worker machines also incurs large network transmission workload. (ii) Modern GPUs can perform the computation of state-of-the-art GNN models <ref type="bibr" target="#b20">[21,</ref><ref type="bibr" target="#b34">35,</ref><ref type="bibr" target="#b43">44]</ref> quite fast, leading to high demand for data input. To mitigate this problem, Euler adopts parallel feature retrieval; DGL and PyG prefetch the sampling results. Unfortunately, none of them fully resolves the I/O bottleneck. For example, we observe only around 10% GPU utilization in a typical DGL training job on a large graph ( ?2 and ?5). It means around 90% of GPU cycles are wasted.</p><p>In this paper, we propose BGL, a GPU-efficient GNN training system for large graph learning, to accelerate training and thus achieve high GPU utilization (near 100%). Focusing on removing the data I/O and preprocessing bottleneck, we identify three key limitations of existing frameworks, namely, 1) too heavy network traffic of feature retrieving, 2) large cross-partition communication overhead during sampling due to naive graph partition algorithms, and 3) naive resource al-location leading to poor end-to-end performance. We address those challenges, respectively.</p><p>First, to minimize feature retrieving traffic, we co-design a dynamic cache policy and the sampling order of nodes. PaGraph <ref type="bibr" target="#b36">[37]</ref>, a state-of-the-art cache design for GNN training, explicitly avoids dynamic caching policy because of high overhead. However, we find that static cache (no replacement during training) has low hit ratios when the graphs are so large that only a small fraction of nodes can be cached. In contrast, we show that a FIFO policy has acceptable overhead and high hit ratios once combined with our proximity-aware ordering. The key idea is to leverage temporal locality -in nearby mini-batches, we always try to sample nearby nodes. It largely increases the cache hit ratio of FIFO policy. We will further explain the details of how we ensure the consistency of our multi-GPU cache engine and GNN convergence in ?3. <ref type="bibr" target="#b1">2</ref>.</p><p>Second, to minimize cross-partition communication during sampling, we design a graph partition algorithm tailored for the typical sampling algorithms in GNN training. Existing partition algorithms either do not scale to large graphs or fail to consider multi-hop neighbor connectivity inside each partition. It leads to heavy cross-partition communication because, in GNN training, the sampling algorithm usually requests multi-hop neighbors from a given node. In contrast, our partition algorithm (in ?3.3.2) strives to maintain multi-hop connectivity within each partition, meanwhile load balance partitions and is scalable to giant graphs.</p><p>Finally, we optimize the resource allocation of data preprocessing by profiling-based resource isolation. Data preprocessing in GNN consists of multiple operations that may compete for CPU and bandwidth resources. However, existing frameworks largely ignore it and let the preprocessing operations freely compete with each other. Unfortunately, some operations do not scale well with more resources but may acquire more resources than it actually needs, leading to low end-to-end preprocessing performance. Our key idea is to formulate the resource allocation problem as an optimization problem, use profiling to find out the resource demands of each operation, and isolate the CPU cores for each operation.</p><p>We implement BGL, including all the above design points, and replace the data I/O and preprocessing part of DGL with it. The design of BGL is generic -for example, it can also be used with Euler's computation backend. However, our evaluation focuses on using BGL with the DGL GPU backend because it is more mature and performant. We conduct extensive experiments using multiple representative GNN models with various graph datasets, including the largest publicly available dataset and an internal billion-node dataset. We demonstrate that BGL outperforms existing frameworks and the geometric mean of speedups over PaGraph, PyG, DGL and Euler is 2.14x, 3.02x, 7.04x and 20.68x, respectively. With the same GPU backend as DGL, BGL can push the V100 GPU utilization to 99% even when graphs are stored remotely and distributedly, higher than existing frameworks by far. It also scales well with the size of graphs and the number of GPUs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Background and Motivation</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Sampling-based GNN Training</head><p>We start by explaining sampling-based GNN training. Graph. The most popular GNN tasks are to train on graphs with node features, G = (V , E,F ), where V and E respectively denote the node set and edge set of the graph, and F denotes the set of feature vectors assigned to each node. For example, in the graph dataset Ogbn-papers <ref type="bibr" target="#b44">[45]</ref>, each node (i.e., paper) has a 128-dimensional feature vector representing the embeddings of the paper title and abstract. Graph neural networks (GNNs). Graph neural networks are neural networks learned from graphs. The basic idea is collectively aggregating information following the graph structure and performing various feature transformations. For instance, the Graph Convolution Network (GCN) <ref type="bibr" target="#b34">[35]</ref> generalizes the convolution operation to graphs. For each node, GCN aggregates the features of its neighbors using a weighted average function and feeds the result into a neural network. For another example, GraphSAGE <ref type="bibr" target="#b21">[22]</ref> is a graph learning model that uses neighbor sampling to learn different aggregation functions on different numbers of hops.</p><p>Real-world graphs, such as social networks and ecommerce networks <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b49">50,</ref><ref type="bibr" target="#b51">52]</ref>, are often large. The Pinterest graph <ref type="bibr" target="#b49">[50]</ref> consists of 2B nodes and 17B edges, and requires at least 18 TB memory during training. Even performing simple operations for all nodes would require significant computation power, not to mention the notoriously computation-intensive neural networks. Similar to other DNN training tasks, it is appealing to use GPUs to accelerate GNN training. Sampling-based GNN training. There are two camps of training algorithms adopted in existing GNN systems: fullbatch training and mini-batch training. Full-batch training loads the entire graph into GPUs for training <ref type="bibr" target="#b34">[35]</ref>, like Neu-Graph <ref type="bibr" target="#b37">[38]</ref> and ROC <ref type="bibr" target="#b29">[30]</ref>. Unfortunately, for very large graphs like Pinterst's, such an approach would face the limitation of GPU memory capacity.</p><p>Thus, we focus on the other approach, mini-batch training, or often called Sampling-based GNN training. In each iteration, this approach samples a subgraph from the large original graph to construct a mini-batch as the input to neural networks. Mini-batch training is more popular and adopted by literature <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b21">22,</ref><ref type="bibr" target="#b50">51]</ref> and popular GNN training frameworks like DGL <ref type="bibr" target="#b45">[46]</ref>, PyG <ref type="bibr" target="#b16">[17]</ref> and Euler <ref type="bibr" target="#b1">[2]</ref>.</p><p>The process of sampling-based GNN training is shown in Figure <ref type="figure" target="#fig_0">1</ref>. The graph data (including the graph structure and node features) are partitioned and stored in a distributed graph store. Each training iteration consists of three stages:</p><p>(1) Subgraph sampling. Samplers sample a subgraph from the original graph and send it to workers. (2) Feature retrieving. After workers receive the subgraph, the features of its nodes are further retrieved from the graph store server and placed in GPU memory.</p><p>(3) Model computation. Like typical DNN training, workers forward-propagate the prepared mini-batch through the GNN model, calculate the loss function and then compute gradients in backward propagation. Then model parameters are updated using optimizers (e.g., SGD <ref type="bibr" target="#b57">[58]</ref>, Adam <ref type="bibr" target="#b33">[34]</ref>).</p><p>In the rest of this paper, we refer to the first two stages as Data I/O and Preprocessing.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Data I/O and Preprocessing Bottlenecks</head><p>Unfortunately, existing GNN training frameworks suffer from data I/O and preprocessing bottlenecks, especially when running model computation on GPUs. Here, we test two representative frameworks, DGL <ref type="bibr" target="#b45">[46]</ref> and Euler <ref type="bibr" target="#b1">[2]</ref>. We train GraphSAGE <ref type="bibr" target="#b21">[22]</ref> model with one GPU worker. Using the partition algorithms of DGL and Euler, we split Ogbn-products graph <ref type="bibr" target="#b25">[26]</ref> into two partitions and store them on two servers as a distributed graph store. More configuration details and the other framework results are in ?5.</p><p>Figure <ref type="figure" target="#fig_1">2</ref> shows the training time of one mini-batch and the time breakdown of each stage. 99% and 83% of the training time were spent in data I/O and preprocessing by Euler and DGL, respectively. Long data preprocessing time leads to not only poor training performance but also low GPU utilization. The maximum GPU utilization of DGL and Euler is 15% and 5%, respectively, as shown in Figure <ref type="figure" target="#fig_2">3</ref>.</p><p>In GNN training, such bottleneck is much more severe than in DNN training like computer vision (CV) or natural language processing (NLP) for two main reasons.</p><p>First, due to the neighbor explosion problem <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b50">51]</ref>, the size of mini-batch data required by each training iteration is very large. For example, if we sample a three-hop subgraph from Ogbn-products with batch size 1,000 and fan out {15,10,5}, each mini-batch consists of 5MB subgraph structure (roughly 400,000 nodes) and 195 MB node features. Assuming that we use a common training GPU server like AWS p3dn.24xlarge <ref type="bibr" target="#b3">[4]</ref> (8x NVIDIA V100 GPUs and 100Gbps NIC) as the worker, and that we could saturate the 100Gbps NIC pulling such data, every second we can only  pull 60 mini-batches of data. In addition, other preprocessing stages can further slow down the mini-batch preparation to as low as a few mini-batches per second (Figure <ref type="figure" target="#fig_1">2</ref>). Second, the model sizes and required FLOPS of GNN are much smaller than classic DNN models like BERT <ref type="bibr" target="#b13">[14]</ref> or ResNet <ref type="bibr" target="#b23">[24]</ref>. V100 needs only 20ms to compute a minibatch of popular GNN models like GraphSAGE. 8 GPUs on p3dn.24xlarge can compute 400 mini-batches per second.</p><p>There is clearly a huge gap between the data I/O and preprocessing speed and GPU computation speed. Consequently, though frameworks like DGL and Euler adopt pipelining, the data I/O and preprocessing bottlenecks can only be hidden by a small fraction and dominate the end-to-end training speed. Some recent work <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b36">37]</ref> also observed this problem and made promising progress. Unfortunately, it still falls short in performance ( ?5) and cannot handle giant graphs well. Next, we will elaborate the main challenges faced by existing GNN training frameworks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Challenges in Removing the Bottlenecks</head><p>We identify three main challenges that have not been fully resolved or even ignored by existing works. Challenge 1: Minimize the overhead of node feature retrieving. In the experiments shown in Figure <ref type="figure" target="#fig_1">2</ref>, node feature retrieving may become the bottleneck due to the large volume of data being pulled to workers. A natural idea to minimize such overhead is to leverage the power-law degree distribution <ref type="bibr" target="#b14">[15]</ref> of real-life graphs. For example, PaGraph <ref type="bibr" target="#b36">[37]</ref> adopted a static (no replacement at runtime) cache that locally stores the predicted hottest node features. Upon cache hit, the traffic of feature retrieving can be saved. Unfortunately, on giants graphs like Pinterest graph <ref type="bibr" target="#b49">[50]</ref>, such static cache may only be able to store a small fraction of nodes due to memory constraint. In our experiments, when only 10% of nodes can be cached, static cache only yields &lt;40% cache hit ratios.</p><p>Why not use dynamic (replacing some caches at runtime) cache policies? It is challenging because it would incur large searching and updating overhead, pointed out in <ref type="bibr" target="#b36">[37]</ref>. Overheads become even larger when cache is large (tens of GB) and stored on GPU. Our experimental implementation echos <ref type="bibr" target="#b36">[37]</ref> -we also find that popular policies like LRU and LFU lead to near 80-millisecond overhead for updating.</p><p>Nevertheless, we will show in ?3.2 that it is still possible to Random <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b28">29]</ref> METIS <ref type="bibr" target="#b30">[31]</ref> &amp; ParMETIS <ref type="bibr" target="#b31">[32]</ref> GMiner <ref type="bibr" target="#b8">[9]</ref> PaGraph <ref type="bibr" target="#b36">[37]</ref> achieve a good trade-off between cache hit ratios and dynamic cache overhead, by exploiting the characteristics of GNN training and carefully designing the cache engine. Challenge 2: Develop a scalable partition algorithm for efficient sampling during GNN training. Giant graphs must be partitioned because a single server cannot hold the entire graph in its DRAM. Such algorithms must be scalable to giant graphs. Some partition algorithms, like the METIS <ref type="bibr" target="#b30">[31]</ref> family used by DGL, rely on maximal matching to coarsen the graph ( ?3.3), which is not friendly to giant graphs due to high memory complexity <ref type="bibr" target="#b22">[23]</ref>. Some other partition algorithms have high time complexity, like the one used by PaGraph <ref type="bibr" target="#b36">[37]</ref>, and are not friendly to giant graphs, either.</p><p>The partition algorithms are important because they affect the sampling overhead in two ways. First, they determine cross-partition communication overhead. Sampling algorithms construct a subgraph by sampling from a training node's multi-hop neighbors. If the neighbors are hosted on the same graph store server, sampler processes colocated with graph store servers can finish sampling locally. Otherwise, it must request data from other servers, incurring high communication overhead. Naive algorithms, like random partitioning 1 used by Euler, are agnostic to the graph structure. Most state-of-the-art (SOTA) graph partition algorithms on graph processing and graph mining, like GMiner <ref type="bibr" target="#b8">[9]</ref> and CuSP <ref type="bibr" target="#b24">[25]</ref>, only consider one-hop connectivity instead of multi-hop connectivity. They are suboptimal because multi-hop neighbors are likely scattered in different graph partitions.</p><p>Second, partition algorithms determine the load balance across graph store servers and sampler processes. In a training epoch, one must iterate all training nodes and sample subgraphs based on them. For good load balance, one should balance the training nodes across partitions. However, SOTA graph partition algorithms only consider balancing all the nodes, of which only 10% <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b44">45]</ref> are training nodes. Because they focus on maintaining neighborhood connectivity, they may produce less balanced partitions than the pure random algorithm, especially imbalanced for the training nodes.</p><p>Ideally, we need a partition algorithm that works on giant graphs and simultaneously minimizes the cross-partition com-1 Also including Lux <ref type="bibr" target="#b28">[29]</ref>, which is a random partition algorithm that frequently re-partitions the graph for load balancing.  <ref type="table" target="#tab_0">1</ref>, none of the existing partition algorithms satisfies our needs, which motivates our algorithm ( ?3.3). Challenge 3: Address the resource contention among multiple data preprocessing stages. We further identify a unique problem of GNN training -the preprocessing is much more complex than traditional DNN training. The subgraph sampling process, subgraph structure serialization and de-serialization, node feature retrieving and cache engine all consume CPU and memory/PCIe/network bandwidth resources. We find that, if all the processes freely compete for resources, the resource contention may lead to poor performance. A key reason is that some operations do not scale well with more resources, while they may acquire more than they need for not becoming the bottleneck.</p><p>Existing GNN training frameworks largely ignore this problem. DGL, PyG and Euler either blindly let all processes freely compete, or leave the scheduling to underlying frameworks like TensorFlow and PyTorch. The low-level frameworks are agnostic to the specifics in GNN training, thus are also naive and suboptimal. Our answer to this challenge is a carefully designed resource isolation scheme ( ?3.4).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Design</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Overview</head><p>The overall architecture of BGL is shown in Figure <ref type="figure">4</ref>. The graph partition module loads the graph data stored in the distributed storage system (e.g., HDFS), and shards the whole graph into several partitions. Graph partitioning is a one-time cost, and the results are saved in the distributed storage system used for different GNN training tasks. Each partition can then be loaded into a graph store server's memory, ready for subgraph sampling. Samplers run on the CPUs of graph store severs. They select a number of training nodes and sample their multi-hop neighbors by iteratively sampling next-hop neighbors for several times. If all the next-hop neighbors are stored in the current graph store server, samplers can get the list locally; otherwise, they need to send network requests to other graph store servers. Each worker in BGL runs on 1 GPU. It receives sampled subgraphs from samplers and retrieves features of subgraph nodes from graph store severs, with a local feature cache engine to improve the retrieving efficiency. Furthermore, BGL uses a fine-grained pipeline, allowing parallel and asynchronous execution of each stage.</p><p>To minimize the overhead of node feature retrieving, BGL proposes an algorithm-system co-design which can achieve high cache hit ratios with low dynamic cache overhead. On the system side, BGL designs a multi-GPU cache supporting dynamic caching policies. To reduce the dynamic cache overhead, we use the FIFO policy ( ?3.2.1) and carefully ensure the cache consistency among multiple GPU workers without locks ( ?3.2.3). To achieve high cache hit ratios, on the algorithm side, samplers in BGL select training nodes by proximity-aware ordering. This ordering algorithm uses BFS traversal to improve the temporal locality of subgraphs nodes in several consecutive mini-batches and carefully introduces randomness to preserve the state-of-the-art model accuracy ( ?3.2.2). Under proximity-aware ordering, we show that simple FIFO can achieve highest cache hit ratios among popular complex polices, such as LRU and LFU.</p><p>To partition billion-node graphs for efficient sampling during GNN training, in the graph partition module, BGL first merges nodes into several blocks to reduce the graph size. We use multi-source BFS to preserve the multi-hop connectivity when merging blocks. Preserving the connectivity of blocks, BGL maximally assigns each block to the partition with the consideration of multi-hop connectivity, while optimizing the training workload balancing as well ( ?3.3).</p><p>To allocate resources for contending pipeline stages, by observing that some operations do not scale well with more resources under full contention, BGL takes a resource isolation idea when assigning the resource for each pipeline stage. Specifically, BGL formulates an optimization problem and assigns isolated resources accordingly to minimize the time of each pipeline stage under resource constraints. ( ?3.4)</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Feature Cache Engine</head><p>Feature retrieving contributes to a significant part of communication overhead in constructing a mini-batch. A feature cache can reduce the communication overhead upon a cache hit. However, the state-of-the-art design uses the static cache policy, which leads to low cache hit ratios for giant graphs.  Figure <ref type="figure">5</ref>: We test the cache hit ratios and overhead on Ogbnpapers with different cache sizes. PO is short for proximityaware ordering, which is proposed in ?3.2.2.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.1">Dynamic Cache Policy</head><p>The first question is, which dynamic caching policy should we choose? PaGraph <ref type="bibr" target="#b36">[37]</ref> indicates that dynamic policies have too high overhead. Based on our best-effort implementation, <ref type="foot" target="#foot_0">2</ref> we compare popular caching policies including LRU, LFU and FIFO in Figure <ref type="figure">5a</ref>. LRU <ref type="bibr" target="#b39">[40]</ref> and LFU <ref type="bibr" target="#b41">[42]</ref> indeed have intolerable cache overhead. FIFO's overhead (&lt;20ms per batch) meets the throughput requirement for GNN training -as mentioned in ?2, an iteration of typical GNN model computation on GPU is around 20ms. In an asynchronous pipeline with cache as a part of data prefetching, FIFO cache will not become the bottleneck. Note that in Figure <ref type="figure">5a</ref>, the overhead we report is the amortized time including cache lookup and cache update upon cache misses. Hence, a higher cache hit ratio, which means less frequent cache update for FIFO, can help to reduce the amortized overhead. We focus on amortized overhead because, again, cache is a stage in an asynchronous pipeline.</p><p>However, FIFO's cache hit ratio is unimpressive -it is even lower than static policy's (Figure <ref type="figure">5b</ref>). The reason is that FIFO does not leverage the distribution of node features. Regardless of how hot the node feature is, it is evicted as frequently as other colder node features.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.2">Proximity-Aware Ordering</head><p>To address the above problem, we propose proximity-aware ordering to improve the cache hit ratio with FIFO while maintaining low overhead. Figure <ref type="figure">5b</ref> shows that FIFO combined with proximity-aware ordering can achieve the highest cache hit ratio among all candidate cache policies.</p><p>We observe that each node may appear more than once among different training batches. This gives us an opportunity for data reuse by caching node features in nearby mini-batches (a.k.a., temporal locality). With random neighbor sampling, the chances of a node in nearby training batches are low. In order to increase cache hit ratio, we propose proximityaware ordering by generating training nodes sequences in a  There is a trade-off between improving the temporal locality and ensuring model convergence. Traversal-based ordering improves the temporal locality, but violates the i.i.d. requirement of SGD, leading to different label distributions of batches and slow model convergence. On the other hand, random ordering, such as random shuffling, achieves state-ofthe-art model accuracy by selecting random training nodes, with the cost of poor temporal locality.</p><p>Our proximity-aware ordering balances the above trade-off. The key idea is that samplers still select training nodes based on the BFS traversal, but we carefully introducing randomness. As a result, if there is little difference between the label distribution of each batch by proximity-aware ordering and that of all training nodes, the model convergence is kept.</p><p>We introduce the following randomness in proximity-aware ordering, as shown in Figure <ref type="figure" target="#fig_6">7</ref>. First, we use several different BFS sequences generated by selecting random BFS roots and select training nodes from different sequences in a roundrobin manner to form a training batch. Second, we randomly shift each BFS sequence. We observe that the label distribution on the last several mini-batches are dramatically changed, because small connected components in giant graphs are more likely to be traversed at last and appended at the end of each BFS sequence. Using random shifting not only randomizes this behavior but also preserves the order of consecutive nodes in BFS sequences.</p><p>How many BFS sequences should we select? We find, as long as the model convergence is guaranteed, we should use the minimum number of sequences to maximize the temporal locality. The theoretical theorem in <ref type="bibr" target="#b38">[39]</ref> shows that if there is little difference between the output distribution of one algorithm A and the uniform distribution, A will not influence the convergence rate. <ref type="bibr" target="#b38">[39]</ref> defines the difference ?, named shuffling error, as the total variation distance between the two distributions, and proves that, if ? ? bM/n, the convergence  is not influenced, where b is the batch size, M is the number of workers and n is the size of training data.</p><p>Based on the above theorem, we determine the number of sequences as follows. We use the label distribution to calculate the shuffling error and estimate the probability of each label under the proximity-aware ordering as the frequency in per mini-batch. BGL firstly generates hundreds of BFS sequences and gradually increases the number of sequences from one until the shuffling error is smaller than the requirement of convergence (e.g., 5 sequences). Then, we generate five BFS sequences (SEQ0-SEQ4) at the beginning of each epoch and apply random shifting to each sequence (see Figure <ref type="figure" target="#fig_6">7</ref>).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.3">Maximizing Cache Size</head><p>Orthogonal to the dynamic cache policy, another way to increase the cache hit ratio is to enlarge the cache size. In BGL, we jointly use the memory of multiple GPUs (if the training job uses multiple GPUs) and CPU memory to build a twolevel cache. The detailed structure and cache workflow of our feature cache engine are shown in Figure <ref type="figure" target="#fig_7">8</ref>. Multi-GPU Cache. As shown in Figure <ref type="figure" target="#fig_7">8</ref>, we create one cache map and one cache buffer for each GPU. Cache map is a HashMap with node IDs as keys and the pointers to buffer slots in cache buffer as values. Cache buffer consists of buffer slots, each of which stores a node feature. Each GPU cache map manages its own GPU cache buffer.</p><p>To avoid wasting precious GPU memory, we ensure no duplicated entries among all GPU cache buffers by assigning different and disjoint node IDs to each GPU cache map (mod by the number of workers). A GPU can fetch node features from another GPU via point-to-point GPU memory copy. This works particularly well with GPUs that are interconnected by NVLinks, just like our NVIDIA V100-based environment.</p><p>Since CPU memory is much larger than GPU memory, BGL also adds a CPU cache on top of the multi-GPU cache to further increase the cache size and reduce the communication traffic to graph store servers. The CPU cache uses the same cache policy as the GPU cache, so we omit the details. Cache Workflow that Guarantees Consistency. As shown in Figure <ref type="figure" target="#fig_7">8</ref>, the workflow of the cache engine goes as follows.</p><p>After receiving sampled subgraphs (), dispatching threads split the subgraph nodes by mod operation and send cache queries containing node IDs to cache query queues (). Each processing thread is assigned to each GPU cache buffer and processes all cache queries on this buffer (). It first looks up the subgraph nodes in the GPU cache map, and then gathers cached features of those nodes from GPU cache buffers ().</p><p>In case of GPU cache misses, it looks up the CPU cache map for uncached nodes, gathers cached feature tensors from CPU cache buffer, and sends them to the GPU (). The remainders are requested from graph store servers and sent to GPUs once they are received (). At last, the cache map and the cache buffer are updated according to our caching policies.</p><p>There can be race conditions when the same cache buffer is read and written by different GPU workers simultaneously. A naive solution is to use locks. However, for GPUs, it means synchronization in CUDA APIs, leading to large overhead. Our solution is to queue all the operations towards a given GPU cache, including query and update. Only one processing thread polls the queue and then reads or writes the cache using CUDA. This reduces the overhead by 8x compared with using locks while avoids racing.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Graph Partition Module</head><p>Graph partition algorithms largely impact the performance of graph data sampling. As described in ?2, a good partition algorithm should have the following properties: (i) Scalability to billion-node graphs, in terms of both memory and computation complexity, (ii) Multi-hop connectivity: nodes in a multi-hop neighborhood can be accessed in a single or few requests. (iii) Load balance: the training nodes should be balanced across partitions. None of the existing algorithms has all the properties simultaneously.</p><p>Existing partition algorithm either fails to consider GNN's data accessing pattern or just unable to scale to web-scale graphs. To this end, we propose a novel graph partition algorithm. We make two key innovations: first, we adopt a multilevel coarsening strategy to greatly reduce the complexity of partitioning giant graphs while preserving multi-hop connectivity. Second, we propose a novel assignment heuristic, which assigns nodes to partitions with multi-hop connectivity and training node load balancing to improve sampling speed.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.1">Partition Workflow</head><p>We outline the major steps of our partition algorithm in Figure <ref type="figure" target="#fig_8">9</ref>. A block is a connected subgraph that merges neighboring nodes for coarsening the graph, which is generated by block generators. We use multi-source BFS to merge nodes to preserving connectivity, which is the key difference from other algorithms, such as METIS. The block assigner collects blocks from all block generators, and applies a heuristic (see ?3.3.2) to assign each block to different partitions.The colors of nodes in the figure denote different blocks in the coarsened graph (step in Figure <ref type="figure" target="#fig_8">9</ref>), or the nodes belonging to different blocks (step and in Figure <ref type="figure" target="#fig_8">9</ref>). Coarsening: We first perform multi-source BFS to divide the graph into many small blocks. Each block generator loads graph data from HDFS using a random partitioning algorithm, and randomly chooses a few source nodes within the partition for block merging. Each source node is assigned a unique Block ID and broadcasts the Block ID to its neighbors for generating blocks. A block is generated once the block size (i.e., the number of nodes with the same block ID) exceeds a threshold (e.g., 100K), or there are no unvisited neighbors in BFS. When all nodes are visited, the block generating procedure stops. Treating each block as one node, we obtain a coarsened graph from the original graph (see step in <ref type="bibr">Fig 9)</ref>. Each block generator maintains a mapping from the node ID to block ID, which is synchronized among all block generators for uncoarsening. We further deploy a multi-level coarsening strategy to speedup the partition process. First, for small blocks connecting to large blocks <ref type="foot" target="#foot_1">3</ref> , we merge them with their large block neighbors. Second, other small blocks without large block neighbors are randomly merged.</p><p>The multi-level coarsening strategy scales well for billionnode graphs with numerous connected components <ref type="bibr" target="#b35">[36]</ref>. It significantly reduces the complexity of the following assignment heuristics as well as preserving the connectivity. Assignment: The block assigner collects the blocks of the multi-level coarsened graph from block generators for partitioning. It applies a greedy assignment heuristics to form graph partitions, targeting both multi-hop locality and training node balancing. The block assigner then broadcasts the block partitions to the generators. We leave the details of the assignment heuristics in ?3.3.2. </p><formula xml:id="formula_0">(|E| + |E 1 | + |E 2 | j ).</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.2">Assignment Heuristics</head><p>There is a trade-off when assigning nodes to partitions: a) on the one hand, nodes need to be assigned to the partition where most of their neighbors locate to reduce cross-partition communication when sampling; b) on the other hand, to balance the load among partitions, we also tend to assign nodes to the partition with larger capacity. To balance the trade-off, we propose the following heuristic for selecting the index of the partition where block B is assigned:</p><formula xml:id="formula_1">arg max i?[k] ? j P(i) ? ? j (B) ? 1 - |P(i)| C ? 1 - |T (i)| C T ,</formula><p>where k is the number of partitions, each partition is referred by its index P(i), and B denotes the block to be assigned. The heuristics contains three items. The first item is the multi-hop block neighbor term, ? j |P(i) ? ? j (B)|, which we tend to assign the current block to the partition with more multi-hop locality, where ? j (B) refers to the set of j-hop neighbor blocks of B. The second item is the node penalty term, </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4">Resource Isolation For Contending Stages</head><p>To improve resource utilization and training speed, we divide GNN training into 8 asynchronous pipeline stages (see Fig-ure <ref type="figure" target="#fig_9">10</ref>) with careful consideration of data dependency and resource allocation. This is more complex than traditional DNN training. Some of the stages contend for resources on CPU, Network and PCIe bandwidth: (i) Processing sampling requests and constructing subgraphs compete for CPUs on graph store servers. (ii) Subgraph processing (e.g., converting graph format) and executing cache workflow compete for CPUs in the worker machine. (iii) Moving subgraphs and copying features to GPUs compete for PCIe bandwidth.</p><p>However, we find that if all the processes freely compete for resources, the resource contention may lead to poor performance. A key reason is that some stages do not scale well with more resources, while they may acquire more than they need for not becoming the bottleneck. For example, we observe that for the executing cache workflow stage (Stage 4 in Figure <ref type="figure" target="#fig_9">10</ref>), when the number of CPU cores exceeds a threshold (e.g., 40), the performance converges or even degrades with more CPU cores (e.g., more than 64). This is because of the memory bandwidth limit and synchronization and scheduling overhead in the multi-threading library like OpenMP <ref type="bibr" target="#b6">[7]</ref>.</p><p>To solve the above problem, we propose a profiling-based resource allocation to assign isolated resources to different pipeline stages. We first profile the execution time of each stage, and then adjust resource allocation to balance the execution time of each stage. We formulate the following optimization problem to compute the best resource allocation in a given GNN training task:</p><formula xml:id="formula_2">min max T 1 c 1 , T 2 c 2 , T net , T 3 c 3 , D I b I , f (c 4 ), D II b II , T gpu s.t. c 1 + c 2 C gs c 3 + c 4 C wm b I + b II B pcie</formula><p>The objective is to minimize the maximal completion time of all pipeline stages. The constraints are resource capacity constraints for CPU on graph store servers, CPU on worker machines and PCIe bandwidth. The main decision variables are c i , the number of CPUs required for the ith stage (i ? {1, 2, 3, 4}) in Figure <ref type="figure" target="#fig_9">10</ref>; and b i , PCIe bandwidth of the ith stage (i ? {I, II}). All the other quantities are profiled by our system, including the time of the ith stage T i , the data size of processed subgraphs D I , and the data size of missed features D II <ref type="foot" target="#foot_2">4</ref> . C gs and C wm denote the number of CPU cores on graph store servers and worker machines respectively, and B pcie is the PCIe bandwidth of the worker machines.</p><p>We assume linear acceleration of CPU execution, except on processing caching operation (Stage 4 in Figure <ref type="figure" target="#fig_9">10</ref>). We introduce a fitting function f (c 4 ) = a/c 4 + d to output the completion time of caching stage with a certain number of CPU cores c 4 , where a and d are approximated by pre-running the task.</p><p>We use brute-force search to find the optimal resource allocation. To reduce the search space, we add integer assumptions on bandwidth variables b I and b II . The time complexity is O(C 2 gs +C 2 wm + B 2 pcie ) In average, our method spends less than 20ms on searching the best resource allocation strategy for GNN training pipeline.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Implementation</head><p>We implement BGL with over 4,400 lines of C++ code and 3,300 lines of Python code. We reused the graph store module and GPU backend of the open-sourced Deep Graph Library (DGL v0.5 <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b45">46]</ref>), and utilized the graph processing module of GMiner <ref type="bibr" target="#b8">[9]</ref> for partitioning. Our design can be applied to other GNN frameworks with little change. We are collaborating with the DGL team to upstream our implementation.</p><p>Feature Cache Engine. Cache workflow in feature cache engine contains several GPU operations, such as copying tensor from CPU memory to GPU memory and launching GPU kernels to copy tensor from/to other GPUs. To make cache processing asynchronous, we enqueue all cache GPU operations into a dedicated CUDA stream, and pre-allocate dedicated CPU memory as buffer and pin the memory. Our cache engine uses CUDA Unified Virtual Addressing, and enables fast GPU P2P communication on each cache processing thread. The cache processing thread constructs a lightweight CUDA callback function and enqueues it into the CUDA stream. The callback function counts the number of finished cache queries and notifies workers when finishing all cache queries.</p><p>To further expedite FIFO performance, BGL uses multiple OpenMP threads to execute FIFO concurrently. We maintain a lightweight atomic variable tail shared by all OpenMP threads to record the next column index of GPU cache buffer for insertion or eviction. When inserting a new node, each OpenMP thread finds the next position by atomically increasing tail and the real position is (tail+1)%buffer_size (we treat each GPU cache buffer as a circular queue). If this position has an old node, it evicts the old node from the GPU cache map. Since node features are not changed during training, old node features are implicitly evicted by inserting new node features based on our cache workflow in ?3.2.3.</p><p>Inter-Process Communication. We use separate processes for sampling, feature retrieving and GNN computation stages. To minimize the IPC overhead, we use shared memory to avoid unnecessary memory copy among different processes. Specifically, we use Linux Shared Memory and CUDA IPC to avoid unnecessary CPU and GPU memory copy, respectively. 5 Evaluation</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Methodology</head><p>Testbed. We evaluate BGL on a heterogeneous CPU/GPU cluster with 1 GPU server and 32 CPU servers. The GPU server has 8 Tesla V100-SMX2-32GB GPUs (connected by NVLinks), 96 vCPU cores and 356GB memory. Each CPU server has 96 vCPU cores and 480GB memory. All servers are inter-connected with 100Gbps bandwidth using Mellanox CX-5 NICs. The graph datasets are stored in HDFS.</p><p>Datasets. As show in Table <ref type="table" target="#tab_4">Table 2</ref>, we train GNNs on three datasets with different sizes, including two public graph datasets: Ogbn-products <ref type="bibr" target="#b25">[26]</ref> and Ogbn-papers <ref type="bibr" target="#b44">[45]</ref>, as well as a proprietary web-scale graph dataset: User-Item. GNN Models. We evaluate BGL with three representative GNN models: GCN (Graph Convolution Network) <ref type="bibr" target="#b34">[35]</ref>, GAT (Graph Attention Network) <ref type="bibr" target="#b43">[44]</ref> and GraphSAGE <ref type="bibr" target="#b21">[22]</ref>.</p><p>We use the same model hyper-parameters as OGB leaderboards <ref type="bibr" target="#b2">[3]</ref>, e.g., 3 layers and 128 hidden neurons per layer.</p><p>Mini-batch Sampling Algorithms. In our experiments, we use Neighbor Sampling <ref type="bibr" target="#b21">[22]</ref>, which is shown to achieve comparable model performance with full-batch graph training. <ref type="foot" target="#foot_3">5</ref>We set the mini-batch size to 1000, i.e., each mini-batch contains 1000 sampled subgraphs and each subgraph contains one training nodes and its three-hop neighbors with fanout {15,10,5} in all experiments.</p><p>Baselines. We use four open-sourced and widely-used GNN training frameworks as baselines for comparison<ref type="foot" target="#foot_4">6</ref> .</p><p>? Euler <ref type="bibr" target="#b1">[2]</ref>: Euler (v1.0) is a distributed graph learning system built atop TensorFlow <ref type="bibr" target="#b4">[5]</ref>. We use TensorFlow's GPU backend for acceleration.</p><p>? DGL <ref type="bibr" target="#b0">[1]</ref>: DGL is a deep learning library for graphs, compatible with multiple deep learning frameworks (e.g., Pytorch and TensorFlow). We use the DGL v0.5 release (Dist-DGL <ref type="bibr" target="#b54">[55]</ref>).</p><p>? PyG <ref type="bibr" target="#b15">[16]</ref>: PyG (v1.6.0) is an extension library for Py-Torch, which consists of various methods for deep learning   on graphs and a mini-batch loader for multi-GPU support in a single machine.</p><p>? PaGraph <ref type="bibr" target="#b36">[37]</ref>: PaGraph is a sampling-based GNN framework with a static cache strategy on GPU, which supports multi-GPU in a single server. Specifically, PyG co-locates graph store servers and workers and allows graph sampling on the same machine only, making it unable to process large graph datasets (i.e., Ogbnpapers and User-Item) due to memory limit. Also, PaGraph only supports generating partitions for each GPU in a single machine. Hence, we only compare BGL with PyG and Pa-Graph on Ogbn-products dataset. When training on User-Item dataset with DGL, we separate the graph store servers from the workers since our GPU servers do not have enough memory to load the graph partitions. To evaluate the performance boundary, we use 32 and 8 CPU-based graph store servers for all frameworks on User-Item and Ogbn-papers, respectively.</p><p>Graph Partitioning. DGL uses METIS partitioning for small graphs (i.e., Ogbn-products), and Random partitioning for large graphs that cannot be fitted into single machine (i.e., Ogbn-papers and User-Item). Euler uses random partitioning for all graphs, and BGL uses the proposed algorithm in ?3.3, where we set j = 2, i.e., searching two-hop neighbors.   <ref type="figure">5b</ref>) and overall feature retrieving time (see Figure <ref type="figure" target="#fig_9">14</ref>). GPU Utilization. We compare the GPU utilization achieved by BGL and DGL with exactly the same GPU backend. We run GraphSAGE and GAT models on Ogbn-products dataset with 8 GPU. BGL achieves 99% GPU utilization with the computation-intensive GAT model, while DGL's utilization is only 38%. For GraphSAGE model with shallow neural layers, BGL improves the GPU utilization from 10% to 65%.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Overall Performance</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Individual Components</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3.1">Graph Partition</head><p>We compare the graph partition algorithm in BGL with Random and GMiner partitioning, since only these two partition algorithms can scale to Ogbn-papers and User-Item. We evaluate the sampling time under different partition algorithms and the one-time partition time (counted from loading the graph data to saving the partition results to files). Table <ref type="table" target="#tab_5">3</ref> shows the graph sampling time (per epoch) under different partition algorithms. BGL achieves the best performance across different graph datasets, reducing the sampling time by at least 20% over random partition algorithm. BGL significantly reduces the cross-partition communication in distributed neighbor sampling by including the multi-hop locality when partitioning. Compared to GMiner, which also preserves connectivity, BGL manages to drop the sampling time by 14% and 10% for Ogbn-products and Ogbn-papers, respectively, thanks to training node balancing and multi-hop connectivity of partitioning. It is worth noting that, in some cases, GMiner even results in longer graph sampling time than random partitioning algorithm (e.g., in User-Item), showing the disadvantage of imbalanced sampling workload.</p><p>BGL introduces multi-level coarsening to mitigate the extra complexity brought by computing two-hop locality. Table <ref type="table" target="#tab_6">4</ref> shows BGL's partition algorithm runs as fast as the welloptimized original GMiner.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3.2">Feature Cache Engine</head><p>In ?3.2, we have shown the cache hit ratio with different cache policies and cache sizes. Here, we present the amortized feature retrieving time with the feature cache engine.</p><p>We compare the feature retrieving time of one mini-batch using different GPUs on Ogbn-papers. PaGraph cannot scale to such large graphs. Therefore we implement its static caching policy in BGL, which caches the features of highdegree nodes. Euler and DGL do not have cache, so the feature retrieving time is the elapsed time of transmitting features from graph store servers to GPU memory. As shown in Figure <ref type="figure" target="#fig_9">14</ref> (in log scale), due to high cache hit ratios and low cache overhead, the feature retrieving time of BGL is the shortest among all systems. Compared to other systems on 1 GPU worker, BGL reduces the feature retrieving time 98%, 88% and 57% for Euler, DGL and PaGraph respectively.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3.3">Resource Isolation</head><p>To evaluate the effectiveness of our resource isolation mechanism, we compare BGL with Euler, DGL and BGL without resource isolation when training GraphSAGE with 4 GPUs on datasets Ogbn-products and Ogbn-papers. "BGL w/o isolation" is a naive resource allocation method, which shares all resources among pipeline stages. It increases resource utilization but incurs larger contention and parallel overhead.  As shown in Figure <ref type="figure" target="#fig_9">15</ref> (in log scale), BGL achieves the highest throughput across all settings. Both BGL and "BGL w/o isolation" outperform the baselines, namely, Euler and DGL. As compared to the naive resource allocation strategy without isolation, BGL speedups the throughput by up to 2.7x. It mitigates the resource contention among different pipeline stages, and incurs lower parallel overhead of OpenMP.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Model Accuracy</head><p>To verify the correctness of BGL, we evaluate the test accuracy on GCN, GAT and GraphSAGE with Ogbn-products and Ogbn-papers. We run 100 epochs for each training task. DGL uses random ordering while BGL uses proximity-aware ordering. As shown in Table <ref type="table" target="#tab_7">5</ref> and Figure <ref type="figure" target="#fig_15">16</ref>, BGL converges to almost the same accuracy as the original DGL.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Related Work</head><p>Graph Partition Algorithms. Graph partitioning is widely adopted when processing large graphs. NeuGraph <ref type="bibr" target="#b37">[38]</ref> leverages the Kernighan-Lin <ref type="bibr" target="#b32">[33]</ref> algorithm to partition graphs into chunks with different sparsity levels. Cluster-GCN <ref type="bibr" target="#b10">[11]</ref> constructs the training batches based on the METIS <ref type="bibr" target="#b30">[31]</ref> algorithm, together with a stochastic multi-clustering framework to improve model convergence. When dealing with large graphs in distributed GNN training, partition algorithms, such as Random, Round-Robin and Linear Deterministic Greedy <ref type="bibr" target="#b5">[6]</ref>, are often used <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b45">46,</ref><ref type="bibr" target="#b51">52,</ref><ref type="bibr" target="#b56">57]</ref>. They incur low partitioning overhead while not ensuring partition locality. GNN Training Frameworks. In recent years, new specialized frameworks have been proposed upon existing deep learning frameworks to provide convenient and efficient graph oper-  <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b15">16,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b45">46,</ref><ref type="bibr" target="#b56">57]</ref>. Other than DGL <ref type="bibr" target="#b45">[46]</ref>, Euler <ref type="bibr" target="#b1">[2]</ref> and PyG <ref type="bibr" target="#b15">[16]</ref>, NeuGraph <ref type="bibr" target="#b37">[38]</ref> translates graph-aware computation on dataflow and recasts graph optimizations to support parallel computation for GNN training.</p><p>But it can only train small graphs on multi-GPUs in a single machine. AliGraph <ref type="bibr" target="#b56">[57]</ref> is a GNN system that consists of distributed graph storage, optimized sampling operators and runtime to support both existing GNNs and in-house developed ones for different scenarios. AGL <ref type="bibr" target="#b51">[52]</ref> is a scalable and integrated GNN system, implemented on MapReduce <ref type="bibr" target="#b12">[13]</ref> that guarantees good system properties. However, neither Aligraph nor AGL exploits GPU acceleration.</p><p>GNN Training Acceleration. Various systems have been devoted to improving GNN training performance. Some works <ref type="bibr" target="#b7">[8,</ref><ref type="bibr" target="#b29">30,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b42">43,</ref><ref type="bibr" target="#b46">47]</ref> target full-batch training. GNNAdvisor <ref type="bibr" target="#b46">[47]</ref> explores the GNN input properties and proposes a 2D workload management and specialized memory customization for system optimizations. DGCL <ref type="bibr" target="#b7">[8]</ref> proposes a communication planning algorithm to optimize GNN communication among multiple GPUs with METIS partition. Both projects assume that graphs are stored in a single machine.</p><p>Some works <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b36">37,</ref><ref type="bibr" target="#b56">57]</ref> target mini-batch training. Pa-Graph <ref type="bibr" target="#b36">[37]</ref> adopts static GPU caching for nodes with high degrees. Still, it assumes that graph can be loaded in a single machine, hence infeasible for large graphs. P 3 <ref type="bibr" target="#b18">[19]</ref> reduces retrieving feature traffic by combining model parallelism and data parallelism. However, hybrid parallelism in P 3 incurs extra synchronization overhead. Its performance suffers when hidden dimensions exceeds 128 (a common practice in modern GNNs). Further, P 3 overlooked the subgraph sampling stage. In subgraph sampling, random hashing partitioning leads to extensive cross-partition communication.</p><p>Some works try to improve graph sampling performance on GPUs, such as NextDoor <ref type="bibr" target="#b27">[28]</ref> and C-SAW <ref type="bibr" target="#b40">[41]</ref>. However, their performance is limited by small GPU memory. Hence, they are not suitable for giant graphs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Conclusion</head><p>We present BGL, a GPU-efficient GNN training system for large graph learning that focuses on removing the data I/O and preprocessing bottleneck, to achieve high GPU utilization and accelerate training. To minimize feature retrieving traffic, we propose a dynamic feature cache engine with proximity-aware ordering, and find a sweet spot of low overhead and high cache hit ratio. BGL employs a novel graph partition algorithm tailored for sampling algorithms to minimize cross-partition communication during sampling. We further optimize the resource allocation of data preprocessing using profiling-based resource isolation. Our extensive experiments demonstrate that BGL significantly outperforms existing GNN training systems by 20.68x on average. We will open-source BGL in the future and hope to continue evolving it with the community.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Sampling-based GNN training process.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Training time per mini-batch of DGL and Euler.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: GPU utilization of DGL and Euler.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head></head><label></label><figDesc>Trade-off between hit ratios and overhead (10% cache size).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>Cache hit ratios with different cache sizes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: 5 training nodes graph.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Two types of randomness introduced in proximity-aware ordering.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Structure and workflow of feature cache engine.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: The partition workflow of our partition algorithm.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>( 1 -</head><label>1</label><figDesc>|P(i)|/C), to balance the number of nodes in each partition, where C = |V |/k is the capacity constraint on each partition. The third item is the training node penalty term, (1 -|T (i)|/C T ), to balance the training nodes across partitions, where T (i) denotes the training nodes that have been assigned to ith partition, and C T = |T |/k denotes training node capacity constraint on each partition. We take multiplicative weights in this heuristics to enforce exact balance.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Training 3 GNN models over Ogbn-products (throughput in log scale).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: Training 3 GNN models over Ogbn-papers (throughput in log scale). We did not compare with PaGraph and PyG because they fail to train Ogbn-papers (and User-Item) due to OOM or finish partitioning in 24 hours.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 13 :</head><label>13</label><figDesc>Figure 13: Training 3 GNN models over User-Item (throughput in log scale).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 11 ,</head><label>11</label><figDesc>Figure 11, 12 and 13 show the training speed of baselines and BGL in log scale when training the three GNN models on three graph datasets, with the number of workers ranging from 1 to 8, where each worker has one GPU. We use samples/sec as the metric to measure the training speed. A sample is a sampled subgraph of one training node. Different Frameworks. BGL achieves 1.14x -69x speedups over four baselines in all settings. BGL has 69x (the most) speedup over Euler. This is because Euler's random sharding in graph partition has very low data locality, resulting in frequent cross-partition communication in sampling. DGL does not cache features on GPU, introducing significant feature retrieving time. Thus, BGL outperforms DGL by up to 30x. PaGraph performs the best among baselines on Ogbn-product. It places graph structure data on each GPU with static caching on node features, leading to much faster data preprocessing. Even in this case, BGL still has up to 3.27x speedup, thanks to dynamic feature caching and resource isolation for contending pipeline stages. BGL outperforms all other systems, and the geometric mean of speedups over PaGraph, PyG, DGL and Euler is 2.14x, 3.02x, 7.04x and 20.68x, respectively. Different GNN models. The training performance varies significantly across different GNN models. We see that BGL</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>Figure 14 :Figure 15 :</head><label>1415</label><figDesc>Figure 14: Feature retrieving time of one mini-batch on Ogbn-papers.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>Figure 16 :</head><label>16</label><figDesc>Figure 16: Using proximity-aware ordering, BGL converges to the same test accuracy as DGL on ation primitives for GNN training<ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b15">16,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b45">46,</ref><ref type="bibr" target="#b56">57]</ref>. Other than DGL<ref type="bibr" target="#b45">[46]</ref>, Euler<ref type="bibr" target="#b1">[2]</ref> and PyG<ref type="bibr" target="#b15">[16]</ref>, NeuGraph<ref type="bibr" target="#b37">[38]</ref> translates graph-aware computation on dataflow and recasts graph optimizations to support parallel computation for GNN training. But it can only train small graphs on multi-GPUs in a single machine. AliGraph<ref type="bibr" target="#b56">[57]</ref> is a GNN system that consists of distributed graph storage, optimized sampling operators and runtime to support both existing GNNs and in-house developed ones for different scenarios. AGL<ref type="bibr" target="#b51">[52]</ref> is a scalable and integrated GNN system, implemented on MapReduce<ref type="bibr" target="#b12">[13]</ref> that guarantees good system properties. However, neither Aligraph nor AGL exploits GPU acceleration. GNN Training Acceleration. Various systems have been devoted to improving GNN training performance.Some works<ref type="bibr" target="#b7">[8,</ref><ref type="bibr" target="#b29">30,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b42">43,</ref><ref type="bibr" target="#b46">47]</ref> target full-batch training. GNNAdvisor<ref type="bibr" target="#b46">[47]</ref> explores the GNN input properties and proposes a 2D workload management and specialized memory customization for system optimizations. DGCL<ref type="bibr" target="#b7">[8]</ref> proposes a communication planning algorithm to optimize GNN communication among multiple GPUs with METIS partition. Both projects assume that graphs are stored in a single machine.Some works<ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b36">37,</ref><ref type="bibr" target="#b56">57]</ref> target mini-batch training. Pa-Graph<ref type="bibr" target="#b36">[37]</ref> adopts static GPU caching for nodes with high degrees. Still, it assumes that graph can be loaded in a single machine, hence infeasible for large graphs. P 3<ref type="bibr" target="#b18">[19]</ref> reduces retrieving feature traffic by combining model parallelism and data parallelism. However, hybrid parallelism in P 3 incurs extra synchronization overhead. Its performance suffers when hidden dimensions exceeds 128 (a common practice in modern GNNs). Further, P 3 overlooked the subgraph sampling stage. In subgraph sampling, random hashing partitioning leads to extensive cross-partition communication.Some works try to improve graph sampling performance on GPUs, such as NextDoor<ref type="bibr" target="#b27">[28]</ref> and C-SAW<ref type="bibr" target="#b40">[41]</ref>. However, their performance is limited by small GPU memory. Hence, they are not suitable for giant graphs.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>Qualitative comparison of different graph partition algorithms.</figDesc><table><row><cell>Partition</cell><cell>Scalability to</cell><cell>Balanced</cell><cell>Multi-hop</cell></row><row><cell>Algorithms</cell><cell>Giant Graphs</cell><cell>Training Nodes</cell><cell>Connectivity</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head></head><label></label><figDesc>Upon receiving the block assignment results from the block assigner, the block generators start mapping back the blocks to the nodes in the original graph, i.e., uncoarsening. The partition results are then saved to the HDFS file (see step of Figure9).As a result, our partition algorithm has low time complexity and is friendly to gaint graphs. Let E 1 be the set of edges in the coarsened block graph after BFS. E 2 denotes the set of edges in the graph for assignment after multi-level block merging. With the multi-level coarsening, we reduce the time complexity of the assignment to O(|E 2 | j ), much lower than SOTA O(|E| j ) [37], where |E 2 | |E|. The total partitioning complexity is O</figDesc><table><row><cell></cell><cell></cell><cell>CPU</cell><cell>GPU</cell><cell cols="2">Network</cell><cell>PCIe</cell></row><row><cell>1. Process Sampling Requests</cell><cell>2. Construct Subgraphs Graph Store</cell><cell>3. Send Subgraphs</cell><cell cols="2">3. Receive Subgraphs Worker Machine</cell><cell cols="2">4. Process Subgraphs 5. Execute Cache Logic</cell><cell>6. Move Subgraphs to GPU 7. Move Features to GPU</cell><cell>8. Compute GNN Model</cell></row><row><cell></cell><cell cols="7">Figure 10: GNN training pipeline in BGL.</cell></row></table><note><p>Uncoarsening:</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2 :</head><label>2</label><figDesc>Datasets used in evaluation.</figDesc><table><row><cell></cell><cell>Ogbn-products</cell><cell>Ogbn-papers</cell><cell>User-Item</cell></row><row><cell>Nodes</cell><cell>2.44M</cell><cell>111M</cell><cell>1.2B</cell></row><row><cell>Edges</cell><cell>123M</cell><cell>1.61B</cell><cell>13.7B</cell></row><row><cell>Feature Dimension</cell><cell>100</cell><cell>128</cell><cell>96</cell></row><row><cell>Classes</cell><cell>47</cell><cell>172</cell><cell>2</cell></row><row><cell>Training Set</cell><cell>196K</cell><cell>1.20M</cell><cell>200M</cell></row><row><cell>Validation Set</cell><cell>393K</cell><cell>125K</cell><cell>10M</cell></row><row><cell>Test Set</cell><cell>2.21M</cell><cell>214K</cell><cell>10M</cell></row><row><cell>Disk Storage</cell><cell>6 GB</cell><cell>279 GB</cell><cell>861 GB</cell></row><row><cell>Memory Storage</cell><cell>11 GB</cell><cell>510 GB</cell><cell>2 TB</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 3 :</head><label>3</label><figDesc>Graph sampling time (seconds) per epoch during training. BGL reduces the graph sampling time by up to 25%. The number in brackets means the number of partitions in the corresponding setting. With the computation-intensive GAT model, however, the training speed of PyG and DGL is closer to that of BGL. Hence the gain for BGL ranges from 14% to 8x. It is because that the GAT model is computation-bound due to incorporating the attention mechanism into the propagation step, while its communication is less intensive than the other two GNN models; the higher ratio of computation over other stages results in smaller improvement space for BGL. We see that Euler performs the worst in GAT, since it does not optimize the GPU kernels for irregular graph structures. Scalability. BGL also outperforms other frameworks in terms of scalability. Without caching features on GPU, the throughput of baseline frameworks is bounded by PCIe bandwidth. For example, DGL has only 3x speedups when increasing the number of GPUs from 1 to 8. BGL reduces the transmitted data through PCIe bandwidth with efficient GPU cache, resulting in linear scalability in throughput. Multi-GPU systems often suffer poor scalability due to synchronization overhead or resource contention. However, our design and implementation of multi-GPU memory sharing scales well with the increased number of GPUs. With extra bandwidth brought by NVLink, accessing cache entries on other GPUs introduces negligible overhead. On the contrary, the increased cache capacity improved the cache hit ratio (see Figure</figDesc><table><row><cell cols="4">Ogbn-products (2) Ogbn-papers (4) User-Item (4)</cell></row><row><cell>Random</cell><cell>66</cell><cell>252</cell><cell>643</cell></row><row><cell>GMiner</cell><cell>58</cell><cell>209</cell><cell>931</cell></row><row><cell>BGL</cell><cell>50</cell><cell>187</cell><cell>519</cell></row><row><cell cols="4">achieves significantly higher performance improvement with</cell></row><row><cell cols="4">GraphSAGE and GCN models, by up to 30x as compared to</cell></row><row><cell>DGL and PyG.</cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 4 :</head><label>4</label><figDesc>One-time partition time cost (seconds) before training. This partition cost can be amortized by lots of training tasks, each containing hundreds of epochs to converge. The number in brackets has the same meaning as Table3.</figDesc><table><row><cell></cell><cell cols="3">Ogbn-products (2) Ogbn-papers (4) User-Item (4)</cell></row><row><cell>GMiner</cell><cell>38.2</cell><cell>1636</cell><cell>10679</cell></row><row><cell>BGL</cell><cell>23.5</cell><cell>1607</cell><cell>8468</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 5 :</head><label>5</label><figDesc>Test accuracy on different models and graphs. BGL achieves the same test accuracy as DGL.</figDesc><table><row><cell>Graph</cell><cell cols="2">System GCN GAT</cell><cell>GraphSAGE</cell></row><row><cell>Ogbn-</cell><cell>DGL</cell><cell>0.775 0.792</cell><cell>0.789</cell></row><row><cell>products</cell><cell>BGL</cell><cell>0.773 0.796</cell><cell>0.789</cell></row><row><cell>Ogbn-</cell><cell>DGL</cell><cell>0.460 0.517</cell><cell>0.460</cell></row><row><cell>papers</cell><cell>BGL</cell><cell>0.461 0.516</cell><cell>0.458</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_0"><p>We implement LFU and LRU with O(1) time complexity and use a contiguous 1D array as a hashmap to speed up key searching.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_1"><p>Empirically, we set blocks with top 10% sizes as large blocks.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_2"><p>We use the average data size when the cache is stable after several batches.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_3"><p>BGL can also be applied to other vertex-centric GNN sampling algorithms, e.g., layer-wise sampling<ref type="bibr" target="#b9">[10]</ref> and random walk sampling<ref type="bibr" target="#b49">[50]</ref>. We omit the evaluation of other sampling algorithms since it is beyond our scope.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="6" xml:id="foot_4"><p><ref type="bibr" target="#b5">6</ref> We omit P 3<ref type="bibr" target="#b18">[19]</ref> because it is not open-sourced.</p></note>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<ptr target="https://github.com/dmlc/dgl" />
+		<title level="m">Deep Graph Library (DGL)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Euler</surname></persName>
+		</author>
+		<ptr target="https://github.com/alibaba/euler" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Ogb Leaderboards</surname></persName>
+		</author>
+		<ptr target="https://ogb.stanford.edu/docs/leader_nodeprop/" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<ptr target="https://aws.amazon.com/ec2/instance-types/" />
+		<title level="m">Amazon EC2 Instance Types</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">TensorFlow: A System for Large-Scale Machine Learning</title>
+		<author>
+			<persName><forename type="first">Mart?n</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jianmin</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhifeng</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andy</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthieu</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manjunath</forename><surname>Kudlur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josh</forename><surname>Levenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajat</forename><surname>Monga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sherry</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><forename type="middle">Gordon</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><forename type="middle">A</forename><surname>Tucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pete</forename><surname>Warden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Wicke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoqiang</forename><surname>Zheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 12th USENIX Symposium on Operating Systems Design and Implementation</title>
+		<meeting>of the 12th USENIX Symposium on Operating Systems Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Streaming Graph Partitioning: An Experimental Study</title>
+		<author>
+			<persName><forename type="first">Zainab</forename><surname>Abbas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vasiliki</forename><surname>Kalavri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paris</forename><surname>Carbone</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vladimir</forename><surname>Vlassov</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">VLDB Endow</title>
+		<imprint>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<biblScope unit="page" from="1590" to="1603" />
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Measuring synchronisation and scheduling overheads in openmp</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Bull</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc of 1st European Workshop on OpenMP</title>
+		<meeting>of 1st European Workshop on OpenMP</meeting>
+		<imprint>
+			<publisher>Citeseer</publisher>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="page">49</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Dgcl: an efficient communication library for distributed gnn training</title>
+		<author>
+			<persName><forename type="first">Zhenkun</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yidi</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaihao</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fan</forename><surname>Yu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Sixteenth European Conference on Computer Systems</title>
+		<meeting>the Sixteenth European Conference on Computer Systems</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="130" to="144" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">An Efficient Task-Oriented Graph Mining System</title>
+		<author>
+			<persName><forename type="first">Hongzhi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunjian</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiao</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Da</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><surname>G-Miner</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 13th ACM European Conference on Computer Systems (Eu-roSys)</title>
+		<meeting>of the 13th ACM European Conference on Computer Systems (Eu-roSys)</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">FastGCN: Fast Learning with Graph Convolutional Networks via Importance Sampling</title>
+		<author>
+			<persName><forename type="first">Jie</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tengfei</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cao</forename><surname>Xiao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 6th International Conference on Learning Representations (ICLR)</title>
+		<meeting>of the 6th International Conference on Learning Representations (ICLR)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Cluster-GCN: An Efficient Algorithm for Training Deep and Large Graph Convolutional Networks</title>
+		<author>
+			<persName><forename type="first">Wei-Lin</forename><surname>Chiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuanqing</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Si</forename><surname>Si</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yang</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samy</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cho-Jui</forename><surname>Hsieh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 25th ACM International Conference on Knowledge Discovery &amp; Data Mining (KDD)</title>
+		<meeting>of the 25th ACM International Conference on Knowledge Discovery &amp; Data Mining (KDD)</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">One Trillion Edges: Graph Processing at Facebook-Scale</title>
+		<author>
+			<persName><forename type="first">Avery</forename><surname>Ching</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sergey</forename><surname>Edunov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maja</forename><surname>Kabiljo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dionysios</forename><surname>Logothetis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sambavi</forename><surname>Muthukrishnan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of VLDB Endow</title>
+		<meeting>of VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Mapreduce</surname></persName>
+		</author>
+		<title level="m">Simplified Data Processing on Large Clusters. Communications of the ACM</title>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="volume">51</biblScope>
+			<biblScope unit="page" from="107" to="113" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Bert: Pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenton</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kristina</forename><surname>Toutanova</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1810.04805</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">On Power-Law Relationships of the Internet Topology</title>
+		<author>
+			<persName><forename type="first">Michalis</forename><surname>Faloutsos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Petros</forename><surname>Faloutsos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Faloutsos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGCOMM computer communication review</title>
+		<imprint>
+			<biblScope unit="volume">29</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="251" to="262" />
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Fast Graph Representation Learning with PyTorch Geometric</title>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Fey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>Eric Lenssen</surname></persName>
+		</author>
+		<idno>CoRR, abs/1903.02428</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<title level="m" type="main">Fast graph representation learning with pytorch geometric</title>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Fey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>Eric Lenssen</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1903.02428</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Protein Interface Prediction using Graph Convolutional Networks</title>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Fout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Byrd</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Basir</forename><surname>Shariat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Asa</forename><surname>Ben-Hur</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of Advances in Neural Information Processing Systems (NeurIPS)</title>
+		<meeting>of Advances in Neural Information essing Systems (NeurIPS)</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Distributed deep graph learning at scale</title>
+		<author>
+			<persName><forename type="first">Swapnil</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anand Padmanabha</forename><surname>Iyer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">15th USENIX Symposium on Operating Systems Design and Implementation (OSDI 21)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="page" from="551" to="568" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Knowledge Transfer for Out-of-Knowledge-Base Entities : A Graph Neural Network Approach</title>
+		<author>
+			<persName><forename type="first">Takuo</forename><surname>Hamaguchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hidekazu</forename><surname>Oiwa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Masashi</forename><surname>Shimbo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuji</forename><surname>Matsumoto</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 26th International Joint Conference on Artificial Intelligence (IJCAI)</title>
+		<meeting>of the 26th International Joint Conference on Artificial Intelligence (IJCAI)</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Representation learning on graphs: Methods and applications</title>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rex</forename><surname>Ying</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jure</forename><surname>Leskovec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Data Eng. Bull</title>
+		<imprint>
+			<biblScope unit="volume">40</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="52" to="74" />
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Inductive Representation Learning on Large Graphs</title>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhitao</forename><surname>Ying</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jure</forename><surname>Leskovec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of Advances in Neural Information Processing Systems (NeurIPS)</title>
+		<meeting>of Advances in Neural Information essing Systems (NeurIPS)</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Distributed edge partitioning for trillion-edge graphs</title>
+		<author>
+			<persName><forename type="first">Masatoshi</forename><surname>Hanai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Toyotaro</forename><surname>Suzumura</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wen</forename><forename type="middle">Jun</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Elvis</forename><forename type="middle">S</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Georgios</forename><surname>Theodoropoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wentong</forename><surname>Cai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+		<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="page" from="2379" to="2392" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Deep residual learning for image recognition</title>
+		<author>
+			<persName><forename type="first">Kaiming</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiangyu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaoqing</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE conference on computer vision and pattern recognition</title>
+		<meeting>the IEEE conference on computer vision and pattern recognition</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="770" to="778" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Cusp: A customizable streaming edge partitioner for distributed graph analytics</title>
+		<author>
+			<persName><forename type="first">Loc</forename><surname>Hoang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Roshan</forename><surname>Dathathri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gurbinder</forename><surname>Gill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Keshav</forename><surname>Pingali</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE International Parallel and Distributed Processing Symposium</title>
+		<meeting><address><addrLine>Rio de Janeiro, Brazil</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2019-05-20">2019. May 20-24, 2019. 2019</date>
+			<biblScope unit="page" from="439" to="450" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Open Graph Benchmark: Datasets for Machine Learning on Graphs</title>
+		<author>
+			<persName><forename type="first">Weihua</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Fey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marinka</forename><surname>Zitnik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuxiao</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hongyu</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bowen</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michele</forename><surname>Catasta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jure</forename><surname>Leskovec</surname></persName>
+		</author>
+		<idno>CoRR, abs/2005.00687</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Adaptive Sampling Towards Fast Graph Representation Learning</title>
+		<author>
+			<persName><forename type="first">Wen-Bing</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tong</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Rong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Junzhou</forename><surname>Huang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of Advances in Neural Information Processing Systems (NeurIPS)</title>
+		<meeting>of Advances in Neural Information essing Systems (NeurIPS)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Accelerating graph sampling for graph machine learning using gpus</title>
+		<author>
+			<persName><forename type="first">Abhinav</forename><surname>Jangda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sandeep</forename><surname>Polisetty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arjun</forename><surname>Guha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Serafini</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EuroSys &apos;21: Sixteenth European Conference on Computer Systems, Online Event</title>
+		<editor>
+			<persName><forename type="first">Antonio</forename><surname>Barbalace</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Pramod</forename><surname>Bhatotia</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Lorenzo</forename><surname>Alvisi</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Cristian</forename><surname>Cadar</surname></persName>
+		</editor>
+		<meeting><address><addrLine>United Kingdom</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2021">April 26-28, 2021. 2021</date>
+			<biblScope unit="page" from="311" to="326" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">A distributed multi-gpu system for fast graph processing</title>
+		<author>
+			<persName><forename type="first">Zhihao</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yongkee</forename><surname>Kwon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Galen</forename><surname>Shipman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pat</forename><surname>Mc-Cormick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mattan</forename><surname>Erez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Aiken</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the VLDB Endowment</title>
+		<meeting>of the VLDB Endowment</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="page" from="297" to="310" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Improving the Accuracy, Scalability, and Performance of Graph Neural Networks with Roc</title>
+		<author>
+			<persName><forename type="first">Zhihao</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sina</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mingyu</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matei</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Aiken</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of Machine Learning and Systems (MLSys)</title>
+		<meeting>of Machine Learning and Systems (MLSys)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">A fast and high quality multilevel scheme for partitioning irregular graphs</title>
+		<author>
+			<persName><forename type="first">George</forename><surname>Karypis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vipin</forename><surname>Kumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">SIAM Journal on Scientific Computing</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="359" to="392" />
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">A parallel algorithm for multilevel graph partitioning and sparse matrix ordering</title>
+		<author>
+			<persName><forename type="first">George</forename><surname>Karypis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vipin</forename><surname>Kumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">J. Parallel Distributed Comput</title>
+		<imprint>
+			<biblScope unit="volume">48</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="71" to="95" />
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">An Efficient Heuristic Procedure for Partitioning Graphs. The Bell System Technical</title>
+		<author>
+			<persName><forename type="first">Brian</forename><forename type="middle">W</forename><surname>Kernighan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shen</forename><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal</title>
+		<imprint>
+			<biblScope unit="volume">49</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="291" to="307" />
+			<date type="published" when="1970">1970</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Adam: A Method for Stochastic Optimization</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Diederik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jimmy</forename><surname>Kingma</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ba</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 3rd International Conference on Learning Representations (ICLR)</title>
+		<meeting>of the 3rd International Conference on Learning Representations (ICLR)</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Semi-Supervised Classification with Graph Convolutional Networks</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">N</forename><surname>Kipf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Max</forename><surname>Welling</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 5th International Conference on Learning Representations ICLR</title>
+		<meeting>of the 5th International Conference on Learning Representations ICLR</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">What is twitter, a social network or a news media?</title>
+		<author>
+			<persName><forename type="first">Haewoon</forename><surname>Kwak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Changhyun</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hosung</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sue</forename><surname>Moon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 19th international conference on World wide web</title>
+		<meeting>the 19th international conference on World wide web</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="591" to="600" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">PaGraph: Scaling GNN Training on Large Graphs via Computation-Aware Caching</title>
+		<author>
+			<persName><forename type="first">Zhiqi</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cheng</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youshan</forename><surname>Miao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunxin</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yinlong</forename><surname>Xu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of ACM Symposium on Cloud Computing (SOCC)</title>
+		<meeting>of ACM Symposium on Cloud Computing (SOCC)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">NeuGraph: Parallel Deep Neural Network Computation on Large Graphs</title>
+		<author>
+			<persName><forename type="first">Lingxiao</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhi</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youshan</forename><surname>Miao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jilong</forename><surname>Xue</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lidong</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yafei</forename><surname>Dai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of USENIX Annual Technical Conference (USENIX ATC)</title>
+		<meeting>of USENIX Annual Technical Conference (USENIX ATC)</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Convergence analysis of distributed stochastic gradient descent with shuffling</title>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Meng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yue</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhi-Ming</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tie-Yan</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Neurocomputing</title>
+		<imprint>
+			<biblScope unit="volume">337</biblScope>
+			<biblScope unit="page" from="46" to="57" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">The LRU-K page replacement algorithm for database disk buffering</title>
+		<author>
+			<persName><forename type="first">Elizabeth</forename><forename type="middle">J</forename><surname>O'neil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Patrick</forename><forename type="middle">E</forename><surname>O'neil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gerhard</forename><surname>Weikum</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 1993 ACM SIGMOD International Conference on Management of Data</title>
+		<meeting>of the 1993 ACM SIGMOD International Conference on Management of Data<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM Press</publisher>
+			<date type="published" when="1993">May 26-28, 1993. 1993</date>
+			<biblScope unit="page" from="297" to="306" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">C-SAW: a framework for graph sampling and random walk on gpus</title>
+		<author>
+			<persName><forename type="first">Santosh</forename><surname>Pandey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lingda</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adolfy</forename><surname>Hoisie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoye</forename><forename type="middle">S</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hang</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis</title>
+		<editor>
+			<persName><forename type="first">Christine</forename><surname>Cuicchi</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">Irene</forename><surname>Qualters</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">William</forename><forename type="middle">T</forename><surname>Kramer</surname></persName>
+		</editor>
+		<meeting>the International Conference for High Performance Computing, Networking, Storage and Analysis<address><addrLine>SC; Atlanta, Georgia, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2020-11-09">2020. November 9-19, 2020. 2020</date>
+			<biblScope unit="page">56</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<title level="m" type="main">An o (1) algorithm for implementing the lfu cache eviction scheme</title>
+		<author>
+			<persName><forename type="first">Ketan</forename><surname>Shah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anirban</forename><surname>Mitra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dhruv</forename><surname>Matani</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="1" to="8" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Dorylus: affordable, scalable, and accurate gnn training with distributed cpu servers and serverless threads</title>
+		<author>
+			<persName><forename type="first">John</forename><surname>Thorpe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yifan</forename><surname>Qiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Eyolfson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shen</forename><surname>Teng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guanzhou</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhihao</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinliang</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Keval</forename><surname>Vora</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Netravali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miryung</forename><surname>Kim</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">15th USENIX Symposium on Operating Systems Design and Implementation (OSDI 21)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="495" to="514" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Graph Attention Networks</title>
+		<author>
+			<persName><forename type="first">Petar</forename><surname>Velickovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guillem</forename><surname>Cucurull</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arantxa</forename><surname>Casanova</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adriana</forename><surname>Romero</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pietro</forename><surname>Li?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yoshua</forename><surname>Bengio</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 6th International Conference on Learning Representations (ICLR)</title>
+		<meeting>of the 6th International Conference on Learning Representations (ICLR)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">Kuansan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhihong</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chiyuan</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chieh-Han</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuxiao</forename><surname>Dong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anshul</forename><surname>Kanakia</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Microsoft Academic Graph: When Experts Are Not Enough. Quantitative Science Studies</title>
+		<imprint>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="396" to="413" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">Minjie</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lingfan</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Da</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quan</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Gai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zihao</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mufei</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinjing</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chao</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ziyue</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qipeng</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haibin</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Junbo</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinyang</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexander</forename><forename type="middle">J</forename><surname>Smola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zheng</forename><surname>Zhang</surname></persName>
+		</author>
+		<idno>CoRR, abs/1909.01315</idno>
+	</analytic>
+	<monogr>
+		<title level="j">Deep Graph Library: Towards Efficient and Scalable Deep Learning on Graphs</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Gnnadvisor: An adaptive and efficient runtime system for gnn acceleration on gpus</title>
+		<author>
+			<persName><forename type="first">Yuke</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boyuan</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gushu</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuangchen</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lei</forename><surname>Deng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yufei</forename><surname>Ding</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">15th {USENIX} Symposium on Operating Systems Design and Implementation ({OSDI} 21)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="515" to="531" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<monogr>
+		<title level="m" type="main">A Comprehensive Survey on Graph Neural Networks</title>
+		<author>
+			<persName><forename type="first">Zonghan</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shirui</forename><surname>Pan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fengwen</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guodong</forename><surname>Long</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chengqi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Philip</forename><forename type="middle">S</forename><surname>Yu</surname></persName>
+		</author>
+		<idno>CoRR, abs/1901.00596</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Spatial Temporal Graph Convolutional Networks for Skeleton-Based Action Recognition</title>
+		<author>
+			<persName><forename type="first">Sijie</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuanjun</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dahua</forename><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 32nd AAAI Conference on Artificial Intelligence (AAAI)</title>
+		<meeting>of the 32nd AAAI Conference on Artificial Intelligence (AAAI)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Graph Convolutional Neural Networks for Web-Scale Recommender Systems</title>
+		<author>
+			<persName><forename type="first">Rex</forename><surname>Ying</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruining</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaifeng</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pong</forename><surname>Eksombatchai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jure</forename><surname>Leskovec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 24th ACM International Conference on Knowledge Discovery &amp; Data Mining (KDD)</title>
+		<meeting>of the 24th ACM International Conference on Knowledge Discovery &amp; Data Mining (KDD)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">GraphSAINT: Graph Sampling Based Inductive Learning Method</title>
+		<author>
+			<persName><forename type="first">Hanqing</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hongkuan</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ajitesh</forename><surname>Srivastava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajgopal</forename><surname>Kannan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Viktor</forename><forename type="middle">K</forename><surname>Prasanna</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of the 8th International Conference on Learning Representations (ICLR)</title>
+		<meeting>of the 8th International Conference on Learning Representations (ICLR)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">AGL: A Scalable System for Industrial-Purpose Graph Machine Learning</title>
+		<author>
+			<persName><forename type="first">Dalong</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ziqi</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jun</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiyang</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xianzheng</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhibang</forename><surname>Ge</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lin</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiqiang</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>Qi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">VLDB Endow</title>
+		<imprint>
+			<biblScope unit="volume">13</biblScope>
+			<biblScope unit="issue">12</biblScope>
+			<biblScope unit="page" from="3125" to="3137" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Link Prediction Based on Graph Neural Networks</title>
+		<author>
+			<persName><forename type="first">Muhan</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yixin</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. of Advances in Neural Information Processing Systems (NeurIPS)</title>
+		<meeting>of Advances in Neural Information essing Systems (NeurIPS)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<title level="m" type="main">Deep Learning on Graphs: A Survey</title>
+		<author>
+			<persName><forename type="first">Ziwei</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peng</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wenwu</forename><surname>Zhu</surname></persName>
+		</author>
+		<idno>CoRR, abs/1812.04202</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<monogr>
+		<title level="m" type="main">Distdgl: Distributed graph neural network training for billion-scale graphs</title>
+		<author>
+			<persName><forename type="first">Da</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chao</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Minjie</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jinjing</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qidong</forename><surname>Su</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiang</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quan</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zheng</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><surname>Karypis</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2010.05337</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<monogr>
+		<author>
+			<persName><forename type="first">Jie</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ganqu</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhengyan</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cheng</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiyuan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lifeng</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Changcheng</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maosong</forename><surname>Sun</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1812.08434</idno>
+		<title level="m">Graph Neural Networks: A Review of Methods and Applications</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">Ali-Graph: A Comprehensive Graph Neural Network Platform</title>
+		<author>
+			<persName><forename type="first">Rong</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kun</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hongxia</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chang</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baole</forename><surname>Ai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yong</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jingren</forename><surname>Zhou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">VLDB Endow</title>
+		<imprint>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="issue">12</biblScope>
+			<biblScope unit="page" from="2094" to="2105" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<monogr>
+		<title level="m" type="main">Parallelized Stochastic Gradient Descent</title>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Zinkevich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Markus</forename><surname>Weimer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexander</forename><forename type="middle">J</forename><surname>Smola</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lihong</forename><surname>Li</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<publisher>Curran Associates, Inc</publisher>
+			<biblScope unit="page" from="2595" to="2603" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

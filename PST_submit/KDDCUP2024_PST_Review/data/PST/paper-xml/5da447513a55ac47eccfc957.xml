@@ -1,0 +1,956 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Neural networks on microcontrollers: saving memory at inference via operator reordering</title>
+				<funder>
+					<orgName type="full">Engineering and Physical Sciences Research Council UK (EPSRC UK)</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2019-10-02">2 Oct 2019</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Edgar</forename><surname>Liberis</surname></persName>
+							<email>edgar.liberis@cs.ox.ac.uk</email>
+							<affiliation key="aff0">
+								<orgName type="department">Department of Computer Science</orgName>
+								<orgName type="institution">University of Oxford</orgName>
+								<address>
+									<settlement>Oxford</settlement>
+									<country key="GB">UK</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Nicholas</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+							<email>nicholas.lane@cs.ox.ac.uk</email>
+							<affiliation key="aff0">
+								<orgName type="department">Department of Computer Science</orgName>
+								<orgName type="institution">University of Oxford</orgName>
+								<address>
+									<settlement>Oxford</settlement>
+									<country key="GB">UK</country>
+								</address>
+							</affiliation>
+							<affiliation key="aff1">
+								<orgName type="department">Samsung AI Center Cambridge Cambridge</orgName>
+								<address>
+									<country key="GB">UK</country>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Neural networks on microcontrollers: saving memory at inference via operator reordering</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2019-10-02">2 Oct 2019</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:1910.05110v1[cs.LG]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T09:12+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Designing deep learning models for highly-constrained hardware would allow imbuing many edge devices with intelligence. Microcontrollers (MCUs) are an attractive platform for building smart devices due to their low cost, wide availability, and modest power usage. However, they lack the computational resources to run neural networks as straightforwardly as mobile or server platforms, which necessitates changes to the network architecture and the inference software. In this work, we discuss the deployment and memory concerns of neural networks on MCUs and present a way of saving memory by changing the execution order of the network's operators, which is orthogonal to other compression methods. We publish a tool for reordering operators of TensorFlow Lite models 1 and demonstrate its utility by sufficiently reducing the memory footprint of a CNN to deploy it on an MCU with 512KB SRAM.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Deep learning can bring computational intelligence to personal and IoT devices. Using deep learning models directly on the edge devices allows for greater cost-efficiency, scalability and privacy for endusers, compared to relying on a remote server to carry out the processing. However, the development of lightweight neural networks, suitable for such underpowered hardware, is centred around mobile phones as the target platform.</p><p>Here, we venture further and explore a more resource-constrained platform-microcontroller units (MCUs). MCUs are cheap, widespread and are geared towards energy-efficient workloads. They offer an alternative to designing a purpose-built custom chip, allowing to save on development cost and time. However, a unit typically consists of a low-frequency processor and only several hundred kilobytes of on-chip memory <ref type="bibr" target="#b0">[1]</ref>, and thus severely underpowered compared to mobile devices. Specially designed network architectures and inference software are required to cope with hardware constraints of MCUs. In this work, we: (a) discuss memory limitations of a microcontroller platform and how it affects neural network deployment; (b) devise a way to minimise the peak memory usage of a neural network by making inference software follow a particular execution order of its operations.</p><p>We implement our methodology as a tool for reordering operators within TensorFlow Lite models. <ref type="foot" target="#foot_0">1</ref>We successfully apply it to a chosen convolutional neural network, reducing the memory footprint enough to make it fit within the on-chip memory of our microcontroller platform, which would not have been possible using the default provided operator execution order. Operator reordering is carried out only at inference and does not change the architecture or the output of a neural network, making it fully orthogonal to many other network compression methods.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Background</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Neural network execution</head><p>A neural network can be thought of as a computation graph which expresses dependencies between individual operations (also called layers or operators). An operator, e.g. a 2D convolution or addition, takes one or more input tensors and produces a single output. Modern deep learning frameworks optimise the network's computation graph for inference in advance by e.g. fusing adjacent operators and folding batch normalisation layers into preceding linear operations. The execution proceeds by evaluating one operator at a time in a topological order of nodes in the graph.</p><p>An operator requires buffers for its inputs and output to be present in memory before its execution can commence. Once the operator has finished executing, memory occupied by its inputs can be reclaimed (if not use elsewhere) and the output buffer will eventually be used as an input to other operators. We define a working set as a set of tensors that need to be kept in memory at any given point in execution. This comprises input and output tensors of a pending operator and other tensors that were already produced and need to be held back in memory for subsequent operators.</p><p>Classic neural network architectures, such as the original multilayer perceptron, AlexNet <ref type="bibr" target="#b1">[2]</ref>, VGG <ref type="bibr" target="#b2">[3]</ref>, consist of a linear sequence of layers, which are iteratively applied to transform the input. However, more recent architectures, such as ResNet <ref type="bibr" target="#b3">[4]</ref>, Inception <ref type="bibr" target="#b4">[5]</ref>, NasNet <ref type="bibr" target="#b5">[6]</ref>, introduce divergent processing paths where the same tensor can be processed by several layers, i.e. their computation graph is no longer linear and has branches. This means that the inference software may have multiple operators available for execution at any given step.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Resource scarcity of microcontroller hardware</head><p>A microcontroller unit that would be powerful enough to execute neural networks reasonably quickly (e.g. ARM Cortex M series) typically has a low-frequency RISC processing core (up to 400 MHz) and 128-2048KB of on-chip memory <ref type="bibr" target="#b0">[1]</ref>. The memory is partitioned into read-write static RAM (SRAM) and read-only NOR-Flash memories, with the latter housing the executable code and static data. In contrast to mobile or desktop hardware, there are no intermediate levels in this memory hierarchy, although the set-up may have some backing storage. A backing storage, e.g. an SD-card, typically has a high capacity but is slow <ref type="bibr" target="#b6">[7]</ref> and power-costly to access (?100x more energy required to read a value outside of on-chip memory <ref type="bibr" target="#b7">[8]</ref>).</p><p>The lack of intermediate memories forces applications to fit within the on-chip memory to remain fast. For neural networks, this makes aiming for a small peak working set size and parameter count (model size) an important goal in model design. Note that it's not necessary to pursue the maximal memory saving-aiming just below the on-chip memory capacity is sufficient.</p><p>Memory requirements of a neural network can be directly mapped to the two types of on-chip memory. Parameters (trainable weights, constants) of a network are immutable and can be embedded into the executable code as static data stored in NOR-Flash. Any intermediate tensors that are dependent upon input (so-called activation matrices) are produced at runtime and would have to be stored in SRAM. Thus the model size and peak memory usage are constrained by the capacities of NOR-Flash and SRAM memories, respectively.</p><p>In Section 4, we show how choosing operator execution order affects which tensors reside in SRAM (are in the working set). We exploit this to minimise the peak working set size (peak memory usage).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Related work</head><p>The design of compact models is an active topic of deep learning research, albeit usually under less extreme constraints than those of microcontroller hardware. One can obtain a smaller neural network by using layer decomposition <ref type="bibr" target="#b8">[9,</ref><ref type="bibr" target="#b9">10]</ref>, pruning <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b11">12]</ref>, quantisation <ref type="bibr" target="#b12">[13]</ref> and binarisation <ref type="bibr" target="#b13">[14,</ref><ref type="bibr" target="#b14">15]</ref>, distillation <ref type="bibr" target="#b15">[16]</ref> or exploiting sparsity <ref type="bibr" target="#b16">[17]</ref>. Popular mobile-friendly CNN architectures include MobileNet <ref type="bibr" target="#b17">[18]</ref> and ShuffleNet <ref type="bibr" target="#b18">[19]</ref>. MNasNet <ref type="bibr" target="#b19">[20]</ref> and EfficientNet <ref type="bibr" target="#b20">[21]</ref> develop architecture search algorithms to design a network within a certain floating-point operation count or memory budget. In particular, Fedorov et al. <ref type="bibr" target="#b21">[22]</ref> incorporate the maximal working memory size of an operator into their optimisation goal.</p><p>A relatively underexplored set of methods include complex evaluation strategies for parts of the network to save memory at runtime. For example, authors of MobileNet <ref type="bibr" target="#b17">[18]</ref> note that a building block of their model has a channel-wise operation, whose output is accumulated into another tensor, which allows processing the input tensor in parts. Also, Alwani et al. <ref type="bibr" target="#b22">[23]</ref> propose not to materialise an output tensor of a large convolution operation in memory at all, and compute its individual output elements as needed by succeeding operators.</p><p>The development of low-power machine learning models is fostered by the TinyML Summit <ref type="bibr" target="#b23">[24]</ref> and the Visual Wake Words competition <ref type="bibr" target="#b24">[25]</ref>, which looked for performant MCU-sized CNNs for person detection. Compact deep learning models have been built for use on wearables devices <ref type="bibr" target="#b25">[26]</ref> and for keyword spotting <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b27">28]</ref>. Concerns about the memory usage of neural networks and data movement during execution are also discussed in neural network accelerator chip design literature <ref type="bibr" target="#b28">[29]</ref><ref type="bibr" target="#b29">[30]</ref><ref type="bibr" target="#b30">[31]</ref>. Neural networks whose computation graphs contain branches allow some freedom over the order of evaluation of their operators. When execution reaches a branching point, the inference software has to choose which branch to start evaluating next. This choice can affect which tensors need to be kept in memory (working set), so we can construct an execution schedule that minimises the total size of the working set at its peak (memory bottleneck).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Methods and implementation</head><p>To illustrate this, Figure <ref type="figure" target="#fig_0">1</ref> shows an example of a computation graph, adapted from a real-world CNN. Evaluating operators as numbered 1 through to 7 will result in peak memory usage of 5216, coming from operator #3 (input and output buffers + the output of operator #1 that is held back for operator #4). However, fully evaluating the rightmost branch first (execution order 1, 4, 6, 2, 3, 5, 7), would result in peak memory usage of 4960, coming from operator #2 (input and output buffers + output of operator #6 that is held back for operator #7). Appendix A gives a more detailed breakdown of the memory usage during computation, together with plots produced by our tool, for both default and optimised operator schedules.</p><p>We approach finding a memory-optimal execution schedule for an arbitrary computation graph by algorithmically enumerating all execution schedules and calculating their peak memory usage. To simplify the problem, we assume that no operator will be executed twice (this assumption is also made in TensorFlow). A computation graph is a directed acyclic graph (DAG) and any topological order of its nodes would produce a valid execution schedule; in general, enumerating all topological orders of a DAG is an explored problem in graph algorithms literature <ref type="bibr" target="#b31">[32]</ref>.</p><p>In Algorithm 1 (procedure MEM), we describe a dynamic programming algorithm that is concerned with the minimal peak memory usage required to produce (and keep in memory) a set of tensors X. It enumerates execution schedules recursively by trying to "undo" operators that produced each of the tensors in X. The algorithm should be invoked on a set of network's output tensors and the optimal execution schedule can be traced by checking which recursive calls contributed to the answer.</p><p>To simplify the implementation, the algorithm begins by filtering out tensors that don't have an operator that produced them (so-called constants), as those just contribute to memory usage and don't affect the execution schedule. A restriction that no operator is evaluated twice is implemented by checking whether an operator is a predecessor to any of the remaining tensors, as this would require it to be executed at some point again in the schedule. Note that MEM(X) may be invoked on the same set of tensors multiple times (from different execution paths), so it should be memoized (i.e. the output should be cached) to avoid recomputing the result.</p><p>Algorithm 1 Computing the minimal peak memory usage of a neural network. PARTITION function splits a set into two using a predicate; producer(x) denotes an operator that produced tensor x.</p><p>1: procedure MEM(X) Minimum amount of memory needed to compute tensors in X 2:</p><p>Partition tensors into constants (no producer) and activation matrices 3:</p><p>cs, as ? PARTITION(X, x : producer(x) is None)</p><formula xml:id="formula_0">4:</formula><p>if as is empty then m ? ? 8:</p><p>for x in as do Try to unapply the operator that produced x 9:</p><p>rs ? as \ x Remaining tensors that need to be kept in memory 10:</p><p>is ? producer(x).inputs Tensors required to produce x 11:</p><p>if any(x is a predecessor of r for r in rs) then</p><formula xml:id="formula_1">12:</formula><p>continue x is a predecessor to r, so producer(x) would have to be evaluated twice 13:</p><p>end if</p><formula xml:id="formula_2">14:</formula><p>Peak memory usage will be determined by either the producer of x-i.e. memory used its input tensors (is), output tensor (x) and other tensors (rs)-or by other operators in the execution path (recursive case MEM(rs ? is))</p><formula xml:id="formula_3">15: m ? max(MEM(rs ? is), t?rs?is?{x} |t|) 16:</formula><p>m ? min(m, m ) Pick the execution path that gives minimal memory usage 17:</p><p>end for 18:</p><formula xml:id="formula_4">return c?cs |c| + m 19: end procedure</formula><p>We use a lightweight TensorFlow Light Micro inference engine <ref type="bibr" target="#b32">[33]</ref> (henceforth micro-interpreter) to run the neural network on the MCU itself. At the time of writing<ref type="foot" target="#foot_1">2</ref> , the software did not support reclaiming memory from tensors that were no longer needed, so we implement our own dynamic memory allocator for tensor buffers. Internally, TensorFlow Lite assumes that tensors reside in contiguous blocks of memory and cannot be fragmented. The memory allocator is only used by the micro-interpreter, which allows us to ensure that C/C++ pointers to memory blocks are not being remembered anywhere in the code. This enables us to move buffers in memory as needed for defragmentation. We adopt a very simple defragmentation strategy of moving all tensor buffers to the start of the memory region as much as possible after the execution of every operator.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Experiments</head><p>We deploy a neural network onto an MCU with both default and optimised operator schedules to exhibit the difference in memory usage. We use one of the winning submissions of the Visual Wake Words competition <ref type="bibr" target="#b24">[25]</ref>, called SwiftNet Cell <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b34">35]</ref>, as it has only 250KB of parameters and contains many branches, which enables us to showcase the benefits of reordering. The model is run using the modified micro-interpreter (as described above) on a NUCLEO-F767ZI prototyping board <ref type="bibr" target="#b35">[36]</ref>. The board features a Cortex M7 processor, running at 216Mhz, and has 512KB of SRAM. Table <ref type="table" target="#tab_0">1</ref> shows that optimised ordering was able to save 50KB of memory, compared to the order embedded in the model. Including the framework overhead (?200KB for SwiftNet Cell, proportional to the number of tensors), this made a sufficient difference to make the model's memory footprint fit within SRAM. <ref type="foot" target="#foot_2">3</ref> We also check the overhead introduced by replacing a static memory allocator with a dynamic one by running MobileNet-v1-based <ref type="bibr" target="#b36">[37]</ref> person detection model (from the Tensorflow Lite Micro repository <ref type="bibr" target="#b32">[33]</ref>). Measurements show negligible (sub-1%) increase in execution time and energy used by the MCU and the memory footprint was decreased by 186KB. In general, latency and power consumption can be reduced with operator implementations that leverage processor capabilities well (SIMD, DSP instructions).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>SwiftNet</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Discussion</head><p>The results show that employing a different operator execution order for neural network inference can make previously undeployable models fit within the memory constraints of MCU hardware.</p><p>Reordering operators can be implemented just within the inference software, making it orthogonal to most other network compression approaches, which were likely to have been already used to create an MCU-sized model.</p><p>Unlike mobile and server platforms, MCU hardware often doesn't have enough memory to statically pre-allocate all tensor buffers of the network, which requires the inference software to support dynamic memory allocation. We showed that a simple defragmentation strategy is a viable option with little overhead cost. However, when the execution schedule is known in advance, optimal tensor buffer placement in memory may be precomputed.</p><p>Having a way of precisely computing peak memory usage for models with complex computation graphs would benefit neural architecture search (NAS) procedures. The algorithm can be extended to support various memory saving tricks: for example, if one of the inputs to the addition operator is not used elsewhere, the result can be accumulated into it, eliminating the need for an output buffer.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Conclusion</head><p>Microcontrollers are a viable platform for running deep learning applications if the model designer can overcome constraints imposed by limited memory and storage. In this work, we describe how to minimise peak memory usage of a neural network during inference by changing the evaluation order of its operators. By applying our methodology, we were able to achieve sufficient memory savings to deploy the chosen CNN on a microcontroller with 512KB SRAM, which would not have been possible otherwise. Our tool for embedding optimal operator ordering into TensorFlow Lite models is available at https://github.com/oxmlsys/tflite-tools.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: An example computation graph consisting of 1x1 and 3x3 depthwise convolution operators. Annotations on arrows represent tensor sizes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>5 :</head><label>5</label><figDesc>return c?cs |c|No operators left to order, report sizes of remaining constants</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>Peak memory usage, execution time and energy use of chosen models.</figDesc><table><row><cell></cell><cell></cell><cell>Cell</cell><cell cols="2">MobileNet v1</cell></row><row><cell></cell><cell cols="3">Default order Optimal order Static alloc.</cell><cell>Dynamic alloc.</cell></row><row><cell>Peak memory usage (excl. overheads)</cell><cell>351KB</cell><cell>301KB</cell><cell>241KB</cell><cell>55KB (? 186KB)</cell></row><row><cell>Execution time</cell><cell>N/A</cell><cell>10243 ms</cell><cell cols="2">1316 ms 1325 ms (? 0.68%)</cell></row><row><cell>Energy use</cell><cell>N/A</cell><cell>8775 mJ</cell><cell>728 mJ</cell><cell>735 mJ (? 0.97%)</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>Available for download at https://github.com/oxmlsys/tflite-tools Preprint. Under review.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>At the time of publication of this pre-print, a dynamic memory allocator has been implemented by maintainers of TensorFlow Lite Micro, making this change no longer necessary. However, we keep the description of our memory allocation strategy, as well as the power and latency measurements, as an illustrative example of memory management overheads.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2"><p>The authors of the model note that peak memory usage can be lowered, likely by using fused operator implementations. Further savings would come from optimising the memory usage of the micro-interpreter itself.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>Acknowledgments</head><p>The work was supported by the <rs type="funder">Engineering and Physical Sciences Research Council UK (EPSRC UK)</rs>, grant ref. EP/S001530/1. The authors would also like to thank <rs type="person">Javier Fern?ndez-Marqu?s</rs> for providing help with measuring energy usage.</p></div>
+			</div>
+			<listOrg type="funding">
+			</listOrg>
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0" />			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">STM32 High Performance MCUs</title>
+		<author>
+			<persName><surname>Stmicroelectronics</surname></persName>
+		</author>
+		<ptr target="https://www.st.com/en/microcontrollers-microprocessors/stm32-high-performance-mcus.html" />
+		<imprint>
+			<date type="published" when="2019-09">Sep 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">ImageNet classification with deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Krizhevsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Very deep convolutional networks for large-scale image recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zisserman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations (ICLR)</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Deep Residual Learning for Image Recognition</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016-06">Jun 2016</date>
+			<biblScope unit="page" from="770" to="778" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Inception-v4, inception-ResNet and the impact of residual connections on learning</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Szegedy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ioffe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vanhoucke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">A</forename><surname>Alemi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">31st AAAI Conference on Artificial Intelligence</title>
+		<imprint>
+			<date type="published" when="2017">2017. 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Learning Transferable Architectures for Scalable Image Recognition</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</title>
+		<meeting>the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="8697" to="8710" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<title level="m" type="main">Bus Speed (Default Speed/High Speed/UHS/SD Express)</title>
+		<ptr target="https://www.sdcard.org/developers/overview/bus_speed/index.html" />
+		<imprint>
+			<date type="published" when="2019-09">Sep 2019</date>
+			<publisher>SD Association</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">1.1 computing&apos;s energy problem (and what we can do about it)</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Horowitz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 IEEE International Solid-State Circuits Conference Digest of Technical Papers (ISSCC)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="10" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">DeepX: A software accelerator for low-power deep learning inference on mobile devices</title>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bhattacharya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Georgiev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Forlivesi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Qendro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Kawsar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Information Processing in Sensor Networks (IPSN), 2016 15th ACM/IEEE International Conference on</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Fast learning of deep neural networks via singular value decomposition</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Ke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Su</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Pacific Rim International Conference on Artificial Intelligence</title>
+		<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="820" to="826" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Faster gaze prediction with dense networks and Fisher pruning</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Theis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Korshunova</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Tejani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Husz?r</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Deep Compression: Compressing Deep Neural Network with Pruning, Trained Quantization and Huffman Coding</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Han</surname></persName>
+		</author>
+		<idno>abs/1510.00149</idno>
+	</analytic>
+	<monogr>
+		<title level="j">CoRR</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Quantization and training of neural networks for efficient integer-arithmetic-only inference</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Jacob</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kligys</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Adam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Kalenichenko</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The IEEE Conference on Computer Vision and Pattern Recognition (CVPR)</title>
+		<imprint>
+			<date type="published" when="2018-06">June 2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">An empirical study of binary neural networks&apos; optimisation</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Alizadeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fern?ndez-Marqu?s</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Gal</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">Binarized neural networks: Training deep neural networks with weights and activations constrained to +1 or -1</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Courbariaux</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Hubara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Soudry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>El-Yaniv</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1602.02830</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Distilling the knowledge in a neural network</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hinton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Vinyals</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1503.02531</idno>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<title level="m" type="main">Accelerating Convolutional Neural Networks via Activation Map Compression</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Georgiadis</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">MobileNetV2: Inverted Residuals and Linear Bottlenecks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Sandler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zhmoginov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><forename type="middle">C</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</title>
+		<meeting>the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="4510" to="4520" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">ShuffleNet: An Extremely Efficient Convolutional Neural Network for Mobile Devices</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</title>
+		<meeting>the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">MnasNet: Platform-Aware Neural Architecture Search for Mobile</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</title>
+		<meeting>the IEEE Computer Society Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">SpArSe: Sparse Architecture Search for CNNs on Resource-Constrained Microcontrollers</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Fedorov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">P</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mattina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">N</forename><surname>Whatmough</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1" to="26" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Fused-layer cnn accelerators</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Alwani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ferdman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Milder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The 49th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<imprint>
+			<publisher>IEEE Press</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page">22</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<ptr target="https://www.tinymlsummit.org" />
+		<title level="m">tinyML Summit</title>
+		<imprint>
+			<date type="published" when="2019-09">Sep 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Visual Wake Words Dataset</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Chowdhery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Warden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Shlens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Rhodes</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Sparsification and separation of deep learning layers for constrained resource inference on wearables</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bhattacharya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 14th ACM Conference on Embedded Network Sensor Systems CD-ROM</title>
+		<meeting>the 14th ACM Conference on Embedded Network Sensor Systems CD-ROM</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="176" to="189" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Suda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Lai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Chandra</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1711.07128</idno>
+		<title level="m">Hello edge: Keyword spotting on microcontrollers</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">On-the-fly deterministic binary filters for memory efficient keyword spotting applications on embedded devices</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fern?ndez-Marqu?s</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">W</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">-S</forename><surname>Tseng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Bhattachara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">D</forename><surname>Lane</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2nd International Workshop on Embedded and Mobile Deep Learning</title>
+		<meeting>the 2nd International Workshop on Embedded and Mobile Deep Learning</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="13" to="18" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Memory requirements for convolutional neural network hardware accelerators</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Siu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">M</forename><surname>Stuart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Mahmoud</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Moshovos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Symposium on Workload Characterization (IISWC)</title>
+		<imprint>
+			<date type="published" when="2018-09">Sep 2018</date>
+			<biblScope unit="page" from="111" to="121" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">SCNN: An Accelerator for Compressed-sparse Convolutional Neural Networks</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Parashar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Rhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mukkara</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Puglielli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Venkatesan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Khailany</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">W</forename><surname>Keckler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">J</forename><surname>Dally</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Eyeriss: An energy-efficient reconfigurable accelerator for deep convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">S</forename><surname>Emer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Sze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Journal of Solid-State Circuits</title>
+		<imprint>
+			<biblScope unit="volume">52</biblScope>
+			<biblScope unit="page" from="127" to="138" />
+			<date type="published" when="2017-01">Jan 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">A structured program to generate all topological sorting arrangements</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">E</forename><surname>Knuth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">L</forename><surname>Szwarcfiter</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Information Processing Letters</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="153" to="157" />
+			<date type="published" when="1974">1974</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">TensorFlow Lite Micro</title>
+		<author>
+			<persName><forename type="first">Tensorflow</forename><surname>Contributors</surname></persName>
+		</author>
+		<ptr target="https://github.com/tensorflow/tensorflow/commits/master/tensorflow/lite/experimental/micro" />
+		<imprint>
+			<date type="published" when="2019-09">Sep 2019. 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">QTravelers Visual Wake Words contest submission</title>
+		<author>
+			<persName><forename type="first">H.-P</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Noorzad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Lin</surname></persName>
+		</author>
+		<ptr target="https://github.com/newwhitecheng/vwwc19-submission" />
+		<imprint>
+			<date type="published" when="2019-09">Sep 2019. 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">SwiftNet: Using Graph Propagation as Meta-knowledge to Search Highly Representative Neural Architectures</title>
+		<author>
+			<persName><forename type="first">H.-P</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Teague</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Chen</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019-06">Jun 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">NUCLEO-F767ZI development board</title>
+		<author>
+			<persName><surname>Stmicroelectronics</surname></persName>
+		</author>
+		<ptr target="https://www.st.com/en/evaluation-tools/nucleo-f767zi.html" />
+		<imprint>
+			<date type="published" when="2019-09">Sep 2019. 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">G</forename><surname>Howard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Kalenichenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Weyand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Andreetto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Adam</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017-04">apr 2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,1593 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Lukewarm Serverless Functions: Characterization and Optimization</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Zurich</forename><surname>Eth</surname></persName>
+						</author>
+						<author>
+							<persName><surname>Zurich</surname></persName>
+						</author>
+						<author>
+							<persName><surname>Switzerland</surname></persName>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<orgName type="institution">University of Edinburgh Edinburgh</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<address>
+									<postCode>2012</postCode>
+								</address>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Lukewarm Serverless Functions: Characterization and Optimization</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/3470496.3527390</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:41+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>• Information systems → Computing platforms; Computing platforms Serverless</term>
+					<term>characterization</term>
+					<term>microarchitecture</term>
+					<term>instruction prefetching</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Serverless computing has emerged as a widely-used paradigm for running services in the cloud. In serverless, developers organize their applications as a set of functions, which are invoked ondemand in response to events, such as an HTTP request. To avoid long start-up delays of launching a new function instance, cloud providers tend to keep recently-triggered instances idle (or warm) for some time after the most recent invocation in anticipation of future invocations. Thus, at any given moment on a server, there may be thousands of warm instances of various functions whose executions are interleaved in time based on incoming invocations.</p><p>This paper observes that (1) there is a high degree of interleaving among warm instances on a given server; (2) the individual warm functions are invoked relatively infrequently, often at the granularity of seconds or minutes; and (3) many function invocations complete within a few milliseconds. Interleaved execution of rarely invoked functions on a server leads to thrashing of each function's microarchitectural state between invocations. Meanwhile, the short execution time of a function impedes amortization of the warmup latency of the cache hierarchy, causing a 31-114% increase in CPI compared to execution with warm microarchitectural state. We identify on-chip misses for instructions as a major contributor to the performance loss. In response we propose Jukebox, a record-and-replay instruction prefetcher specifically designed for reducing the start-up latency of warm function instances. Jukebox requires just 32KB of metadata per function instance and boosts performance by an average of 18.7% for a wide range of functions, which translates into a corresponding throughput improvement.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">INTRODUCTION</head><p>Serverless computing, also known as Function-as-a-Service (FaaS), has emerged as a popular cloud computing paradigm. In serverless, developers organize their applications as a set of functions, which are invoked on demand in response to external requests (e.g., clicks) or by other functions. Developers fully cede the management of resources used by their functions to the cloud provider, who spawns and shuts down function instances based on observed load. For developers, the serverless model offers two significant advantages: first, they do not need to worry about scalability of their applications, which are taken care of by the cloud provider; and secondly, they pay only for the time that their function is executing (i.e., per invocation). The latter contrasts sharply with traditional cloud deployments, including microservices, where a running instance incurs a cost to the developer regardless of whether it is processing requests or is idle.</p><p>Often, serverless functions execute fine-grained, short-running tasks <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b24">25]</ref>. Indeed, developers are incentivized to break down their applications into a collection of fine-grained functions to maximize elasticity, thus allowing different parts of business logic of the application to scale independently. Moreover, serverless providers, such as AWS Lambda and Google Cloud Functions, charge users for the maximum amount of memory that each of their functions consumes <ref type="bibr" target="#b4">[5,</ref><ref type="bibr" target="#b18">19]</ref>, which further pushes the developers toward leaner, finer-grained functions. For instance, 70% of AWS Lambda functions are deployed with a 128-256MB memory limit <ref type="bibr" target="#b10">[11]</ref>. In the case of interactive services, for which serverless is a common implementation model <ref type="bibr" target="#b14">[15]</ref>, the end-to-end latency must often meet an SLO target in the order of a few tens of milliseconds <ref type="bibr" target="#b19">[20]</ref>; to do so, the individual functions may be expected to complete in a millisecond or less <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b44">45,</ref><ref type="bibr" target="#b53">54]</ref>.</p><p>To avoid the long delays of booting a new function instance, cloud providers tend to keep recently-invoked instances alive (or warm, in serverless parlance) instead of shutting them down, in anticipation of additional invocations to that instance. Recent work has shown that Amazon, Google and Microsoft all keep recentlyinvoked function instances warm for at least several minutes and up to an hour <ref type="bibr" target="#b48">[49]</ref>. The combination of small memory footprints for many functions, long keep-alive intervals enforced by cloud providers <ref type="bibr" target="#b48">[49]</ref>, and hundreds of gigabytes of memory in a representative server results in thousands of warm function instances residing on a typical cloud server <ref type="bibr" target="#b1">[2]</ref>. The execution of these functions is interleaved in time based on invocation traffic, with many warm functions experiencing invocation inter-arrival rates measured in seconds or minutes <ref type="bibr" target="#b42">[43]</ref> -an invocation rate that is relatively infrequent compared to their run time.</p><p>The high degree of co-residency and interleaving of serverless functions on a server, combined with short execution times (milliseconds or less) and relatively long inter-invocation intervals (seconds or minutes), mean that when a given warm function is invoked, it often finds none of its microarchitectural state on the core or in the cache hierarchy. Thus, while the function itself is memory-resident, the actual execution of the function is cold from the CPU perspective. We refer to this phenomenon as a lukewarm execution.</p><p>Our analysis reveals that lukewarm executions of functions result in a 31-114% performance degradation compared to executions with fully warmed up microarchitectural state (i.e., back-to-back executions of the same function on the same core). The reason for such a high performance degradation is that the short running time of the functions (typically on the order of a few milliseconds or less) is insufficient to amortize the warm-up time of microarchitectural structures. Using the Intel Top-Down performance analysis <ref type="bibr" target="#b51">[52]</ref>, we show that for 20 functions (including two distributed applications implemented as serverless workflows) the single largest source of performance loss (56% on average) is in the CPU front-end, specifically the on-chip misses for instructions.</p><p>Based on this finding, we examine the instruction footprints across multiple invocations of the same function and find significant commonality across invocations: 90% of all instruction cache blocks accessed by one invocation are also accessed by a subsequent invocation. We further find that the instruction footprints of individual invocations for the studied functions ranges from 300KB to over 800KB. With hundreds or thousands of co-running warm function instances on a serverless host, it is infeasible to keep the combined instruction footprints of all functions in processor caches.</p><p>Spurred by the observations above, we propose Jukebox, a recordand-replay instruction prefetcher for accelerating lukewarm serverless function executions. The idea of a record-and-replay instruction prefetcher is not new; indeed, prior works have proposed them for long-running server workloads by recording entire streams of instruction cache accesses or misses <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b28">29]</ref>, requiring over 100KB of on-chip storage for metadata. In contrast to these works, Jukebox solves a different problem: how to accelerate short-running tasks that have no microarchitectural state or metadata on-chip. To accommodate thousands of warm functions, Jukebox stores its metadata in main memory using simple spatio-temporal compression designed for high coverage and low metadata redundancy. Our evaluation shows that 32KB of metadata (i.e., eight OS pages) is sufficient for high efficacy; for a thousand warm function instances, the required metadata cost is a mere 32MB. Jukebox requires simple hardware support and a negligible amount of on-chip state with no modifications to the processor caches. Our full-system simulation of Jukebox reveals that it speeds-up execution of lukewarm functions by 18.7%, on average.</p><p>To summarize, our contributions are as follows:</p><p>• We show that a high degree of interleaving in the execution of warm serverless functions with short running times leads to obliteration of their on-chip microarchitectural working sets between invocations, resulting in 31-114% performance degradation relative to an execution with warm microarchitectural state.</p><p>• We perform a detailed Top-Down analysis of the causes of the performance loss in the interleaved setup and show that the largest fraction (56%) of extra execution cycles is attributed to fetch latency indicating a bottleneck in instruction delivery.</p><p>• We propose Jukebox, a record-and-replay instruction prefetcher that accelerates lukewarm function executions. Jukebox requires a small amount (32KB) of metadata in main memory per function instances (32MB for a thousand functions) and provides 18.7% performance improvement on lukewarm invocations, on average.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">MOTIVATION 2.1 Serverless Workloads Characteristics</head><p>Serverless, also known as Function-as-a-Service (FaaS), has emerged as a new cloud programming paradigm in which the providers take complete responsibility of managing the cloud infrastructure leaving service developers to focus only on writing their business logic.</p><p>In serverless, developers write their services as a set of stateless event-triggered tasks, called functions, which are invoked via HTTP requests. The providers spawn and tear down instances of each function on demand, following changes in the function invocation traffic.</p><p>Recent studies of AWS Lambda show that production deployments feature many short-running functions with a small memory footprint <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b11">12]</ref>. For instance, 67% of Lambda@Edge functions complete within 20ms <ref type="bibr" target="#b11">[12]</ref>. One reason for the prevalence of shortrunning functions is their frequent usage for implementation of interactive services. For example, Eismann et al. <ref type="bibr" target="#b14">[15]</ref> found that the most common application domain for serverless functions is web services (33% out of 89 studied functions).</p><p>The demand for short functions continues to increase; for example, one of the AWS Lambda studies shows that the median function duration became 2× shorter in 2020 as compared to the median duration in 2019 <ref type="bibr" target="#b11">[12]</ref>. In response to this trend, AWS Lambda decreased the billing granularity from 100ms to 1ms <ref type="bibr" target="#b4">[5]</ref>. Lastly, both the AWS Lambda and Azure Functions demonstrate that &gt;70% of functions have little memory footprint, allocating less than 300MB of memory <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b42">43]</ref>.</p><p>Despite the short running time of many function instances and their small memory footprints, cold-booting a function is a longlatency operation that can take hundreds of milliseconds in today's clouds <ref type="bibr" target="#b48">[49,</ref><ref type="bibr" target="#b49">50]</ref>. To avoid this latency in the critical path of function invocation, cloud providers tend to keep idle function instances alive (or warm) for 5-60 minutes <ref type="bibr" target="#b35">[36]</ref><ref type="bibr" target="#b36">[37]</ref><ref type="bibr" target="#b37">[38]</ref><ref type="bibr" target="#b48">49]</ref>. Although keeping function instances warm comes at a cost for the providers because users are billed only for the actual processing time of individual invocations, all major providers deploy this performance optimization.</p><p>With providers keeping function instances warm for 5-60 minutes, approximately 20-40% of all deployed functions have a warm instance when a request arrives, according to the study of Azure Functions <ref type="bibr" target="#b42">[43]</ref>. The same study shows that fewer than 5% of all invocations have an inter-arrival time (IAT) of under a second. Thus, the IAT of a vast majority of invocations to warm instances lies in the range of 1 second to a few minutes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Serverless Functions on a Cloud Server</head><p>As discussed above, many serverless functions have modest memory footprints and are kept warm for a number of minutes by the cloud provider to reduce the incidence of cold boots. With typical cloud servers today configured with hundreds of gigabytes of main memory <ref type="bibr" target="#b46">[47]</ref>, a thousand or more instances of warm functions may be resident on a server <ref type="bibr" target="#b3">[4]</ref>. The warm instances tend to stay memory-resident as providers disable swapping to avoid the associated performance and security issues <ref type="bibr" target="#b47">[48]</ref>. Meanwhile, many functions have short execution times of a few milliseconds or less, with invocations that are rare compared to their processing time.</p><p>The combination of these trends results in a high degree of function interleaving. Simplistically assuming a server, with instances of functions, whose invocation processing time is 1ms with a 1s inter-arrival time (IAT) for each instance, a thousand unrelated invocations will be interleaved between two invocations of the same function. In fact, function execution time may vary and their inter-arrival time distribution is not uniform, but with thousands of function instances kept warm on a host and typical inter-arrival times of seconds to minutes, a huge degree of interleaving is likely.</p><p>The problem that stems from such extensive interleaving is that a new invocation to a warm function instance is likely to find its onchip microarchitectural state largely obliterated. Thus, a function instance that is warm from a runtime's perspective (i.e., has its state fully loaded in memory) faces a cold CPU, requiring the instance to fill all of the microarchitectural structures both in the core and throughout the cache hierarchy -a phenomenon we refer to as a lukewarm invocation. Lukewarm invocations pose a particularly acute problem for serverless functions with invocations times in the range of milliseconds, since the short execution times do not offer the opportunity to amortize the latency needed to warm up microarchitectural structures over a long execution period. To illustrate the problem, we study the performance of representative serverless functions, packaged as Docker containers, running on a modern server. Multiple instances of many function are kept warm on the server. The hardware setup and the functions are described in Sec. 4. Clients send invocation requests to the various instances maintaining a stable load on the server (around 50% of peak CPU load). In each experiment, one function instance is selected as a function-under-test (FUT). The invocation IAT for the FUT is fixed for the duration of the experiment. For each invocation, we sample a set of performance counters using perf. We then repeat the experiment with a different IAT for the FUT. Each experiment with IATs lower than 100ms was run for 3 minutes while the experiments with 100ms or longer IATs -for 10 minutes.</p><p>Figure <ref type="figure" target="#fig_0">1</ref> represents the cycles per instruction (CPI) for two representative FUTs: an authentication function written in Python and an AES encryption function written in NodeJS. For this experiment, we choose functions written in different languages to highlight the language-independent nature of the behavior. The figure clearly shows that increasing the invocation IAT tends to increase the CPI. The number of cycles spent per invocation of an authentication function increases by more than 2x and stabilizes at a 270% higher CPI with IAT of over 1 second. With the same IAT, the AES encryption function requires 150% more cycles per instruction compared to back-to-back execution. The reason why the CPI grows as the invocation IAT is increased is that the execution of numerous other instances between two invocations of the FUT thrashes all of the microarchitectural state on the CPU core where the FUT executes and throughout the cache hierarchy. Thus, when a new invocation to a FUT arrives after a long IAT, the FUT experiences a lukewarm execution, with poor performance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Top-Down Analysis of Lukewarm Executions</head><p>To get a deeper understanding of the sources of performance loss in lukewarm executions, we study each of the 20 functions in our suite (Table <ref type="table">2</ref>) in two configurations. In the first configuration, the FUT is invoked repeatedly on the same core on an otherwise idle server -this yields the lowest possible execution time for the studied function as each invocation after the first one enjoys fully warmed up microarchitectural state and caches. We refer to this as  </p><formula xml:id="formula_0">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R</formula><formula xml:id="formula_1">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R e c H -G U s e r -G S h i p -G M e a n 0% 100% 200% 300%</formula><p>Normalized CPI the reference execution. The second configuration runs a stressor after each invocation of the FUT.</p><note type="other">Fetch_Bandwidth Fetch_Latency</note><p>To achieve the effect of interleaving with other functions, we use stress-ng <ref type="bibr" target="#b8">[9]</ref> as a stressor and run it on the same core as the FUT in order to thrash caches and the core's microarchitectural state.</p><p>The performance degradation experienced by the functions in this configuration is similar to that of combining a high degree of interleaving with high IAT (Sec. 2.2).</p><p>Using the data collected from performance counters, we perform an analysis of each function's CPI stack using the Top-Down methodology <ref type="bibr" target="#b51">[52]</ref>. Figure <ref type="figure" target="#fig_1">2</ref> shows the results of the analysis for the top-most level of the Top-Down tree, which classifies all pipeline slots into one of four categories: front-end bound (e.g., instruction cache and I-TLB misses), back-end bound (e.g., data cache misses, structural hazards for execution resources), bad speculation (e.g., branch mispredictions) and retiring. Note, the first three categories relate to microarchitectural bottlenecks, which should be minimized, and only the last one corresponds to useful work.</p><p>We make two observations based on the results presented in Figure 2. First, aggressive interleaving (modeled by the stressor in this experiment) has a detrimental effect on all functions, increasing their CPI by 31-114% (70% on average). Second, 51% and 55% of all cycles are classified as front-end stall cycles<ref type="foot" target="#foot_0">1</ref> in reference and interleaved execution, respectively. Moreover, on average, the front-end is responsible for 62% of all stall cycles in reference execution (65% in the interleaved execution). On 15 out of 20 studied functions, the front-end contributes to more than 50% of the extra stall cycles observed in the interleaved execution compared to reference execution. As a result, the front-end is the main source of stalls for the majority of the studied functions.</p><p>We next focus on the front-end stall cycles to understand the source(s) of the bottleneck. Following the Top-Down methodology, we classify the front-end stall cycles into two categories: fetch latency and fetch bandwidth. As shown in Figure <ref type="figure">3</ref>, the vast majority of front-end stall cycles in both reference and interleaved executions are due to fetch latency. In the interleaved execution, fetch latency stall cycles increase by an average of 94% over the reference while fetch bandwidth stalls grow only by 22% on average.</p><p>Figure <ref type="figure">3</ref> puts the front-end performance problem in focus by isolating the portion of the CPI due to front-end stalls from Figure <ref type="figure" target="#fig_1">2</ref> and breaking down the stall cycles into fetch latency and fetch bandwidth. Figure <ref type="figure">4</ref> focuses on the front-end related stalls portion of the Mean bar for the interleaved execution from Figure <ref type="figure" target="#fig_1">2</ref>. To identify the source of the extra stall cycles in the interleaved setup, the CPI stack in Figure <ref type="figure">4</ref> is normalized to the reference execution.</p><p>Our key observation is that with function interleaving, most of the extra stall cycles occur due to front-end inefficiencies. More specifically, the figures clearly point out fetch latency as a key performance bottleneck in the execution of serverless functions, responsible for 56% of all extra stall cycles in the interleaved setup, on average.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.4">The Story of Cache Misses</head><p>To understand the source of fetch latency stalls, we examine instruction misses throughout the cache hierarchy and compare them to data misses. Noting that L1-I misses are consistently high in both reference and interleaved executions, which is expected in light of the findings above, we focus our study on L2 and L3 caches.</p><p>Figure <ref type="figure" target="#fig_4">5a</ref> shows the L2 MPKI for both instruction and data references. We make several observations. First, miss rates are high for both reference and interleaved executions, with an average MPKI of 54 for the former and 72 for the latter. Second, we note that misses for instructions are more frequent than misses for data, which suggests that the instruction working set is larger than the data working set. Given that the in-order front-end can not overlap processing of instruction cache misses while the out-of-order backend often can hide some of the latency of data cache misses, it is not surprising that the front-end is a more significant contributor to total stall cycles than the back-end (Figure <ref type="figure" target="#fig_1">2</ref>). Lastly, we note that the high L2 miss rates for the reference setup can, at least partially, be attributed to a relatively small L2 of 256KB in the evaluated server as compared to the large instruction footprints of the studied functions, as discussed in Sec. 2.5. Meanwhile, in the interleaved setup, L2 miss rates are expected to be high due to the cold cache in the wake of interleaving.</p><p>We next shift our attention to the LLC (i.e., L3 cache), whose MPKI is shown in Figure <ref type="figure" target="#fig_4">5b</ref>. The striking trend in the figure is that reference executions have no LLC misses for instructions and very few misses for data, which is explained by the fact the working sets of the studied functions easily fit in the 25MB LLC of the evaluated server and that the back-to-back invocation pattern facilitates LLC residency. Meanwhile, the LLC misses for interleaved executions exceeds 10 MPKI, with several functions experiencing MPKIs in excess of 40. The majority of the misses are for instructions, which explains the high fraction of front-end related stall cycles in in the interleaved setup: each L1-I miss to the main memory leaves the core front-end starved of instructions for an extended period of time.  </p><formula xml:id="formula_2">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R e c H -G U s e r -G S h i p -G M</formula><formula xml:id="formula_3">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R e c H -G U s e r -G S h i p -G M</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.5">Instructions in Focus</head><p>Having identified long-latency misses for instructions as a key performance bottleneck in the execution of warm serverless functions, we next study the instruction footprints of individual invocations of functions from our suite. For this analysis, we use the gem5 full-system simulator and run the same containerized function instances as we do on real hardware. Sec. 4.2 details our simulation setup. We load the warmed-up system state from a checkpoint and execute each function 25 times. For each execution, we trace L1-I accesses, at cache block granularity, eliminating any repeated cache block addresses from the trace to get the set of unique instruction blocks accessed per invocation. We record both user and kernel instruction accesses.</p><p>Figure <ref type="figure" target="#fig_5">6a</ref> shows the instruction footprint sizes of individual invocations for the studied functions in blue. Error bars indicate the range of recorded values for a given function. We observe that with only a few exceptions, the instruction footprints of individual invocations ranges from just over 300KB to around 800KB with notably low variance for the vast majority of functions.</p><p>Lastly, we study the commonality in the instruction footprints across invocations. For this study, we compare the footprints (in terms of cache block addresses) of each invocation with that of each other 24 invocations, for a total of 300 pair comparisons. For each pair of invocations, we compute commonality as the Jaccard index <ref type="bibr" target="#b22">[23]</ref> which is defined as the ratio between the intersection and the union of unique cache block addresses that belong to the instruction footprint of the pair of invocations.</p><p>Results of the commonality study are shown in Figure <ref type="figure" target="#fig_5">6b</ref>. For all but three functions the mean of commonality among the 300</p><formula xml:id="formula_4">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R e c H -G U s e r -G S h i p -G M E A N 0 256K 512K 768K Memory size [B]</formula><p>(a) Instruction footprint sizes The Jaccard index ranges from 0 (nothing in common) to 1 (identical), a higher value suggests that record and replay to be more likely to prefetch that function.</p><formula xml:id="formula_5">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R e c H -G U s e r -G S h i p -G M E</formula><p>compared pairs of invocations exceeds 90%. Their commonality distributions ranges above 80% and half of them do not even subceed 90%. Only two functions show outliers in their 300 compared pairs that have footprints with a commonality less than 75%. We thus conclude that multiple invocations of the same function have high commonality in their individual instruction footprints.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.6">Summary</head><p>Many serverless functions have small memory footprints, short execution times and comparatively long IATs. Thousands of such function instances may run simultaneously on a cloud server, resulting in a very high degree of interleaving between two invocations of the same function. The interleaving obliterates on-chip microarchitectural state of the functions, resulting in a lukewarm execution with cold caches and a cold core. Lukewarm executions carry an average performance penalty of 70% compared to an execution with fully warmed microarchitectural state. The single biggest source of performance overhead in a lukewarm execution is the core front-end, particularly fetch latency, which constitutes 56% of all additional stall cycles, on average. Frequent L2 and LLC misses for instructions are a key contributor to the high fetch latency. The high on-chip miss rates for instructions in interleaved invocations of serverless functions can be explained by their large instruction footprints of individual invocations, commonly in the range of 300KB to over 800KB. At the same time, there exists high commonality in the instruction footprints of different invocations of the same function.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">DESIGN 3.1 Design Overview</head><p>Based on the insights of Sec. 2, we introduce Jukebox, an instruction prefetcher specifically designed to accelerate lukewarm executions of serverless functions. Jukebox exploits instruction commonality the high commonality of instruction blocks across invocations by recording the working set of one invocation and replaying it whenever a new invocation to the same instance arrives.</p><p>Compared to state-of-the-art instruction prefetchers <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b15">16,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b32">33]</ref> which target the L1-I, a unique feature of Jukebox is that it prefetches into the L2. This choice is motivated by two observations. First, the instruction footprints of individual invocations of the containerized functions generally stay within 800KB, a value much higher than a typical L1-I capacity of 32-64KB. However, such instruction footprints fit comfortably within the L2 capacities of today's server processors, including Intel Skylake and later [1], Amazon Graviton 2 <ref type="bibr" target="#b45">[46]</ref>, and the upcoming AMD Zen 4 <ref type="bibr" target="#b39">[40]</ref>, all of which have L2 caches of 1MB. Secondly, prefetching into the large L2 significantly simplifies the prefetcher's design, since it avoids the need to place prefetches into the small L1-I. With a small cache as a prefetch target, it is essential that prefetches arrive just in time to avoid being evicted (if they arrive too early) or not being useful (if late). With L2 as the prefetch target, an aggressive prefetcher can simply fill it at the start of execution and expect instructions to not be evicted in the duration of a short-running function. Prefetching into the L2 does sacrifice some performance compared to prefetching into the L1-I; however, since the latency of an L2 hit is approximately 10 cycles, while an LLC hit is typically over 30 cycles and an LLC miss is hundreds of cycles, the bulk of the opportunity in reducing stalls in a serverless environment comes from avoiding L2 misses. While Jukebox replays prefetches into the L2, its record logic sits at the L1-I, which enables recording of virtual addresses of instruction cache misses. Operating on virtual addresses is essential for the prefetcher to work well with the virtual memory subsystem and not be impacted by, for instance, page migrations due to memory compaction <ref type="bibr" target="#b25">[26]</ref>.</p><p>We next discuss details of Jukebox, whose operation consists of two distinct phases: record and replay. The record phase begins as soon as the container running the function has been launched. The replay phase is triggered when the OS resumes the process of a function that has been suspended waiting for new invocations. Both record and replay phases are initiated by the OS initializing a pair of dedicated registers with a pointer to the memory region for Jukebox's metadata, similar to how the OS initializes the CR3 register holding the pointer to the root of the page table of a process.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Record</head><p>Jukebox records the stream of L2 misses for instructions using a spatio-temporal encoding that provides for a compact metadata footprint and facilitates timely prefetching. The main component tracking addresses to record is the Code Region Reference Buffer (CRRB), a small fully-associative FIFO structure that is accessed using the virtual address of a code region. Each CRRB entry contains a pointer to a memory region (region pointer) and an access vector holding one bit per cache line within that region. The least significant bits of the pointer used to address individual bytes within the region are not included in a CRRB entry. The region pointer can address fixed-sized regions with size chosen at design time. We study a Jukebox configuration with a CRRB entry comprising of a 38-bit region pointer and a 16-bit access vector (assuming 48-bit virtual addresses and 64B cache lines), for a total of 54 bits per entry (see Sec. 5.1 for an analysis of preferred code region size).</p><p>Recording logic is outlined in Figure <ref type="figure" target="#fig_8">7a</ref>. Upon an L1-I miss, the request is forwarded to the L2 as usual. On an L2 hit, the Jukebox record mechanism takes no action, effectively filtering all L2 hits. If there was a miss in the L2, when the miss finally returns to the L1-I, it is recorded by Jukebox. This is done by generating a lookup into the CRRB, where the virtual address of the corresponding code region is checked against the existing entries 1 . The code region virtual address is generated by taking the most significant bits of the missed block's virtual address corresponding to a CRRB pointer (38 bits for the studied Jukebox design). If a matching entry is found, the prefetcher sets the 𝑛 th bit in the access vector of the found entry where 𝑛 is the offset of the cache line within the code region. Otherwise, the oldest entry in the CRRB is evicted 2 , and a new entry is allocated 3 . The evicted entry is written to memory, optionally bypassing the cache hierarchy since on-chip reuse of the metadata is not expected.</p><p>An entry evicted from the CRRB cannot be modified; thus, if an L2 instruction miss occurs to a region whose corresponding entry has already been pushed to memory, a new entry for the same region is created in the CRRB. As a result, a given code region might appear multiple times in the trace recorded by Jukebox. The effect of this design choice is that it increases the metadata footprint of Jukebox but simplifies the design, since evicted entries do not need to be brought back from memory.</p><p>There are two possible options for determining whether an L1-I miss also missed in the L2. The first option is to propagate the result of the L2 tag check back to the L1-I using a dedicated 1-bit signal. The second option is to measure the delay of an outstanding L1-I request and compare that to the expected L2 hit latency (e.g., using a timer at the L1-I MSHR <ref type="bibr" target="#b26">[27]</ref>.) Jukebox can work equally with either of these options.</p><p>The FIFO order of the entries in the recorded metadata directly encodes the temporal order of accesses at the chosen granularity. That is, the first metadata entry written to memory will encode the addresses of the cache lines in the first code region accessed after the function was invoked. This organization allows Jukebox to prefetch the entries in approximately the same order they are likely to be accessed, thus improving timeliness at replay time.</p><p>Note that because the recording is done in a region-based manner, the replay stream will first prefetch all of the indicated cache blocks from one code region before moving on to the next region. As a result, some reordering of individual cache blocks will happen at prefetch time compared to recording. However, recording at the region granularity enables a small metadata footprint, makes better use of address translation resources (a single lookup for all the blocks in a region), and reduces the number of DRAM activations due to spatial locality within a page.</p><p>The record phase is triggered by the OS by programming a pair of architecturally-exposed registers containing the base and limit of the metadata storage. The limit register is optional and lets the   OS control the amount of metadata stored per function instance process.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Replay</head><p>The replay phase in Jukebox is triggered by the OS upon receiving a new function invocation. The OS triggers the replay by programming a pair of base and limit registers, similarly to how recording is triggered. The replay can be triggered by the OS's scheduler whenever the function instance thread is assigned to a core to process an invocation.</p><p>The replay phase is outlined in Figure <ref type="figure" target="#fig_8">7b</ref>. The prefetch engine starts the replay phase by issuing sequential reads starting from the beginning of the metadata region 1 , reading the metadata in the same order it was written to memory. This enables prefetching of instruction cache blocks in the same temporal order as was recorded, albeit at page granularity.</p><p>The metadata entries are prefetched into a small FIFO inside the prefetch logic. Once the metadata entry is returned from memory, the prefetcher passes the base address of the code region to the I-TLB 2 , triggering address translation like a normal code request. This serves two purposes: first, it ensures that Jukebox does not rely on physical addresses that may change as a consequence of normal OS activity such as paging or memory compaction. Second, it effectively pre-populates the TLB with translations for code pages. As soon as the physical base address of the code region is known, using the information from the entry's access vector, the prefetch engine reconstructs full addresses of each of the accessed cache lines within the code region, and enqueues them in the L2 prefetch queue 3 .</p><p>Once prefetch requests for all of the cache blocks encoded in an entry's access vector have been launched, the entry is retired from the FIFO. The next set of entries is fetched using a single 64B cache line read once the equivalent of 64B of data have been consumed from the FIFO.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4">Discussion</head><p>3.4.1 Metadata memory management. Upon a function instance's start (i.e., first invocation received by the host), the OS allocates two memory regions for the function instance process, each of which is contiguous in the physical space. These regions are used for bookkeeping of the Jukebox metadata of the function instance process. The OS associates the physical addresses of the two buffers with the PID of the function instance process. For example, in Linux, the addresses of the buffers can be stored in task_struct. Upon an invocation of a function, as part of assigning the function instance process to a core for execution, the scheduler consults the instance's task_struct and write addresses of the buffers to the registers that define where the Jukebox metadata is written (at record) and where the metadata is fetched from (at replay). Once the invocation completes and the function instance process is descheduled, the values of buffer pointers are saved in the task_struct. A subsequent invocation received by the same instance thus replays the metadata from the memory region that has been written by the previous invocation. Operating with the metadata buffers using physical addresses avoids the need for address translation while fetching/recording metadata which (1) improves the timeliness of Jukebox prefetches and (2) does not cause contention for TLBs and hardware page walkers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.2">Virtualization. Under virtualization, the guest OS triggers</head><p>Jukebox record and replay. Jukebox metadata is stored in guest physical memory, i.e., as a part of the virtual machine state. Hence, in addition to lukewarm execution, Jukebox can accelerate the lengthy cold boots of serverless instances provided that a function snapshotting technique <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b49">50]</ref> is used and that the Jukebox metadata has been recorded before taking the snapshot.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.3">Enabling Jukebox.</head><p>Jukebox can be enabled for a particular thread upon its creation, similar to choosing a thread's scheduling priority by setting the corresponding attribute of the created thread <ref type="bibr" target="#b38">[39]</ref>. For example, when the serverless runtime of a function instance starts a gRPC/HTTP server with a number of worker threads (or when spawning them at run time), it can enable Jukebox by setting the corresponding attribute before making a pthread_create <ref type="bibr" target="#b33">[34]</ref> system call.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.4">Generality.</head><p>While Jukebox is particularly beneficial for lukewarm functions, it can accelerate start-up times for any memoryresident thread.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">METHODOLOGY 4.1 Hardware Infrastructure</head><p>We perform the measurements on on an xl170 node in Cloud-Lab <ref type="bibr" target="#b13">[14]</ref> Utah datacenter, featuring a 2.4GHz 10-core Intel Broadwell CPU with 32KB L1-I, 32KB L1-D, 256KB L2, and 25MB LLC caches, 64GB DRAM. The node runs Ubuntu 20 with a stock Linux kernel v5.4. We disable SMT, following the production guidelines by AWS Lambda <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b47">48]</ref>. Performance counters are collected using linux perf <ref type="bibr" target="#b29">[30]</ref> during the entire execution of the target instance's container, thus capturing all kernel and user-level activity.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Simulation Infrastructure</head><p>To evaluate Jukebox, we use gem5 <ref type="bibr" target="#b7">[8,</ref><ref type="bibr" target="#b34">35]</ref>, a full-system cycleaccurate simulator modeling a server-grade x86 CPU. Our simulated baseline is configured similar to Intel Skylake [1], with parameters of the modeled hardware summarized in Table <ref type="table">1</ref>. We also study a Broadwell-like configuration (Sec. 5.6), which resembles the real hardware platform used for the characterization studies in Sec. 2.3. We run an identical software stack in simulation as we do on real  <ref type="table">1</ref>: Parameters of the simulated processor. hardware; i.e., the same OS and the same containers running gRPC servers. Before performing the measurements, we boot the system in functional mode (KVM core) and execute 20000 invocations of each function, at which point we create a checkpoint of the system state. The checkpoints form the common starting state for all subsequent experiments. For the experiments, we switch to cycleaccurate timing mode and simulate 20 invocations. <ref type="foot" target="#foot_1">2</ref></p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Workloads</head><p>In our experiments, we evaluate Jukebox using a large set of shortrunning serverless functions, developed to work with a number of runtimes (namely, Python, NodeJS and Go), as listed in Table 2. The functions were adopted from the Hotel Reservation application from the DeathStarBench suite of microservices <ref type="bibr" target="#b17">[18]</ref>, Google's Online Boutique application <ref type="bibr" target="#b20">[21]</ref>, AWS' authentication serverless functions <ref type="bibr" target="#b5">[6]</ref>, and AES encryption application from Func-tionBench <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b31">32]</ref>. Similarly to vHive <ref type="bibr" target="#b49">[50]</ref>, the state-of-the-art serverless experimentation framework, each function is deployed as a handle of a gRPC <ref type="bibr" target="#b21">[22]</ref> server, which represents a function instance. Each function is deployed in a separate container. <ref type="foot" target="#foot_2">3</ref>Several functions in our workload are written in NodeJS, a language which utilize just-in-time (JIT) compilation for code optimization. In order to avoid performance noise induced by the JIT</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Function Abbreviation Function Abbreviation</head><p>Hotel Reservation <ref type="bibr" target="#b17">[18]</ref> Online Boutique <ref type="bibr" target="#b30">31,</ref><ref type="bibr" target="#b31">32]</ref> Recommendation RecO-P Authentication Auth-P/N/G Fibonacci Fib-P/N/G AES encryption AES-P/N/G Table <ref type="table">2</ref>: Serverless functions and their language runtimes (legend -P: Python, N: NodeJS, G: Go).</p><formula xml:id="formula_6">[21] Geo Geo-G Currency Curr-N Profile Prof-G Email Email-P Rate Rate-G Payment Pay-N Recommendation RecH-G ProductCatalog ProdL-G User User-G Shipping Ship-G Other [6,</formula><p>engine to ensure stable and reproducible results, we invoke each JIT'ed function 20000 times before starting measurements <ref type="bibr" target="#b50">[51]</ref>. We empirically found that for our functions more invocations do not trigger further code optimization. For the hardware simulation, we generate the gem5 checkpoint after these initial invocations. We note that Jukebox is orthogonal to JIT compilation and can speedup execution of unoptimized code. Moreover, by recording each function execution for subsequent replay, Jukebox trivially adapt to changes in the instruction working set induced by the JIT engine.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">EVALUATION 5.1 Parameterizing Jukebox</head><p>Recall from Sec. 3.1 that Jukebox uses a spatio-temporal encoding that exploits locality in code accesses by organizing its metadata as a sequence of entries, each corresponding to a spatial region. Each entry contains the upper bits of the address of the region and a bit vector, with one bit per cache line. Larger regions require a longer bit vector but may allow for fewer entries given sufficiently high spatial locality in the code. The entries are created in the CRRB, which coalesces accesses to the same region before the entry is written to the in-memory metadata storage. A larger CRRB may allow more accesses to the same region to be coalesced before an entry is evicted, resulting in a smaller metadata footprint at the cost of more on-chip storage and higher access energy.</p><p>To find the preferred code region size and CRRB size, we measure the size of the metadata required to store all of the entries produced by the Jukebox recording logic while a function executes. We do this for a range of code region sizes, from 512B to 8KB, and three different CRRB buffer sizes: 8, 16 and 32 entries.</p><p>Figure <ref type="figure">8</ref> presents the results of the study for a 16-entry CRRB. For the majority of the workloads, the metadata size reaches a minimum with the code region size of 1KB, resulting in 9.6KB to 29.5KB of metadata storage. Our experiments with the two other CRRB sizes (not shown) reveal very similar trends and modest sensitivity to the size of the CRRB.</p><p>We next study the impact of limiting the size of Jukebox's metadata storage on its efficiency. Since we found in Figure <ref type="figure">8</ref> the most space efficient code region size to be 1KB, we use this configuration and a 16-entry CRRB for this sensitivity study. Figure <ref type="figure">9</ref> shows the speedup Jukebox is able to achieved when constrained to various  metadata storage capacities. In Figure <ref type="figure">9</ref>, we plot only one representative function for each of the three implementation languages <ref type="foot" target="#foot_3">4</ref>together with the average across all 20 functions in our evaluation suite.</p><formula xml:id="formula_7">-N Fib-G AES-G Auth-G Geo-G ProdL-G Prof-G Rate-G RecH-G User-G Ship-G</formula><p>The figure shows that workloads with large working sets, e.g. Pay-N, tend to be more sensitive to the limited metadata size than workloads with small working sets, e.g. ProdL-N. This is expected given that the metadata represents a compressed form of a function's working set. Note that Jukebox is designed to seamlessly extend to dynamic metadata sizes. For that a metadata size field needs to be added in the bookkeeping mechanism described in Sec. 3.4.1. When scheduling a thread, the OS sets up the size of the metadata of a function instance and assigns the addresses for record and replay metadata storage. We use the same size of metadata storage for all our workloads in further experiments.</p><p>As Figure <ref type="figure">9</ref> shows, on average, there is a little gain with increasing metadata storage beyond 16KB. Thus, unless stated otherwise, in the rest of the evaluation we use a Jukebox configuration with 16KB metadata storage, 1KB code-region size and 16-entry CRRB.   the complete instruction footprint a function accumulates over all simulated invocations. The performance of the three evaluated configurations is shown in Figure <ref type="figure" target="#fig_11">10</ref> with the results normalized to the baseline. We find the maximum opportunity without any instruction misses boosts performance of the studied functions by 31% on average (46% max on Auth-N). Jukebox delivers consistent speedups that correlates well with the opportunity; that is, functions that have a large difference in performance between Perfect I-cache and the baseline enjoy large speedups (e.g., Auth-G: 29.5% speedup with Jukebox), while the opposite is true for functions with a small difference between Perfect I-cache and the baseline (e.g., AES-P: 6.2% speedup with Jukebox). On average, Jukebox speeds up interleaved executions by 18.7%.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Performance</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Miss Coverage</head><p>We next study Jukebox's ability to cover instruction misses. Since Jukebox prefetches into the L2 cache, we present fractions of L2 instruction misses in the baseline that are (1) covered, (2) not covered, and (3) overpredicted (i.e., prefetched but not referenced) by Jukebox.</p><p>Figure <ref type="figure" target="#fig_13">11</ref> shows the result of this study. One can see that coverage correlates well with the choice of a programming language; benchmarks that are written in Go show high Jukebox coverage (75-90%) while those written in Python and NodeJS exhibit lower coverage <ref type="bibr">(48-74%)</ref>. This can be explained by the fact that for the majority of the Go benchmarks, metadata fits into Jukebox's metadata storage, which is not the case for Python and NodeJS benchmarks (see Figure <ref type="figure">8</ref>).</p><p>Furthermore, the figure shows that Jukebox induces few wrong prefetches with an overprediction rate of just 10% (max. 15.8%). This result is anticipated by the high commonality in instruction footprints across invocations (Sec. 2.5). The high accuracy of Jukebox's prefetches affirm its record and replay approach to be highly effective in delivering the relevant instruction blocks on chip.</p><formula xml:id="formula_8">F i b -P A E S -P A u t h -P E m a i l -P R e c O -P F i b -N A E S -N A u t h -N C u r r -N P a y -N F i b -G A E S -G A u t h -G G e o -G P r o d L -G P r o f -G R a t e -G R</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Memory Bandwidth</head><p>Figure <ref type="figure" target="#fig_14">12</ref> plots memory bandwidth usage of Jukebox normalized to the baseline. Memory bandwidth includes all requests issued to memory, which includes both instruction and data, demand and prefetches. Note that Jukebox does not change the amount of bandwidth consumed for correct timely prefetches. Overheads lie in overpredicted (i.e. unused) prefetches as well as metadata traffic associated with recording and replaying. Jukebox introduces a modest memory bandwidth overhead of 14% on average and 23% in the worst case. The overhead comprises 40% of Jukebox's metadata and 60% overpredicted traffic. Similar to the coverage study (Sec. 5.3), we note that a memory bandwidth increase correlates with the choice of a programming language. Go workloads experience a higher bandwidth increase than workloads written in Python and NodeJS. Higher memory bandwidth on Go workloads compared to Python and NodeJS ones can be explained by a larger number of uncovered misses in Go workloads observed in the coverage study. Jukebox's metadata storage is too small to hold all metadata required for prefetching the whole instruction working set of Python and NodeJS workloads. As a result, at replay, Jukebox stops restoring the working set of Python and NodeJS workloads before completing prefetching of the whole instruction working set, which results in a lower number of overpredictions on Python and NodeJS workloads compared to Go ones. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.5">Comparison to a State-of-the-Art Instruction Prefetcher</head><p>In this section, we compare Jukebox to a state-of-the-art instruction prefetcher, called PIF <ref type="bibr" target="#b15">[16]</ref>. PIF is a stream-based prefetcher, which works by recording and replaying the sequences of retired instruction addresses. Recording all instruction addresses allows PIF to be be independent of variations in L1-I cache content and application's control flow, thus achieving good prefetch accuracy. To enable replay of instruction streams, PIF requires an index, which uses an instruction address to find the most recent recorded stream that starts with that address. By using the same parameters as in <ref type="bibr" target="#b15">[16]</ref>, we configure PIF with a 49KB index, 164KB of stream metadata storage and an unrealistic single-cycle lookup latency for each of these components. Because PIF was designed for long-running traditional server workloads, it does not save its state across function invocations. To understand the best possible performance of PIF, we simulate another design, PIF-ideal, with an unlimited index and unlimited metadata storage that persist across function invocations.</p><p>Figure <ref type="figure" target="#fig_15">13</ref> plots the results of this study. We find that PIF delivers 2.4% speedup on average (4.8% max) while PIF-ideal boosts performance by 6.7% (12.4% max). Meanwhile, Jukebox with metadata size limited to 16KB provides a 18.7% speedup, on average -a significant improvement over PIF and PIF-ideal. The reason for PIF's relatively poor efficacy can be explained by the fact that whenever the recorded stream differs from the actual access stream of the core, PIF stops prefetching and re-indexes to find the correct stream. Re-indexing prevents PIF from running far enough ahead of the core to cover the long latency of a main memory access.</p><p>The big picture is that PIF was designed to reduce L1-I misses for accesses expected to hit in the L2 or L3 caches. In contrast, lukewarm functions have instruction footprints in main memory, which requires a prefetcher that can effectively hide the associated high latency. PIF needs to stop and re-index any time the actual control flow diverges from the prefetch stream, whereas Jukebox prefetches all of the instruction blocks recorded in its metadata without synchronizing with the core. By doing such bulk prefetching, Jukebox sacrifices the ability to prefetch into the small L1-I but achieves high instruction miss coverage in the L2 and L3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.6">Jukebox on a Broadwell-like CPU</head><p>As we perform the Top-Down analysis on a platform with an Intel Broadwell CPU (Section 2.3), we compare Jukebox performance results obtained with a simulated Intel Skylake configuration to the L2 instructions misses LLC instruction misses Skylake -74% -86% Broadwell -15% -91% Table <ref type="table">3</ref>: Reduction in L2 and L3 MPKI with Jukebox.</p><p>Broadwell-based platform. A distinguishing feature in the Broadwell configuration is a different cache hierarchy, with a 32KB L1-I, 256KB L2 and 8MB LLC. We re-assess Jukebox parameters in light of the smaller L2 as compared to the 1MB L2 in Skylake, and find that the smaller L2 results in more conflict misses for instructions, thus necessitating a larger 32KB Jukebox metadata store per function. Other Jukebox parameters (region size and CRRB size) are unchanged from the Skylake configuration.</p><p>Across our suite of serverless functions, we find that Jukebox delivers a 12% geomean speedup on the Broadwell configuration. Noting that the speed-up is smaller than the 18.7% achieved on Skylake (Sec. 5.2) despite a similar opportunity with a perfect L1-I, we examine the cache miss rates for instructions in the two simulated platforms.</p><p>The data is presented in Table <ref type="table">3</ref>, which shows the reduction in MPKI for instructions in the L2 and L3 of the two simulated platforms with Jukebox. The table shows that Jukebox is highly effective at eliminating the vast majority of LLC misses for instructions in both platforms. These are the crucial misses to cover due to their excessively high latency. When it comes to the L2, however, Jukebox struggles to cover most L2 misses for instructions in the Broadwell configuration. This can be explained by the high incidence of conflicts in Broadwell's small L2, which result in many of Jukebox's prefetches being evicted from the L2 before they are consumed.</p><p>To summarize, Jukebox is most effective in CPUs with a large L2, which have featured in recent server processors [1, <ref type="bibr" target="#b39">40,</ref><ref type="bibr" target="#b45">46]</ref>, yet also provides a tangible benefit in CPUs with a smaller L2.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">RELATED WORK</head><p>To date, there has been little work in understanding microarchitectural implications of serverless programming. Shahrad et al. <ref type="bibr" target="#b41">[42]</ref> examined execution of five serverless functions, identifying issues such as a high cold-start latency, high variability in execution time, and performance overheads due to containerization. The work observed that short-running functions experienced much higher variability in execution time than long-running tasks, but did not attempt to understand the sources of variability other than high branch mispredictions. In contrast, the focus of our paper is on understanding and improving the microarchitectural behavior of lukewarm functions. To that end, we conducted a Top-Down performance analysis <ref type="bibr" target="#b51">[52]</ref> of 20 diverse functions on a modern server, identifying concrete microarchitectural sources of performance loss stemming from a high degree of function interleaving. Based on our analysis, we identified on-chip instruction misses as the main performance bottleneck in lukewarm executions and proposed a specialized prefetcher to tackle the problem.</p><p>Prior works examine the problem of fine-grained context switches in highly-consolidated virtual machines <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b52">53]</ref>. These works focus on a setting where a single virtual machine occupies the entire CPU for multiple milliseconds, followed by a context switch to another VM. The problem solved in these works is restoring the entire multi-megabyte LLC state via prefetching by saving the address footprint of the LLC to main memory upon a context switch. The proposed designs suffer from large metadata overheads for high coverage and high bandwidth overheads associated with indiscriminate restoration of the entire LLC (in some cases more than doubling the amount of memory traffic compared to the no-prefetch baseline <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b52">53]</ref>).</p><p>In contrast, Jukebox targets on-chip instruction misses by prefetching directly into the L2 cache using a minimal amount of metadata. Due to high instruction commonality across invocations of a given serverless function instance, Jukebox achieves high accuracy with low overprediction. While both Jukebox and prior works save prefetcher metadata in main memory, prior works save physical addresses, which are the only ones available at the LLC; in contrast, Jukebox saves virtual addresses, which makes Jukebox naturally compatible with a modern virtual memory manager that can move pages in memory (e.g., for memory compaction purposes).</p><p>Jevdjic et al. <ref type="bibr" target="#b23">[24]</ref> record spatial footprints of data pages to reduce off-chip bandwidth pressure for aggressive data prefetching. While Jukebox also uses the idea of footprints, it targets instruction prefetching with low metadata cost.</p><p>Ahn et al. also examines fine-grained context switches for virtualized systems and proposes a context-preservation technique that controls the LLC capacity available for each virtual machine, to preserve LLC working set across context switches <ref type="bibr" target="#b2">[3]</ref>. Zhu et al. examine event-driven server-side applications and identify L1-I misses to be a major performance bottleneck <ref type="bibr" target="#b54">[55]</ref>. The authors observe that instruction working sets of the studied applications fit in the LLC and propose a specialized cache replacement policy to preserve an instruction working in the LLC and augment it with a temporal prefetcher in the L1-I cache. Both of these techniques target settings where the instruction working set fits in the LLC, which is not the case for serverless functions with infrequent invocations and a huge degree of interleaving.</p><p>There is a long history of works in instruction prefetching for server workloads. These papers fall into one of two categories: temporal streaming and BTB-directed. The former category records entire traces of instruction cache accesses or misses at the cache block granularity, resulting in metadata size of hundreds of kilobytes and requiring a complex indexing mechanism to find the correct metadata when the actual execution diverges from the recorded trace <ref type="bibr" target="#b15">[16,</ref><ref type="bibr">17,</ref><ref type="bibr" target="#b27">28]</ref>. To store the metadata, existing temporal streaming proposals either use dedicated on-chip storage <ref type="bibr" target="#b15">[16]</ref> or virtualize the metadata into the LLC <ref type="bibr" target="#b27">[28]</ref>. In contrast, Jukebox uses aggressive filtering and spatial encoding resulting in low metadata costs, does not require any indexing, prefetches into the L2 to further simplify the prefetcher design and stores its metadata in memory to support thousands of warm functions.</p><p>The second category uses the BTB together with the branch predictor to identify upcoming control flow discontinuities to drive the instruction prefetch engine <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b40">41]</ref>. This approach relies on a fully warmed up BTB and branch predictor, which makes it fundamentally at odds with lukewarm executions that have to contend with a cold core.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">CONCLUSION</head><p>This paper identifies and addresses microarchitectural bottlenecks in the execution of serverless functions, thousands of which may reside concurrently in the memory of a modern cloud server. Due to the long invocation inter-arrival times as compared to execution latencies of each function, numerous other functions' executions may be interleaved between two invocations of a given function instance. This leads to the lukewarm execution phenomenon, whereby an invoked memory-resident function instance may find all of the on-chip microarchitectural state obliterated by other function instances.</p><p>The analysis of performance counters on a real server shows the core front-end to be the critical performance bottleneck in lukewarm executions due to the need to fetch instructions from main memory. In response, we proposed Jukebox, a record-and-replay prefetcher specifically designed to accelerate lukewarm invocations. Jukebox exploits instruction commonality across invocations to provide high instruction miss coverage with a low metadata cost and low design complexity.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Effect of request inter-arrival time on the CPI of a given function on a high-occupancy server. CPI is normalized to back-to-back invocations.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Top-Down CPI analysis of serverless functions. Striped bars: reference execution, solid bars: interleaved execution.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 : 2 Figure 4 :</head><label>324</label><figDesc>Figure 3: Top-Down CPI analysis of the front-end stall cycles. The striped portions show the reference execution, solid portions show the additional cycles due to interleaving. Normalized to the front-end portion of the CPI for the reference execution in Figure 2.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: MPKI breakdowns of level 2 (a) and level 3 (b) caches. The striped bars (on the left in each pair of bars): reference execution, solid bars: interleaved execution.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: (a) Instruction footprint sizes of individual invocations. (b) The distribution of Jaccard indices calculated from the 25 function invocations.The Jaccard index ranges from 0 (nothing in common) to 1 (identical), a higher value suggests that record and replay to be more likely to prefetch that function.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Jukebox prefetcher overview.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 8 :Figure 9 :</head><label>89</label><figDesc>Figure 8: Sensitivity of Jukebox's metadata size to the code region size with a 16-entry CRRB.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 10</head><label>10</label><figDesc>Figure10presents the main result of the evaluation. We compare three configurations: (1) the baseline, which represents a high degree of function interleaving; (2) Jukebox applied to the baseline setup; and (3) Perfect I-cache which draws the maximum opportunity without any instruction misses. The baseline (1) is modeled by flushing all microarchitectural state in-between function invocations. For (3), we use an infinite-sized L1-I cache that maintains</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>FFigure 10 :</head><label>10</label><figDesc>Figure 10: Performance results on the Skylake-like configuration.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>FFigure 11 :</head><label>11</label><figDesc>Figure 11: Fractions of L2 instruction misses covered and overpredicted by Jukebox (normalized to the number of L2 misses in the baseline).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: Jukebox's memory bandwidth overhead.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>Figure 13 :</head><label>13</label><figDesc>Figure 13: Comparison of performance with PIF and Jukebox.</figDesc></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">In Top-Down, a stall cycle is defined as a CPU cycle in which the pipeline cannot make progress because at least one architectural component is fully utilized and cannot take additional work. However, we note that in an out-of-order architecture, other components can often make progress in the shadow of a pipeline stall. Furthermore, stalls can overlap with each other as well as with retiring.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">Configurations and guidance on how to setup gem5 to run containerized, serverless workloads are made available at https://github.com/ease-lab/vSwarm-u</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">All function codes have been released and made available for the research community at https://github.com/ease-lab/vSwarm</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3">We found that the language in which the function is written is the single biggest determinant of a given function's runtime and Jukebox's efficacy.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>ACKNOWLEDGMENTS</head><p>The authors thank the anonymous reviewers as well as the members of the EASE Lab at the University of Edinburgh for their valuable feedback on this work. We are grateful to Yuchen Niu for developing the initial platform for the Top-Down analysis of a serverless system and Harshit Garg for helping make the studied workloads publicly available. This research was generously supported by the University of Edinburgh, Arm and by EASE Lab's industry partners and sponsors: Facebook, Google, Huawei, Intel and Microsoft.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<ptr target="https://www.7-cpu.com/cpu/Skylake_X.html" />
+		<title level="m">Zip LZMA Benchmark. 2022. Intel Skylake</title>
+				<imprint>
+			<date type="published" when="2022-04-12">April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Firecracker: Lightweight Virtualization for Serverless Applications</title>
+		<author>
+			<persName><forename type="first">Alexandru</forename><surname>Agache</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marc</forename><surname>Brooker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandra</forename><surname>Iordache</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anthony</forename><surname>Liguori</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rolf</forename><surname>Neugebauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phil</forename><surname>Piwonka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Diana-Maria</forename><surname>Popa</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 17th Symposium on Networked Systems Design and Implementation (NSDI)</title>
+				<meeting>the 17th Symposium on Networked Systems Design and Implementation (NSDI)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="419" to="434" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Micro-Sliced Virtual Processors to Hide the Effect of Discontinuous CPU Availability for Consolidated Systems</title>
+		<author>
+			<persName><forename type="first">Jeongseob</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chang</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyun</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaehyuk</forename><surname>Huh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 47th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 47th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="394" to="405" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<title level="m" type="main">A Demo Running 4000 Firecracker MicroVMs</title>
+		<author>
+			<persName><surname>Amazon</surname></persName>
+		</author>
+		<ptr target="https://github.com/firecracker-microvm/firecracker-demo" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">AWS Lambda Pricing</title>
+		<author>
+			<persName><forename type="first">Web</forename><surname>Amazon</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Services</surname></persName>
+		</author>
+		<ptr target="https://aws.amazon.com/lambda/pricing" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Use API Gateway Lambda Authorizers. Retrieved</title>
+		<author>
+			<persName><forename type="first">Web</forename><surname>Amazon</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Services</surname></persName>
+		</author>
+		<ptr target="https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-use-lambda-authorizer.html" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Divide and Conquer Frontend Bottleneck</title>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Ansari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pejman</forename><surname>Lotfi-Kamran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hamid</forename><surname>Sarbazi-Azad</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 47th International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>the 47th International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="65" to="78" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">Nathan</forename><surname>Binkert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bradford</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gabriel</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ali</forename><surname>Saidi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arkaprava</forename><surname>Basu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><surname>Hestness</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><forename type="middle">R</forename><surname>Hower</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tushar</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Somayeh</forename><surname>Sardashti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rathijit</forename><surname>Sen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Korey</forename><surname>Sewell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Muhammad</forename><surname>Shoaib</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nilay</forename><surname>Vaish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><forename type="middle">D</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Wood</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2024716.2024718</idno>
+		<ptr target="https://doi.org/10.1145/2024716.2024718" />
+	</analytic>
+	<monogr>
+		<title level="j">The Gem5 Simulator. SIGARCH Comput. Archit. News</title>
+		<imprint>
+			<biblScope unit="volume">39</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="1" to="7" />
+			<date type="published" when="2011-08">2011. aug 2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title level="m" type="main">Stress-ng</title>
+		<author>
+			<persName><forename type="first">Colin</forename><surname>Ian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">King</forename></persName>
+		</author>
+		<ptr target="https://github.com/ColinIanKing/stress-ng" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Cache restoration for highly partitioned virtualized systems</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Daly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Harold</forename><forename type="middle">W</forename><surname>Cain</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 18th IEEE Symposium on High-Performance Computer Architecture (HPCA)</title>
+				<meeting>the 18th IEEE Symposium on High-Performance Computer Architecture (HPCA)</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="225" to="234" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">The State of Serverless</title>
+		<author>
+			<persName><surname>Datadog</surname></persName>
+		</author>
+		<ptr target="https://www.datadoghq.com/state-of-serverless-2020" />
+		<imprint>
+			<date type="published" when="2020-04-12">2020. 2020. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title level="m" type="main">The State of Serverless 2021</title>
+		<author>
+			<persName><surname>Datadog</surname></persName>
+		</author>
+		<ptr target="https://www.datadoghq.com/state-of-serverless" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Catalyzer: Sub-millisecond Startup for Serverless Computing with Initialization-less Booting</title>
+		<author>
+			<persName><forename type="first">Dong</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianyi</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yubin</forename><surname>Xia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Binyu</forename><surname>Zang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guanglu</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chenggang</forename><surname>Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qixuan</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haibo</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 25th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXV)</title>
+				<meeting>the 25th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXV)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="467" to="481" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Emmanuel Cecchet, Snigdhaswin Kar, and Prabodh Mishra. 2019. The Design and Operation of CloudLab</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Duplyakin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Ricci</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aleksander</forename><surname>Maricq</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gary</forename><surname>Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathon</forename><surname>Duerig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Eide</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Leigh</forename><surname>Stoller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Hibler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kirk</forename><surname>Webb</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Akella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kuang-Ching</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Glenn</forename><surname>Ricart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Larry</forename><surname>Landweber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chip</forename><surname>Elliott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Zink</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 USENIX Annual Technical Conference (ATC)</title>
+				<meeting>the 2019 USENIX Annual Technical Conference (ATC)</meeting>
+		<imprint>
+			<biblScope unit="page" from="1" to="14" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<title level="m" type="main">A Review of Serverless Use Cases and their Characteristics</title>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Eismann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><surname>Scheuner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erwin</forename><surname>Van Eyk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maximilian</forename><surname>Schwinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Johannes</forename><surname>Grohmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikolas</forename><surname>Herbst</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cristina</forename><forename type="middle">L</forename><surname>Abad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandru</forename><surname>Iosup</surname></persName>
+		</author>
+		<idno>CoRR abs/2008.11110</idno>
+		<imprint>
+			<date type="published" when="2020">2020. 2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Proactive instruction fetch</title>
+		<author>
+			<persName><forename type="first">Cansu</forename><surname>Michael Ferdman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Kaynak</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 44th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 44th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="152" to="162" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Temporal instruction fetch streaming</title>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Ferdman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anastasia</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Moshovos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 41st Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 41st Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="1" to="10" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">An Open-Source Benchmark Suite for Microservices and Their Hardware-Software Implications for Cloud &amp; Edge Systems</title>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Gan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanqi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dailun</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankitha</forename><surname>Shetty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Priyal</forename><surname>Rathi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nayan</forename><surname>Katarki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ariana</forename><surname>Bruno</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Justin</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><surname>Ritchken</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brendon</forename><surname>Jackson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kelvin</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Meghna</forename><surname>Pancholi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brett</forename><surname>Clancy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Colen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fukang</forename><surname>Wen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Catherine</forename><surname>Leung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Siyuan</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Leon</forename><surname>Zaruvinsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mateo</forename><surname>Espinosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rick</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhongling</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jake</forename><surname>Padilla</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christina</forename><surname>Delimitrou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXIV)</title>
+				<meeting>the 24th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXIV)</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="3" to="18" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Cloud Functions Pricing</title>
+		<author>
+			<persName><surname>Google</surname></persName>
+		</author>
+		<ptr target="https://cloud.google.com/functions/pricing" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<title level="m" type="main">Implementing SLOs</title>
+		<author>
+			<persName><forename type="first">Google</forename><surname>Cloud</surname></persName>
+		</author>
+		<ptr target="https://sre.google/workbook/implementing-slos" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Online Boutique</title>
+		<author>
+			<persName><surname>Googlecloudplatform</surname></persName>
+		</author>
+		<ptr target="https://github.com/GoogleCloudPlatform/microservices-demo" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">gRPC: A High-Performance, Open Source Universal RPC Framework</title>
+		<idno>gRPC Authors. 2022</idno>
+		<ptr target="https://grpc.io" />
+		<imprint>
+			<date type="published" when="2022-04-12">April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Jaccard</surname></persName>
+		</author>
+		<idno type="DOI">10.1111/j.1469-8137.1912.tb05611.x</idno>
+		<ptr target="https://nph.onlinelibrary.wiley.com/doi/pdf/10.1111/j.1469-8137.1912.tb05611.x" />
+	</analytic>
+	<monogr>
+		<title level="m">THE DISTRIBUTION OF THE FLORA IN THE ALPINE ZONE.1</title>
+				<imprint>
+			<date type="published" when="1912">1912. 1912</date>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="page" from="37" to="50" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Die-Stacked DRAM Caches for Servers: Hit Ratio, Latency, or Bandwidth? Have It All with Footprint Cache</title>
+		<author>
+			<persName><forename type="first">Djordje</forename><surname>Jevdjic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stavros</forename><surname>Volos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2508148.2485957</idno>
+		<ptr target="https://doi.org/10.1145/2508148.2485957" />
+	</analytic>
+	<monogr>
+		<title level="j">SIGARCH Comput. Archit. News</title>
+		<imprint>
+			<biblScope unit="volume">41</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="404" to="415" />
+			<date type="published" when="2013-06">2013. jun 2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Nightcore: efficient and scalable serverless computing for latency-sensitive, interactive microservices</title>
+		<author>
+			<persName><forename type="first">Zhipeng</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Emmett</forename><surname>Witchel</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXVI)</title>
+				<meeting>the 26th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXVI)</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="152" to="166" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Memory compaction</title>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Corbet</surname></persName>
+		</author>
+		<ptr target="https://lwn.net/Articles/368869" />
+		<imprint>
+			<date type="published" when="2010-04-12">2010. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Cache decay: Exploiting generational behavior to reduce cache leakage power</title>
+		<author>
+			<persName><forename type="first">Stefanos</forename><surname>Kaxiras</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhigang</forename><surname>Hu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Margaret</forename><surname>Martonosi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings 28th annual international symposium on computer architecture</title>
+				<meeting>28th annual international symposium on computer architecture</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="240" to="251" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">SHIFT: shared history instruction fetch for lean-core server processors</title>
+		<author>
+			<persName><forename type="first">Cansu</forename><surname>Kaynak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 46th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="272" to="283" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Confluence: unified instruction supply for scale-out servers</title>
+		<author>
+			<persName><forename type="first">Cansu</forename><surname>Kaynak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 48th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="166" to="177" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<title level="m" type="main">perf: Linux profiling with performance counters</title>
+		<ptr target="https://perf.wiki.kernel.org/index.php/Main_Page" />
+		<imprint>
+			<date type="published" when="2020-04-12">2020. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">FunctionBench: A Suite of Workloads for Serverless Cloud Function Service</title>
+		<author>
+			<persName><forename type="first">Jeongchul</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyungyong</forename><surname>Lee</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th IEEE International Conference on Cloud Computing (CLOUD)</title>
+				<meeting>the 12th IEEE International Conference on Cloud Computing (CLOUD)</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="502" to="504" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Practical Cloud Workloads for Serverless FaaS</title>
+		<author>
+			<persName><forename type="first">Jeongchul</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyungyong</forename><surname>Lee</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2019 ACM Symposium on Cloud Computing (SOCC)</title>
+				<meeting>the 2019 ACM Symposium on Cloud Computing (SOCC)</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page">477</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Boomerang: A Metadata-Free Architecture for Control Flow Delivery</title>
+		<author>
+			<persName><forename type="first">Rakesh</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cheng-Chieh</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Nagarajan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 23rd IEEE Symposium on High-Performance Computer Architecture (HPCA)</title>
+				<meeting>the 23rd IEEE Symposium on High-Performance Computer Architecture (HPCA)</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="493" to="504" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">Linux Foundation. 2008. pthread_create -Linux manual page</title>
+		<ptr target="https://man7.org/linux/man-pages/man3/pthread_create.3.html" />
+		<imprint>
+			<date type="published" when="2022-04-12">April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Lowe-Power</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Abdul</forename><forename type="middle">Mutaal</forename><surname>Ahmad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ayaz</forename><surname>Akram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Alian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rico</forename><surname>Amslinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matteo</forename><surname>Andreozzi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adrià</forename><surname>Armejach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nils</forename><surname>Asmussen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brad</forename><surname>Beckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Srikant</forename><surname>Bharadwaj</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gabe</forename><surname>Black</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gedare</forename><surname>Bloom</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bobby</forename><forename type="middle">R</forename><surname>Bruce</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><forename type="middle">Rodrigues</forename><surname>Carvalho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeronimo</forename><surname>Castrillon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lizhong</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nicolas</forename><surname>Derumigny</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephan</forename><surname>Diestelhorst</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wendy</forename><surname>Elsasser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carlos</forename><surname>Escuin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marjan</forename><surname>Fariborz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amin</forename><surname>Farmahini-Farahani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pouya</forename><surname>Fotouhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ryan</forename><surname>Gambord</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jayneel</forename><surname>Gandhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dibakar</forename><surname>Gope</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Grass</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anthony</forename><surname>Gutierrez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bagus</forename><surname>Hanindhito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Hansson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Swapnil</forename><surname>Haria</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Austin</forename><surname>Harris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><surname>Hayes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adrian</forename><surname>Herrera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Horsnell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Syed</forename><surname>Ali Raza</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Radhika</forename><surname>Jafri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hanhwi</forename><surname>Jagtap</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Reiley</forename><surname>Jang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jeyapaul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Subash</forename><surname>Jung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hamidreza</forename><surname>Kannoth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuetsu</forename><surname>Khaleghzadeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tushar</forename><surname>Kodama</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tommaso</forename><surname>Krishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Marinelli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrea</forename><surname>Menard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Miquel</forename><surname>Mondelli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tiago</forename><surname>Moreto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omar</forename><surname>Mück</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krishnendra</forename><surname>Naji</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hoa</forename><surname>Nathella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikos</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lena</forename><forename type="middle">E</forename><surname>Nikoleris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marc</forename><surname>Olson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Binh</forename><surname>Orr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pablo</forename><surname>Pham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trivikram</forename><surname>Prieto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alec</forename><surname>Reddy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mahyar</forename><surname>Roelke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Samani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Javier</forename><surname>Sandberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Setoain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><forename type="middle">D</forename><surname>Shingarov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tuan</forename><surname>Sinclair</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rahul</forename><surname>Ta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Giacomo</forename><surname>Thakur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Travaglini</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nilay</forename><surname>Upton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilias</forename><surname>Vaish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><surname>Vougioukas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhengrong</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Wang</surname></persName>
+		</author>
+		<idno type="DOI">10.48550/ARXIV.2007.03152</idno>
+		<ptr target="https://doi.org/10.48550/ARXIV.2007.03152" />
+		<imprint>
+			<publisher>Christian Weis, David A. Wood</publisher>
+			<pubPlace>Norbert Wehn</pubPlace>
+		</imprint>
+	</monogr>
+	<note>and Éder F. Zulian. 2020. The gem5 Simulator: Version 20.0+.</note>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<title level="m" type="main">When Does Cold Start Happen on AWS Lambda? Retrieved</title>
+		<author>
+			<persName><forename type="first">Mikhail</forename><surname>Shilkov</surname></persName>
+		</author>
+		<ptr target="https://mikhail.io/serverless/coldstarts/aws/intervals" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">When Does Cold Start Happen on Azure Functions?</title>
+		<author>
+			<persName><forename type="first">Mikhail</forename><surname>Shilkov</surname></persName>
+		</author>
+		<ptr target="https://mikhail.io/serverless/coldstarts/azure/intervals" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">When Does Cold Start Happen on Google Cloud Functions?</title>
+		<author>
+			<persName><forename type="first">Mikhail</forename><surname>Shilkov</surname></persName>
+		</author>
+		<ptr target="https://mikhail.io/serverless/coldstarts/gcp/intervals" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Chapter 3 Thread Create Attributes</title>
+		<ptr target="https://docs.oracle.com/cd/E19455-01/806-5257/6je9h032j/index.html" />
+		<imprint>
+			<date type="published" when="2010-04-12">2010. April 12</date>
+		</imprint>
+	</monogr>
+	<note>Oracle Corporation</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Leaked AMD Zen 4 Cache Upgrades Could Be Key In Competing With Alder Lake</title>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Lilly</surname></persName>
+		</author>
+		<ptr target="https://hothardware.com/news/amd-zen-4-cache-key-competing-alder-lake" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Fetch Directed Instruction Prefetching</title>
+		<author>
+			<persName><forename type="first">Glenn</forename><surname>Reinman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brad</forename><surname>Calder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todd</forename><forename type="middle">M</forename><surname>Austin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32nd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 32nd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="16" to="27" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Architectural Implications of Function-as-a-Service Computing</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Shahrad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Balkind</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Wentzlaff</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 52nd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1063" to="1075" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Serverless in the Wild: Characterizing and Optimizing the Serverless Workload at a Large Cloud Provider</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Shahrad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rodrigo</forename><surname>Fonseca</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Iñigo</forename><surname>Goiri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gohar</forename><surname>Chaudhry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Batum</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Cooke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eduardo</forename><surname>Laureano</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Colby</forename><surname>Tresness</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Russinovich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ricardo</forename><surname>Bianchini</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2020 USENIX Annual Technical Conference (ATC)</title>
+				<meeting>the 2020 USENIX Annual Technical Conference (ATC)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="205" to="218" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Faasm: Lightweight Isolation for Efficient Stateful Serverless Computing</title>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Shillaker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><forename type="middle">R</forename><surname>Pietzuch</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2020 USENIX Annual Technical Conference (ATC)</title>
+				<meeting>the 2020 USENIX Annual Technical Conference (ATC)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="419" to="433" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">µTune: Auto-Tuned Threading for OLDI Microservices</title>
+		<author>
+			<persName><forename type="first">Akshitha</forename><surname>Sriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 13th Symposium on Operating System Design and Implementation (OSDI)</title>
+				<meeting>the 13th Symposium on Operating System Design and Implementation (OSDI)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="177" to="194" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<monogr>
+		<title level="m" type="main">ARMs Race: Ampere Altra Takes on the AWS Gravi-ton2</title>
+		<author>
+			<persName><forename type="first">The</forename><surname>Cloudflare</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Blog</forename></persName>
+		</author>
+		<ptr target="https://blog.cloudflare.com/arms-race-ampere-altra-takes-on-aws-graviton2" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<monogr>
+		<title level="m" type="main">The EPYC Journey Continues to Milan in Cloudflare&apos;s 11th Generation Edge Server</title>
+		<author>
+			<persName><forename type="first">The</forename><surname>Cloudflare</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Blog</forename></persName>
+		</author>
+		<ptr target="https://blog.cloudflare.com/the-epyc-journey-continues-to-milan-in-cloudflares-11th-generation-edge-server" />
+		<imprint>
+			<date type="published" when="2021-04-12">2021. April 12. 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<monogr>
+		<title level="m" type="main">Production Host Setup Recommendations. Retrieved</title>
+		<ptr target="https://github.com/firecracker-microvm/firecracker/blob/master/docs/prod-host-setup.md" />
+		<imprint>
+			<date type="published" when="2022-04-12">2022. April 12</date>
+		</imprint>
+	</monogr>
+	<note>The Firecracker Authors</note>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Analyzing Tail Latency in Serverless Clouds with STeLLAR</title>
+		<author>
+			<persName><forename type="first">Dmitrii</forename><surname>Ustiugov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Theodor</forename><surname>Amariucai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2021 IEEE International Symposium on Workload Characterization (IISWC)</title>
+				<meeting>the 2021 IEEE International Symposium on Workload Characterization (IISWC)</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Benchmarking, analysis, and optimization of serverless function snapshots</title>
+		<author>
+			<persName><forename type="first">Dmitrii</forename><surname>Ustiugov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Plamen</forename><surname>Petrov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marios</forename><surname>Kogias</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Bugnion</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXVI)</title>
+				<meeting>the 26th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXVI)</meeting>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="559" to="572" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Replayable Execution Optimized for Page Sharing for a Managed Runtime Environment</title>
+		<author>
+			<persName><forename type="first">Kai-Ting Amy</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rayson</forename><surname>Ho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peng</forename><surname>Wu</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3302424.3303978</idno>
+		<ptr target="https://doi.org/10.1145/3302424.3303978" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fourteenth EuroSys Conference</title>
+				<meeting>the Fourteenth EuroSys Conference<address><addrLine>Dresden, Germany; New York, NY, USA, Article</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019. 2019</date>
+			<biblScope unit="volume">39</biblScope>
+		</imprint>
+	</monogr>
+	<note>EuroSys &apos;19)</note>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">A Top-Down method for performance analysis and counters architecture</title>
+		<author>
+			<persName><forename type="first">Ahmad</forename><surname>Yasin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+				<meeting>the 2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="35" to="44" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">RECAP: A region-based cure for the common cold (cache)</title>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Zebchuk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Harold</forename><forename type="middle">W</forename><surname>Cain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Tong</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 19th IEEE Symposium on High-Performance Computer Architecture (HPCA)</title>
+				<meeting>the 19th IEEE Symposium on High-Performance Computer Architecture (HPCA)</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="83" to="94" />
+		</imprint>
+	</monogr>
+	<note>Vijayalakshmi Srinivasan, and Andreas Moshovos</note>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Treadmill: Attributing the Source of Tail Latency through Precise Load Testing and Statistical Inference</title>
+		<author>
+			<persName><forename type="first">Yunqi</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Meisner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><surname>Mars</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lingjia</forename><surname>Tang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 43rd International Symposium on Computer Architecture (ISCA)</title>
+				<meeting>the 43rd International Symposium on Computer Architecture (ISCA)</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="456" to="468" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Microarchitectural implications of event-driven server-side web applications</title>
+		<author>
+			<persName><forename type="first">Yuhao</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Richins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Halpern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><forename type="middle">Janapa</forename><surname>Reddi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+				<meeting>the 48th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="762" to="774" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

@@ -1,0 +1,1693 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">The nanoPU: A Nanosecond Network Stack for Datacenters</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Stephen</forename><surname>Ibanez</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Alex</forename><surname>Mallery</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Serhat</forename><surname>Arslan</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Theo</forename><surname>Jepsen</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Muhammad</forename><surname>Shahbaz</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Changhoon</forename><surname>Kim</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Nick</forename><surname>Mckeown</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Programmable</forename><surname>Nic</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Msg</forename><surname>In</surname></persName>
+						</author>
+						<author>
+							<affiliation key="aff0">
+								<orgName type="institution">Stanford University Purdue University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<affiliation key="aff1">
+								<orgName type="institution">Core0 Context Pkt Out Msg Out Pkt In</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">The nanoPU: A Nanosecond Network Stack for Datacenters</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<note type="submission">netRX netTX RX/TXQs Registers Reassembly Message Buffer HW Transport Packetization Message Buffer Pkts Msgs</note>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:44+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>We present the nanoPU, a new NIC-CPU co-design to accelerate an increasingly pervasive class of datacenter applications: those that utilize many small Remote Procedure Calls (RPCs) with very short (µs-scale) processing times. The novel aspect of the nanoPU is the design of a fast path between the network and applications-bypassing the cache and memory hierarchy, and placing arriving messages directly into the CPU register file. This fast path contains programmable hardware support for low latency transport and congestion control as well as hardware support for efficient load balancing of RPCs to cores. A hardware-accelerated thread scheduler makes subnanosecond decisions, leading to high CPU utilization and low tail response time for RPCs.</p><p>We built an FPGA prototype of the nanoPU fast path by modifying an open-source RISC-V CPU, and evaluated its performance using cycle-accurate simulations on AWS FPGAs. The wire-to-wire RPC response time through the nanoPU is just 69ns, an order of magnitude quicker than the best-ofbreed, low latency, commercial NICs. We demonstrate that the hardware thread scheduler is able to lower RPC tail response time by about 5× while enabling the system to sustain 20% higher load, relative to traditional thread scheduling techniques. We implement and evaluate a suite of applications, including MICA, Raft and Set Algebra for document retrieval; and we demonstrate that the nanoPU can be used as a high performance, programmable alternative for one-sided RDMA operations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>USENIX Association</head><p>15th USENIX Symposium on Operating Systems Design and Implementation 239 d PISA Ingress Egress Ethernet MAC + Serial IO HW Core Sel.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Today, large online services are typically deployed as multiple tiers of software running in data centers. Tiers communicate with each other using Remote Procedure Calls (RPCs) of varying size and complexity <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b53">57]</ref>. Some RPCs call upon microservices lasting many milliseconds, while others call remote (serverless) functions, or retrieve a single piece of data and last only a few microseconds. These are important workloads, and so it seems feasible that small messages with microsecond (and possibly nanosecond) service times will become more common in future data centers <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b27">28]</ref>. For example, it is reported that a large fraction of messages communicated in Facebook data centers are for a single key-value memory reference <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b6">7]</ref>, and a growing number of papers describe fine-grained (typically cache-resident) computation based on very small RPCs <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b22">23,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b53">57]</ref>.</p><p>Three main metrics are useful when evaluating an RPC system's performance: (1) the median response time (i.e., time from when a client issues an RPC request until it receives a response) for applications invoking many sequential RPCs;</p><p>(2) the tail response time (i.e., the longest or 99th %ile RPC response time) for applications with large fanouts (e.g., mapreduce jobs), because they must wait for all RPCs to complete before continuing <ref type="bibr" target="#b16">[17]</ref>; and (3) the communication overhead (i.e., the communication-to-computation ratio). When communication overhead is high, it may not be worth farming out the request to a remote CPU at all <ref type="bibr" target="#b53">[57]</ref>. We will sometimes need more specific metrics for portions of the processing pipeline, such as the median wire-to-wire latency, the time from when the first bit of an RPC request arrives at the server NIC until the last bit of the response departs.</p><p>Many authors have proposed exciting ways to accelerate RPCs by reducing the message processing overhead. These include specialized networking stacks, both in software (e.g., DPDK <ref type="bibr" target="#b17">[18]</ref>, ZygOS <ref type="bibr" target="#b49">[51]</ref>, Shinjuku <ref type="bibr" target="#b26">[27]</ref>, and Shenango <ref type="bibr" target="#b47">[49]</ref>), and hardware (e.g., RSS <ref type="bibr" target="#b41">[43]</ref>, RDMA <ref type="bibr" target="#b8">[9]</ref>, Tonic <ref type="bibr" target="#b1">[2]</ref>, NeB-uLa <ref type="bibr" target="#b53">[57]</ref>, and Optimus Prime <ref type="bibr" target="#b48">[50]</ref>). Each proposal tackles one or more components of the RPC stack (i.e., network transport, congestion control, core selection, thread scheduling, and data marshalling). For example, DPDK removes the memory copying and network transport overhead of an OS and lets a developer handle them manually in user space. ZygOS implements a scheme to efficiently load balance messages across multiple cores. Shenango efficiently shares CPUs among services requiring RPC messages to be processed. eRPC <ref type="bibr" target="#b27">[28]</ref> cleverly combines many software techniques to reduce median RPC response times by optimizing for the common case (i.e., small messages with short RPC handlers). These systems have successfully reduced the message-processing overhead from 100s of microseconds to 1-2 microseconds.</p><p>NeBuLa <ref type="bibr" target="#b53">[57]</ref> is a radical hardware design that tries to further minimize response time by integrating the NIC with the CPU (bypassing PCIe), and dispatching RPC requests directly into the L1 cache. The approach effectively reduces the minimum wire-to-wire response time below 100ns.</p><p>Put another way, these results suggest that with the right hardware and software optimizations, it is practical and useful to remotely dispatch functions as small as a few microseconds. The goal of our work is to enable even smaller functions, with computation lasting less than 1µs, for which we need to minimize communication overhead. We call these very short RPCs nanoRequests.</p><p>The nanoPU, presented and evaluated here, is a combined NIC-CPU optimized to process nanoRequests very quickly. When designing nanoPU, we set out to answer two questions.  The first is, what is the absolute minimum communication overhead we can achieve for processing nanoRequests? NanoRequests are simply very short-lived RPCs marked by the client and server NICs for special treatment. In nanoPU, nanoRequests follow a new low-overhead path through the NIC, bypassing the OS and the memory-cache hierarchy and arriving directly into running threads' registers. All message reassembly functions, transport and congestion control logic are moved to hardware, as are thread scheduling and core selection decisions. Incoming nanoRequests pass through only hardware before reaching application code. Our nanoPU prototype can deliver an arriving nanoRequest into a running application thread in less than 40ns (less than 15ns if we bypass the Ethernet MAC)-an order of magnitude faster than the fastest commercial NICs <ref type="bibr" target="#b19">[20]</ref> and faster than the quickest reported research prototype <ref type="bibr" target="#b53">[57]</ref>. For compatibility with existing applications, nanoPU allows all other network traffic (e.g., larger RPCs) to traverse a regular path through a DMA NIC, OS, and memory hierarchy.</p><p>Our second question is, can we minimize tail response time by processing nanoRequests in a deterministic amount of time? The answer is a qualified yes. Because nanoRequests are processed by a fixed-latency hardware pipeline, if a single-packet request arrives at a waiting core, its thread will always start processing the message in less than 40ns. On the other hand, if the core is busy, or another request is queued ahead, then processing can be delayed. In Section 2.2, we show how our novel hardware thread scheduler can bound the tail response time in this case too, under specific assumptions (e.g., that a nanoRequest can bound its CPU processing time, else its priority is downgraded). We believe nanoPU is the first system to bound the response time of short-lived requests.</p><p>In summary, the main contributions of the nanoPU are:</p><p>1. The nanoPU's median wire-to-wire response time for nanoRequests, from the wire through the headerprocessing pipeline, transport layer, core selection, and thread scheduling, plus a simple loopback application and back to the wire is just 69ns, an order of magnitude lower latency than the best commercial NICs <ref type="bibr" target="#b19">[20]</ref>. Without the MAC and serial I/O, loopback latency is only 17ns.</p><p>2. Our prototype's hardware thread scheduler continuously monitors processing status for nanoRequests and makes decisions in less than 1ns. The nanoPU sustains 20% higher load than existing approaches, while maintaining close to 1µs 99th %ile tail response times.</p><p>3. Our complete RISC-V based prototype is available opensource, <ref type="foot" target="#foot_0">1</ref> and runs on AWS F1 FPGAs using Firesim <ref type="bibr" target="#b30">[31]</ref>.</p><p>4. We evaluate a suite of applications including: the MICA key-value store <ref type="bibr" target="#b37">[38]</ref>, Raft consensus <ref type="bibr" target="#b45">[47]</ref>, set algebra and high dimensional search inspired from the µ-Suite benchmark <ref type="bibr" target="#b52">[56]</ref>.</p><p>5. We demonstrate that the nanoPU can be used to implement one-sided RDMA operations with lower latency and more flexibility than state-of-the-art commercial RDMA NICs.</p><p>The nanoPU ideas could be deployed in a variety of ways: by adding the low latency path to a conventional CPU, or by designing new RPC-optimized CPUs with only the lowlatency path, or by adding the new path to embedded CPUs on smartNICs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">The nanoPU Design</head><p>The nanoPU is a new NIC-CPU co-design that adds a new fast path for nanoRequest messages requiring ultra-low and predictable network communication latency. Figure <ref type="figure" target="#fig_1">1 depicts</ref> the key design components. The nanoPU has two independent network paths: (1) the traditional (unmodified) DMA path to/from the host's last-level <ref type="bibr" target="#b15">[16]</ref> or L1 cache <ref type="bibr" target="#b53">[57]</ref>, and (2) an accelerated fast path for nanoRequests, directly into the CPU register file.</p><p>The traditional path can be any existing path through hardware and software; hence all network applications can run on the traditional path of the nanoPU unchanged, and perform at least as well as they do today. The fast path is a nanosecondscale network stack optimized for nanoRequests. Applications should (ideally) be optimized to efficiently process nanoRequest messages directly out of the register file to fully harness the benefits of the fast path.</p><p>Each core has its own hardware thread scheduler (HTS), two small FIFO memories for network ingress and egress data, and two reserved general-purpose registers (GPRs): one as the tail of the egress FIFO for sending nanoRequest data, and the other as the head of the ingress FIFO for receiving. CPU cores are statically partitioned into two groups: those running normal applications and those running nanoRequest applications. Cores running regular applications use standard OS software thread scheduling <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b47">49,</ref><ref type="bibr" target="#b49">51]</ref>; however, the OS delegates scheduling of nanoRequest threads to HTS.</p><p>To understand the flow of the nanoPU fast path, consider the numbered steps in Figure <ref type="figure" target="#fig_1">1</ref>. In 1 , a packet arrives and enters the P4-programmable PISA pipeline. In addition to standard header processing (e.g., matching IP addresses, checking version and checksum, and removing tunnel encapsulations), the pipeline examines the destination layer-4 port number in the transport header using a match-action table <ref type="foot" target="#foot_1">2</ref> to decide if the message should be delivered along the fast path. If so, it proceeds to 2 , else it follows the usual DMA processing path D . In 2 , packets are reassembled into messages; a buffer is allocated for the entire message and packet data is (potentially) re-sequenced into the correct order. In 3 , the transport protocol ensures reliable message arrival; until all data has arrived, message data and signaling packets are exchanged with the peer depending on the protocol (e.g., NDP and Homa are both receiver driven using different grant mechanisms) (Section 2.3). When a message has arrived, in 4 it is placed in a per-application receive queue where it waits to be assigned to a core by the core-selection logic (Section 2.3). When its turn comes, in 5 , the message is sent to the appropriate per-thread ingress FIFO on the assigned core, where it waits for HTS (Section 2.2) to alert the core to run the message's thread and place the first word in the netRX register (Section 2.1). In 6 , the core processes the data and, if running a server application, will typically generate a response message for the client. The application transmits a message by issuing instructions that write one "word" at a time to the netTX register in 7 , where the word size is defined by the size of a CPU register, typically 64-bits (8B). These message words then flow into the global transmit queues in 8 . Messages are split into packets in 9 , before departing through the egress PISA pipeline.</p><p>Next, we detail the design of the main, novel components of the fast path: the thread-safe register file network interface, the hardware thread scheduler (HTS), and the programmable NIC pipeline, including transport and core selection.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Thread-Safe Register File Interface</head><p>Recent work <ref type="bibr" target="#b43">[45]</ref> showed that PCIe latency contributes about 90% of the median wire-to-wire response time for small packets (800-900ns). Several authors have proposed integrating the NIC with the CPU, to bring packets directly into the cache <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b44">46,</ref><ref type="bibr" target="#b53">57]</ref>.</p><p>The nanoPU takes this one step further and connects the network fast path directly to the CPU core's register file. The high-level idea is to allow applications to send and receive network messages by writing/reading one word (8B) at a time to/from a pair of dedicated CPU registers.</p><p>There are several advantages to bringing packet data directly into the register file: Message data bypasses the memory and cache hierarchy, minimizing the time from when a packet arrives on the wire until it is available for processing. In Section 5.2.1, we show that this reduces median wire-to-wire response time to 69ns, 50% lower than the state-of-the-art. Reduces variability in processing time and therefore minimizes tail response time. For example, there is no variable waiting time to cross PCIe, no cache misses for message data (messages do not enter or leave through memory) and no IO-TLB misses (which lead to an expensive 300ns access to the page table <ref type="bibr" target="#b43">[45]</ref>). And because nanoRequests are buffered in dedicated FIFOs, separate from the cache, nanoRequest data does not compete for cache space with other application data, further reducing cache misses for applications. Cache misses can be expensive: A LLC miss takes about 50-100ns to resolve and creates extra traffic on the (shared) DRAM memory bus. DRAM access can be a bottleneck for a multicore CPU, and when congested, memory access times can increase by more than 200% <ref type="bibr" target="#b55">[60]</ref>. Furthermore, contention for cache space and DRAM bandwidth is worse at network speeds above 100Gb/s <ref type="bibr" target="#b20">[21]</ref>. Less software overhead per message because software does not need to manage DMA buffers or perform memory-mapped IO (MMIO) handshakes with the NIC. In a conventional NIC, when an application sends a message, the OS first places the message into a DMA buffer and passes a message descriptor to the NIC. The NIC interrupts or otherwise notifies software when transmission completes, and software must step in again to reclaim the DMA buffer. The register file message interface has much lower overhead: When an application thread sends a message it simply writes the message directly into the netTX register, with no additional work. Section 5.2.1 shows how this leads to a much higher throughput interface.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1.1">How an application uses the interface</head><p>The J-Machine <ref type="bibr" target="#b12">[13]</ref> first used the register file in 1989 for very low latency inter-core communication, followed by the Cray T3D <ref type="bibr" target="#b32">[33]</ref>. The approach was abandoned because it proved difficult to protect messages from being read/written by other threads sharing the same core; both machines required atomic message reads and writes <ref type="bibr" target="#b13">[14]</ref>. As we show below, our design solves this problem. We believe ours is the first design to add a register file interface to a regular CPU for use in data centers.</p><p>The nanoPU reserves two general-purpose registers (GPRs) in the register file for network IO, which we call netRX and netTX. When an application issues an instruction that reads from netRX, it actually reads a message word from the head of the network receive queue. Similarly, when an application issues an instruction that writes to netTX, it actually writes a message word to the tail of the network transmit queue. The network receive and transmit queues are stored in small FIFO memories that are connected directly to the register file. <ref type="foot" target="#foot_2">3</ref> In addition to the reserved GPRs, a small set of control &amp; status registers (CSRs, described in Section 3.4) are used for the core and NIC hardware to coordinate with each other. Delimiting messages. Each message that is transmitted and received by an application begins with a fixed 8B "application header". On arriving messages, this header indicates the message length (as well as the source IP address and layer-4 port number), which allows software to identify the end of the message. Similarly, the application header on departing messages contains the message length (along with the destination IP address and layer-4 port number) so that the NIC can detect the end of the outgoing message. The programmable NIC pipeline replaces the application header with the appropriate Ethernet, IP, and transport headers on all transmitted packets. Inherent thread safety. We need to prevent an errant thread from reading or writing another thread's messages. The nanoPU prevents this using a novel hardware interlock. It maintains a separate ingress and egress FIFO for each thread, and controls access to the FIFOs so that netRX and netTX are always mapped to the head and tail, respectively, of the FI-FOs for the currently running thread only. Note our hardware design ensures this property even when a previous thread does not consume or finish writing a complete message. <ref type="foot" target="#foot_3">4</ref> This turned out to be a key design choice, simplifying application development on the nanoPU; nanoRequest threads no longer need to read and write messages atomically. Software changes. The register file can be accessed in one CPU cycle, while the L1 cache typically takes three cycles. Therefore, an application thread will run faster if it can process data directly from the ingress FIFO by serially reading netRX. Ideally, the developer picks a message data structure with data arranged in the order it will be consumed-we did this for the message processing components of the applications evaluated in Section 5.3. If an application needs to copy long messages entirely into memory so that it can randomly access each byte many times during processing, then the register file interface may not offer much advantage over the regular DMA path. Our experience so far is that, with a little practice, it is practical to port latency-sensitive applications to efficiently use the nanoPU register file interface. Table <ref type="table" target="#tab_0">1</ref> </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>lists applications that have been ported to efficiently use this new network interface and Section 4 further discusses applications on the nanoPU.</head><p>A related issue is how, and at which stage of processing, to serialize/deserialize (also known as marshall/unmarshall) message data. In modern RPC applications this processing is typically implemented in libraries such as Protobuf <ref type="bibr" target="#b50">[52]</ref> or Thrift <ref type="bibr" target="#b54">[59]</ref>. Recent work pointed out that on conventional CPUs, where network data passes through the memory hierarchy, the serialize/deserialize logic is dominated by scatter/gather memory-copy operations and subword-level data transformation operations, suggesting a separate hardware accelerator might help <ref type="bibr" target="#b48">[50]</ref>. In the nanoPU, the memory copy overhead involved in serialization and deserialization is little or none; only a few copies between registers and the L1 cache may be necessary when a working set is larger than the register file. The remaining subword data-transformation tasks can be done either in the applications (in software) or on the NIC (in hardware) using a PISA-like pipeline, but still operating at the message level. We currently take the former approach for the applications we evaluate in Section 5.3, but intend to explore the latter approach in future work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Thread Scheduling in Hardware</head><p>Current best practice for low-latency applications is to either (1) pin threads to dedicated cores <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b49">51]</ref>, which is very inefficient when a thread is idle, or (2) devote one core to run a software thread scheduler for the other cores <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b47">49]</ref>.</p><p>The fastest software-based thread schedulers are not fast enough for nanoRequests. Software schedulers need to run periodically so as to avoid being overwhelmed by interrupts and associated overheads, which means deciding how frequently they should run. If it runs too often, resources are wasted; too infrequently and threads are unnecessarily delayed. The fastest state-of-the-art operating systems make periodic scheduling decisions every 5µs <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b47">49]</ref>, which is too coarse-grained for nanoRequests requiring only 1µs of computation.</p><p>We therefore moved the nanoRequest thread scheduler to hardware, which continuously monitors message processing status as well as the network receive queues and makes subnanoseconds scheduling decisions. Our new hardware thread scheduler (HTS) is both faster and more efficient; a core never sits on an idle thread when another thread with a pending message could run.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2.1">How the hardware thread scheduler works</head><p>Every core contains its own scheduler hardware. When a new thread initializes, it must register itself with its core's HTS by binding to a layer-4 port number and selecting a strict priority level (0 is the highest). The layer-4 port number lets the nanoPU hardware distinguish between threads and ensure that netRX and netTX are always the head and tail of the FIFOs for the currently running thread.</p><p>HTS tracks the running thread's priority and its time spent on the CPU core. When a new message arrives, if its destination thread's priority is lower than or equal to the current thread, the new message is queued. If the incoming message is for a higher priority thread, the running thread is suspended and the destination thread is swapped onto the core. Whenever HTS determines that threads must be swapped, it (1) asserts a new, NIC-specific interrupt that traps into a small software interrupt handler (only on the relevant core), and (2) tells the interrupt handler which thread to switch to by writing the target's layer-4 port number to a dedicated CSR. Our current HTS implementation takes about 50ns to swap a previously idle thread onto the core, measured from the moment its first pending message arrives (Section 3.2).</p><p>If the thread to switch to belongs to a different process, the software interrupt handler must perform additional work: notably, it must change privilege modes and swap address spaces. A typical context switch in Linux takes about 1µs <ref type="bibr" target="#b26">[27]</ref>, but most of this time is spent making the scheduling decision [62]. Our HTS design makes this decision entirely in hardware and the software scheduler simply needs to read a CSR to determine which thread to swap to.</p><p>The scheduling policy. HTS implements a bounded strict priority scheduling policy to ensure that the highest priority thread with pending work is running on the core at all times. Threads are marked active or idle. A thread is marked active if it is eligible for scheduling, which means it has been registered (a port number and RX/TX FIFOs have been allocated) and a message is waiting in the thread's RX FIFO. The thread remains active until it explicitly indicates that it is idle and its RX FIFO is empty. HTS tries to ensure that the highest priority active thread is always running.</p><p>Bounded response time. HTS supports a unique feature to bound how long one high-priority application can hold up another. If a priority 0 thread takes longer than t 0 to process a message, the scheduler will immediately downgrade its priority from 0 to 1, allowing it to be preempted by a different priority 0 thread with pending messages. (By default, t 0 = 1µs.) We define a well-behaved application as one that processes all of its messages in less than t 0 .</p><p>As a consequence, HTS guarantees an upper bound on the response time for well-behaved applications. If a core is configured to run at most k priority 0 application threads, each with at most one outstanding message at a time, then the total message processing time, t p for well-behaved applications is bounded by: t p ≤ t n + kt 0 + (k − 1)t c , where t n is the NIC latency, and t c is the context-switch latency. In practice, this means an application developer who writes a well-behaved application can have full confidence that no other applications will delay it beyond a predetermined bound. If application writers do not wish to use the time-bounded service, they may assign all their application threads priority 1.</p><p>Writing well-behaved applications, which are able to process all messages within a short, bounded amount of time, is complicated by cache / TLB misses and CPU power management. Our approach so far has been to empirically verify that certain applications are well-behaved. However, we believe that there is substantial opportunity for future research to determine more systematic ways for developers to write well-behaved applications. One approach may be to propose modifications to the memory hierarchy in order to make access latency more predictable. Another approach may be to develop code verification tools to check whether threads meet execution time bounds. The eBPF <ref type="bibr" target="#b18">[19]</ref> compiler, for example, is able to verify that a packet processing program will complete eventually; we believe a similar approach can be used to verify completion within a bounded amount of time.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">The nanoPU NIC Pipeline</head><p>The NIC portion of the nanoPU fast path consists of two primary components: the programmable transport layer, and the core-selection algorithm. We describe each in turn.</p><p>Programmable transport layer. The nanoPU provides nanoRequest threads a reliable one-way message service. To be fast enough, the transport layer needs to be terminated in hardware in the NIC. For example, our prototype hardware NDP implementation (Section 3.3) runs in 7ns (fixed) per packet and at 200Gb/s for minimum size packets (64B). Such low latency means a tight congestion-control loop between end-points, and hence more efficient use of the network. Moreover, moving transport to hardware frees CPU cycles for application logic <ref type="bibr" target="#b1">[2]</ref>.</p><p>We only have space to give a high level overview of our programmable transport layer, leaving details to a follow-on paper. At the heart of our programmable transport layer is an event-driven, P4-programmable PISA pipeline <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b24">25]</ref>. The pipeline can be programmed to do normal header processing, such as VXLAN, overlay tunnels, and telemetry data <ref type="bibr" target="#b34">[35]</ref>. We enhance it for reliable message processing, including congestion control, and have programmed it to implement the NDP <ref type="bibr" target="#b23">[24]</ref> and Homa <ref type="bibr" target="#b40">[42]</ref> low-latency message protocols. Network operators can program custom message protocols tailored to their specific workloads.</p><p>Low-latency, message-oriented transport protocols are wellsuited to hardware, compared to connection-oriented, reliable byte-stream protocols such as TCP. The NIC only needs to maintain a small amount of state for partially delivered messages. For example, our NDP implementation, beyond storing the actual message, keeps a per-message bitmap of received packets, and a few bytes for congestion control. This allows our design to be limited only by the number of outstanding messages, rather than the number of open connections, allowing large scale, highly-distributed applications across thousands of servers.</p><p>The transport layer (Figure <ref type="figure" target="#fig_1">1</ref>) contains buffers to convert between the unreliable IP datagram domain and the reliable message domain. Outbound messages pass through a packetization buffer to split them into datagrams, which may need to be retransmitted out of order due to drops in the network. Inbound datagrams are placed into a reassembly buffer, reordering them as needed to prepare them for delivery to a CPU core. Selecting a CPU core. If the NIC randomly sends messages to cores, some messages will inevitably sit in a queue waiting for a busy core while another core sits idle. Our NIC therefore implements a core-selection algorithm in hardware. Inspired by NeBuLa <ref type="bibr" target="#b53">[57]</ref>, our NIC load balances nanoRequest messages across cores using the Join-Bounded-Shortest-Queue or JBSQ(n) algorithm <ref type="bibr" target="#b35">[36]</ref>. JBSQ(n) approximates an ideal, work-conserving single queue policy using a combination of a single central queue, and short bounded queues at each core, with a maximum depth of n messages. The centralized queue replenishes the shortest per-core queues first. JBSQ(1) is equivalent to the theoretically ideal single-queue model, but is impractical to implement efficiently at these speeds.</p><p>Our nanoPU prototype implements a JBSQ(2) load balancer in hardware per application. The NIC is connected to each core using dedicated wires, and the RX FIFOs on each core have space for at least two messages per thread running on the core. We chose JBSQ(2) based on the communication latency between the NIC and the cores as well as the available memory bandwidth for the centralized queues. We evaluate its performance in Section 5.2.3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Our nanoPU Implementation</head><p>We designed a prototype quad-core nanoPU based on the open-source RISC-V Rocket core <ref type="bibr">[54]</ref>. A block diagram of our prototype is shown in Figure <ref type="figure" target="#fig_2">2</ref>.</p><p>Our prototype extends the open-source RISC-V Rocket-Chip SoC generator <ref type="bibr" target="#b2">[3]</ref>, adding 4,300 lines of Chisel <ref type="bibr" target="#b5">[6]</ref> to the code base. The Rocket core is a simple five-stage, in-order, single-issue processor. We use the default Rocket core configuration: 16KB L1 instruction and data caches, a 512KB shared L2 cache, and 16GB of external DRAM memory. Everything shown in Figure <ref type="figure" target="#fig_2">2</ref>, except the MAC and Serial IO, is included in our prototype and is available as an open-source, reproducible artifact. <ref type="foot" target="#foot_5">5</ref> Our prototype does not include the traditional DMA path between the NIC and memory hierarchy. Instead, we focus our efforts on building the nanoPU fast path for nanoRequests.</p><p>To improve simulation speed, we do not run a full operating system on our prototype, but rather just enough to boot the system, initialize one or more threads on the cores, and perform context switches between threads when instructed to do so by the hardware thread scheduler (HTS). In total, this consists of about 1,200 lines of C code and RISC-V assembly instructions. All applications run as bare-metal applications linked with the C standard library.</p><p>The nanoPU design is intended to be fabricated as an ASIC, but we use an FPGA to build the initial prototype. As we will discuss further in Section 5, our prototype runs on AWS F1 FPGA instances, using the Firesim <ref type="bibr" target="#b30">[31]</ref> framework. Our prototype adds about 15% more logic LUTs to an otherwise unmodified RISC-V Rocket core with a traditional DMA NIC.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">RISC-V Register File Network Interface</head><p>The RISC-V Rocket core required surprisingly few changes to add the nanoPU register file network interface. The main change, naturally, involves the register file read-write logic. Each core has 32 GPRs, each 64-bits wide, and we reserve two for network communication (shared by all threads). Applications must be compiled to avoid using the reserved GPRs for temporary storage. Fortunately, gcc makes it easy to reserve registers via command-line options <ref type="bibr" target="#b46">[48]</ref>.</p><p>The core also required changes to the control logic that handles pipeline flushes. A pipeline flush can occur for a number of reasons (e.g., a branch misprediction). On a traditional five-stage RISC-V Rocket core, architectural state is not modified until an instruction reaches the write-back stage (Rocket Stage 5). However, with the addition of our network register file interface, reading netRX now causes a state modification (FIFO read) in the decode stage (Rocket Stage 2). The destructive read operation must be undone when there is a pipeline flush. The CPU pipeline depth is an upper bound on how many read operations need to be undone; in our case, at most two reads require undoing. It is straightforward to implement a FIFO queue supporting this operation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Bounded Thread Scheduling in Hardware</head><p>The nanoPU core implements thread scheduling in hardware, as described in Section 2.2. The number of threads that can run on each core is primarily determined by the amount of buffering available for the local RX/TX queues. In order to implement the JBSQ(2) core selection policy, as described in Section 2.3, the local RX queue for each thread must be able to hold at least two maximum size messages. We use a maximum message size of 2KB (two packets) <ref type="foot" target="#foot_6">6</ref> and allocate 16KB of buffer for the local RX queues. Therefore, the prototype supports up to four threads on each core; each thread can be configured with a unique priority value. Priority 0 has a configurable maximum message processing time in order to implement the bounded priority thread scheduling policy. We added a new thread-scheduling interrupt to the RISC-V core, along with an accompanying control &amp; status register (CSR) set by HTS to tell the interrupt's trap handler which thread it should run next. When processing nanoRequests, we disable all other interrupts to avoid unnecessary interrupt handling overheads.</p><p>We define the context-switch latency to be the time from when the scheduler fires the interrupt to when the first instruction of the target thread is executed. Our prototype has a measured context-switch latency of 160 cycles, or 50ns on a 3.2GHz CPU. This is much faster than a typical Linux context switch, partly because the thread scheduling decision is offloaded to hardware, and partly because the core only runs bare-metal applications in the same address space with the highest privilege mode. Therefore, nanoPU hardware thread scheduling in a Linux environment would be less efficient than our bare-metal prototype.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Prototype NIC Pipeline</head><p>The NIC portion of the nanoPU fast path consists of the programmable transport module and the core selection module. Our prototype implements both. Transport hardware. We configured our programmable transport module to implement NDP <ref type="bibr" target="#b23">[24]</ref> entirely in hardware. We chose NDP because it has promising low-latency performance, and is well-suited to handle small RPC messages (the class of messages we are most interested in accelerating, i.e., nanoRequests). However, the nanoPU does not depend on NDP. As explained in Section 2.3, our NIC transport layer is programmable. It has already been shown to support several other protocols, including Homa <ref type="bibr" target="#b40">[42]</ref>. We evaluate our hardware NDP implementation in Section 5.2.3. JBSQ hardware. As explained in Section 2.3, our NIC implements JBSQ(2) <ref type="bibr" target="#b35">[36]</ref> to load balance messages across cores on a per-application basis. JBSQ(2) is implemented using two tables. The first maps the message's destination layer-4 port number to a per-core bitmap, indicating whether or not each core is running a thread bound to the port number. The second maps the layer-4 port number to a count of how many messages are outstanding at each core for the given port number. When a new message arrives, the algorithm checks if any of the cores that are running an application thread bound to the destination port are holding fewer than two of the application's messages. If so, it will immediately forward the message to the core with the smallest message count. If all target cores are holding two or more messages for this port number, the algorithm waits until one of the cores indicates that it has finished processing a message for the destination port. It then forwards the next message to that core. We evaluate our JBSQ implementation in Section 5.2.3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4">The nanoPU HW/SW Interface</head><p>To illustrate how software on the nanoPU core interacts with the hardware, Listing 1 shows a simple bare-metal loopbackwith-increment program in RISC-V assembly. The program continuously reads 16B messages (two 8B integers) from the network, increments the integers, and sends the messages back to their sender. The program details are described below.</p><p>The entry procedure binds the thread to a layer-4 port number at the given priority level by first writing a value to both the lcurport and lcurpriority CSRs, then writing the value 1 to the lniccmd CSR. The lniccmd CSR is a bitvector used by software to send commands to the networking hardware; in this case, it is used to tell the hardware to allocate RX/TX queues both in the core and the NIC for port 0 with priority 0. The lniccmd CSR can also be used to unbind a port or to update the priority level.</p><p>The wait_msg procedure waits for a message to arrive in the core's local RX queue by polling the lmsgsrdy CSR until it is set by the hardware. 7 While it is waiting, the application tells HTS that it is idle by writing to the lidle CSR during the polling loop. The scheduler uses the idle signal to evict idle threads in order to schedule a new thread that has messages waiting to be processed.</p><p>The loopback_plus1_16B procedure simply swaps the source and destination addresses by moving the RX application header (the first word of every received message, see Section 2.1) from the netRX register to the netTX register, shown on line 19 (Listing 1), and thus the RX application header becomes the TX application header. 8 Upon writing the TX application header, the hardware ensures that there is sufficient buffer space for the entire message; otherwise, it generates an exception which should be handled by the application accordingly. The procedure then increments every integer in the received message and appends them to the message being transmitted. After the procedure has finished processing the message, it tells HTS it is done by writing to the lmsgdone CSR. The scheduler uses this write signal to: (1) reset the message processing timer for the thread, and (2) tell the NIC to dispatch the next message for this application 7 It is the responsibility of the application to ensure that it does not try to read netRX when the local RX queue is empty; doing so results in undefined behavior. 8 Note that this instruction also sets the TX message length to be equal to the RX message length because the message length is included in the TX/RX application headers. to the core. <ref type="foot" target="#foot_7">9</ref> Finally, the procedure waits for the next message to arrive.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.5">How It All Fits Together</head><p>Next, we walk through a more representative nanoRequest processing application, written in C, to compute the dot product of a vector stored in memory and a vector contained in arriving RPC request messages. Listing 2 is the C code for the routine, based on a small library of C macros (lnic_*) we wrote to allow applications to interact with the nanoPU hardware (netRX and netTX GPRs, and the CSRs). The lnic_wait() macro corresponds to the wait_msg procedure on lines 9-15 in Listing 1. The lnic_read() and lnic_write_*() macros generate instructions that either read from or write to netRX or netTX using either registers, memory, or an immediate; and the lnic_msg_done() macro writes to the lmsgdone CSR, corresponding to line 22 of Listing 1. Our library also includes other macros as well such as lnic_branch() which branches control flow based on the value in netRX.</p><p>The dot product C application waits for a message to arrive then extracts the application header (the first word of every message), followed by the message type in the second word. It checks that it is a DATA_TYPE message, and reads the third word to know how many 8B words the vector contains. The vector identifies the in-memory weight to use for each word Listing 2: Example nanoPU application that computes the dot product between a vector in a network message and in-memory weights.</p><p>when computing the dot product. Note that the application processes message data directly out of the register file and message data never needs to be copied into memory, allowing it to run faster than on a traditional system. Finally, the application sends a response message back to the sender containing the dot product.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">The nanoPU Applications</head><p>Applications that will benefit most from using the nanoPU fast path exhibit one or both of the following characteristics: (i) strict tail response time requirements for network messages; or (ii) short (µs-scale) on-core service times. It should come as no surprise that applications with strict tail response time requirements will benefit from using the nanoPU fast path. Enabling low tail response time was one of our primary goals that guided many of the design decisions described in Section 2. For the latter, when an application's on-core service time is short, any CPU cycles spent sending or receiving network messages become comparatively more expensive. The nanoPU's extremely low per-message overheads help to ensure that these applications are able to dedicate close to 100% of CPU cycles to performing useful processing and thus achieve their maximum possible message processing throughput. Furthermore, the nanoPU can also help to reduce on-core service times by reducing pressure on the cache-hierarchy and allowing message data to be processed directly out of the register file. Another consequence of having short on-core service times is that the end-to-end completion time of each RPC becomes dominated by communication latency. By mov-ing the entire network stack into hardware and by using the register file interface, the nanoPU fast path efficiently reduces communication latency and, hence, the RPC completion time. Therefore, the relative benefit provided by the nanoPU will increase as on-core service time decreases. An application's on-core service time does not necessarily need to be sub-1µs in order to benefit from using the nanoPU. The following section describes a few specific classes of applications that we believe are well-suited for the nanoPU.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Example Application Classes</head><p>µs-scale (or ns-scale) Services. An increasing number of datacenter applications are implemented as a collection of independent software modules called microservices. It is common for a single user request to invoke microservices across thousands of servers. At such large scale, the tail RPC response time dominates the end-to-end performance of these applications <ref type="bibr" target="#b16">[17]</ref>. Furthermore, many microservices exhibit very short on-core service times; a key-value store is one such example that has sub-1µs service time. Therefore, these applications exhibit both of the characteristics described in the previous section and are ideal candidates to accelerate with the nanoPU. Programmable One-sided RDMA. Modern NICs support RDMA for quick read and write access to remote memory. Some NICs support further "one-sided" operations in hardware: a single RDMA request leads to very low latency compare-and-swap, or fetch-and-add. It is natural to consider extending the set of one-sided operations to further accelerate remote memory operations <ref type="bibr" target="#b39">[40,</ref><ref type="bibr" target="#b51">55]</ref>, for example indirect read (dereferencing a memory pointer in one round-trip time, rather than two), scan and read (scan a small memory region to match an argument and fetch data from a pointer associated with the match), return max, and so on. Changing fixed-function NIC hardware requires a new hardware design and fork-lift upgrade, and so, instead, Google Snap <ref type="bibr" target="#b39">[40]</ref> implements a suite of custom one-sided operations in software in the kernel. This idea would run much faster on the nanoPU, for example as an embedded core on a NIC, and could implement arbitrary one-sided RDMA operations in software (Section 5.3). High Performance Computing (HPC) and Flash Bursts. HPC workloads (e.g., N-body simulations <ref type="bibr" target="#b33">[34]</ref>) as well as flash bursts <ref type="bibr" target="#b36">[37]</ref>, a new class of data center applications that utilize hundreds or thousands of machines for a short amount of time (e.g., one millisecond), are both examples of highly parallelizable application classes that are partitioned into finegrained tasks distributed across many machines. These applications tend to be very communication intensive and spend a significant amount of time sending and receiving small messages <ref type="bibr" target="#b36">[37]</ref>. We believe that the nanoPU's extremely low per-message overheads and low communication latency can help to accelerate these applications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Network Function Virtualization (NFV).</head><p>NFV is a wellknown class of applications with µs-scale on-core service times <ref type="bibr" target="#b55">[60,</ref><ref type="bibr" target="#b59">66]</ref>. The nanoPU's low per-message overhead, register file interface, and programmable PISA pipelines allow it to excel at stream processing network data and thus is an excellent platform for deploying NFV applications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Evaluation</head><p>Our evaluations address the following four questions: 1. How does the performance of the nanoPU register file interface compare to a traditional DMA-based network interface (Section 5.2.1)?</p><p>2. Is the hardware thread scheduler (HTS) able to provide low tail latency under high load and bounded tail latency for well-behaved applications (Section 5.2.2)?</p><p>3. How does our prototype NIC pipeline (i.e., transport and core selection) perform under high incast and service-time variance (Section 5.2.3)?</p><p>4. How do real applications perform using the nanoRequest fast path (Section 5.3)?</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Methodology</head><p>We compare our nanoPU prototype against an unmodified RISC-V Rocket core with a standard NIC (IceNIC <ref type="bibr" target="#b30">[31]</ref>), which we call a traditional NIC. The traditional NIC is implemented in the same simulation environment as our nanoPU prototype and performs DMA operations directly with the last-level (L2) cache. The traditional NIC does not support hardware-terminated transport or multi-core network applications, however, an ideal traditional NIC would support both of these. Therefore, for our evaluations, we do not implement transport in software for the traditional NIC baseline; we omit the overhead that would be introduced by this logic. Our evaluations ignore the overheads of translating addresses because we run bare-metal applications using physical addresses. When using virtual memory, the traditional design would perform worse than reported here, because the message buffer descriptors would need to be translated resulting in additional latency, and more TLB misses. There is no need to translate addresses when processing nanoRequests from the register file. Benchmark tools. We use two different cycle-accurate simulation tools to perform our evaluations: (1) the Verilator [63] software simulator, and (2) the Firesim <ref type="bibr" target="#b30">[31]</ref> FPGAaccelerated simulator. Firesim enables us to run large-scale, cycle-accurate simulations with hundreds of nanoPU cores using FPGAs in AWS F1 <ref type="bibr" target="#b0">[1]</ref>. The FPGAs run at 90MHz, and we simulate a target clock rate of 3.2GHz-all reported results are in terms of this target clock rate. The simulated servers are connected by C++ switch models running on the AWS x86 host CPUs.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Microbenchmarks</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.1">Register file interface</head><p>Loopback response time. Figure <ref type="figure" target="#fig_2">2</ref> shows a breakdown of the latency through each component for a single 8B nanoRequest message (in a 72B packet) measured from the Ethernet wire through a simple loopback application in the core, then back to the wire (first bit in to last bit out). <ref type="foot" target="#foot_8">10</ref> As shown, the loopback response time through the nanoPU fast path is only 17ns, but in practice we also need an Ethernet MAC and serial I/O, leading to a wire-to-wire response time of 69ns.</p><p>For comparison, Figure <ref type="figure" target="#fig_3">3</ref> shows the median loopback response time for both the nanoPU fast path and the traditional design for different messages sizes. For an 8B nanoRequest, the traditional design has a 51ns loopback response time, or about 3× higher than the nanoPU. 12ns (of the 51ns) are spent performing memcpy's to swap the Ethernet source and destination addresses, something that is unnecessary for the nanoPU, because it is handled by the NIC hardware. The speedup of the nanoPU fast path decreases as the message size increases because the response time becomes dominated by store-and-forward delays and message-serialization time.</p><p>If instead the traditional NIC placed arriving messages directly in the L1 cache, as NeBuLa proposes <ref type="bibr" target="#b53">[57]</ref>, the loopback response time would be faster, but the nanoPU fast path would still have 50% lower response time for small nanoRequests. Loopback throughput. Figure <ref type="figure" target="#fig_4">4</ref> shows the throughput of the simple loopback application running on a single core for both the nanoPU fast path and the traditional NIC. The traditional NIC processes batches of 30 packets, which fit comfortably in the LLC. Batching allows the traditional NIC to overlap computation (e.g., Ethernet address swapping) with NIC DMA send/receive operations.</p><p>Throughput is dominated by the software overhead to process each message. For the register file interface, the software overhead is: read the lmsgsrdy CSR to check if a message is available for processing, read the message length from the application header, and write to the lmsgdone CSR after forwarding the message. For the traditional design, the software overhead is: perform MMIO operations to pass RX/TX descriptors to the NIC and to check for RX/TX DMA completions, and memcpy's to swap the Ethernet source and destination addresses.</p><p>Because of lower overheads, the application has 2-7× higher throughput on the nanoPU than on the traditional NIC. For small 8B messages (72B packets), the nanoPU loopback application achieves 68Gb/s, or 118Mrps -7× higher than the traditional system. For 1KB messages, the nanoPU achieves a throughput of 166Gb/s (83% of the line-rate). When we add the per-packet NDP control packets sent/received by the NIC, the 200Gb/s link is completely saturated.      Stateless nanoRequest jobs. The nanoPU is well-suited for compute-intensive applications that transform the data carried by self-contained nanoRequests. We use a very simple benchmark application that increments each word of the message by one and forwards the message back into the network; similar to the program described in Section 3.4.</p><p>Figure <ref type="figure" target="#fig_5">5</ref> shows that the nanoPU accelerates the throughput of this application by up to 10×. NanoRequest data is read from the register file and passed directly through the ALU; no memory operations are required at all. On the other hand, when using the traditional NIC, each word of the message must be read from the last-level cache (LLC), passed through the ALU, and the final result is written back to memory. If instead the traditional NIC loaded words into the L1 cache, as in <ref type="bibr" target="#b53">[57]</ref>, we estimate a throughput about 1.3× faster than via the LLC. This would still be 7.5× slower than the nanoPU fast path. In Section 5.3, we will compare more realistic benchmarks for real applications.</p><p>Stateful nanoRequest jobs. These are applications that process both message data and local memory data. Similar to the example described in Section 3.5, our simple microbenchmark computes the dot product of two vectors of 64-bit integers, one from the arriving message and a weight vector in local memory. The weight vector is randomly chosen from enough vectors to fill the L1 cache (16kB).</p><p>There are two ways to implement the application on the nanoPU. The optimal method is to process each message word directly from the register file, multiplying and accumulating each word with the corresponding weight value from memory. The naive method copies the entire message from netRX into memory before computing the dot product with the weight vector. The traditional design processes messages in batches of 30, to overlap dot-product computation with DMA operations.</p><p>Figure <ref type="figure" target="#fig_6">6</ref> shows the throughput speedup of the optimal and naive methods relative to the traditional application, for different message lengths.</p><p>• Small messages: For small messages below 100bytes, the nanoPU is 4-5× faster because of fewer per-message software overheads.</p><p>• Large messages: For large vectors throughput is limited by the longer dot product computation time. The optimal application consistently doubles throughput by keeping message data out of the L1 cache and reducing cache misses. The naive application is slowed by the extra copy, and about twice as many L1 data cache misses. The traditional application has 10× as many L1 data cache misses as optimal because message data must be fetched from the LLC, which pollutes the L1 cache, evicting weight data. If we speed up the traditional NIC by placing message data directly in the L1 cache, as NeBuLa proposes <ref type="bibr" target="#b53">[57]</ref>, we estimate the traditional design would run 1.5× faster for large messages.</p><p>Optimal would still be 30% faster for large messages.</p><p>The benefits are clear when an application processes message data directly from the netRX register. While this may seem like a big constraint, we have found that it is generally feasible and natural to design applications this way. We demonstrate example applications in Section 5.3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.2">Hardware thread scheduling</head><p>Next, we evaluate how much the hardware thread scheduler (HTS) can reduce tail response time under high load.</p><p>Methodology. We evaluate tail response time under load by connecting a custom (C++) load generator to our nanoPU prototype in Firesim <ref type="bibr" target="#b30">[31]</ref>. It generates nanoRequests with Poisson inter-arrival times, and measures the end-to-end response time. Priority thread scheduling. We compare our hardware thread scheduler (HTS) against a more traditional timerinterrupt driven scheduler (TIS) interrupted by the kernel every 5µs to swap in the highest-priority active thread. We run both schedulers in hardware on our prototype. <ref type="foot" target="#foot_9">11</ref> TIS uses a 5µs timer interrupt to match the granularity of state-of-theart low-latency operating systems <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b47">49]</ref>.</p><p>We evaluate both schedulers when they are scheduling two threads: one with priority 0 (high) and one with priority 1 (low). The load generator issues 10K requests for each thread, randomly interleaved, each with an on-core service time of 500ns (i.e., an ideal system will process 2Mrps).</p><p>Figure <ref type="figure" target="#fig_7">7</ref> shows the 99th %ile tail response time vs load for both thread policies, with a high and low priority thread. HTS reduces tail response time by 4× and 6.5× at high and low load, respectively; and can sustain 96% load. <ref type="foot" target="#foot_10">12</ref>Bounded message-processing time. HTS is designed to bound the tail response time of well-behaved applications, even when they are sharing a core with misbehaving applications. To test this, we configure a core to run a well-behaved thread and a misbehaving thread, both configured to run at priority 0. All requests have an on-core service time of 500ns, except when a thread misbehaves (once every 100 requests), in which case the request processing time increases to 5µs.</p><p>Figure <ref type="figure" target="#fig_8">8</ref> shows the 99th %ile tail response time vs load for both threads with, and without, the bounded message processing time feature enabled. When enabled, if a priority 0 thread takes longer than 1µs to process a request, HTS lowers its priority to 1. When disabled, all requests are processed by the core in FIFO order.</p><p>We expect an application with at most one message at a time in the RX queue, to have a tail response time bounded by 2 • 43ns + 17ns + 2 • 1000ns + 50ns = 2.15µs. This matches our experiments: With the feature enabled, the tail response time of the well-behaved thread never exceeds 2.1µs, until the offered load on the system exceeds 100% (1.9 Mrps). <ref type="foot" target="#foot_11">13</ref> HTS lowers the priority of the misbehaving application the first time it takes longer than 1µs to process a request. Hence, the well-behaved thread quickly becomes strictly higher priority and its 500ns requests are never trapped behind a long 5µs one. Note also that by bounding message processing times, shorter requests are processed first, queues are smaller and the system can sustain higher load.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.3">Prototype NIC pipeline</head><p>Hardware NDP transport. We verify our hardware NDP implementation by running a large 80-to-1 incast experiment on Firesim, with 324 cores simulated on 81 AWS F1 FPGAs. All hosts are connected to one simulated switch; 80 clients send a single packet message to the same server at the same time. The switch has insufficient buffer capacity to store all 80 messages and hence some are dropped. When NDP is disabled, dropped packets are detected by the sender using a timeout and therefore the maximum latency through the network is dictated by the timeout interval. When NDP is enabled, the dropped messages are quickly retransmitted by NDP's packet trimming and NACKing mechanisms, lowering maximum network latency by a factor of three. Hardware JBSQ core selection. We evaluate our JBSQ implementation using a bimodal service-time distribution: 99.5% of nanoRequests have a service time of 500ns and 0.5% have a service time of 5µs. When using a random core assignment technique, like receive side scaling (RSS), to balance requests across four cores, short requests occasionally get queued behind long requests, resulting in high tail response time. With JBSQ enabled, tail response time is reduced 5× at low load, and can sustain 15% higher load than RSS.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Application Benchmarks</head><p>As shown in Table <ref type="table" target="#tab_0">1</ref>, we implemented and evaluated many applications on our nanoPU prototype. Below, we present the evaluation results for a few of these applications. MICA. We ported the MICA key-value store <ref type="bibr" target="#b37">[38]</ref> and compared it running on the nanoPU and traditional NIC designs. MICA is implemented as a library with an API that allows applications to GET and SET key-value pairs. Traditionally, this API uses in-memory buffers to pass key-value pairs between the MICA library and application code. The naive way to port MICA to the nanoPU is to copy key-value pairs in network messages between the register file and in-memory buffers, using the MICA library without modification. However, we find it more efficient to modify the MICA library to read and write the register file directly when performing GET and SET operations. This avoids unnecessary memcpys in the MICA library. Optimizing the MICA library to use the register file only required changes to 36 lines of code.</p><p>Our evaluation stores 10k key-value pairs (16B keys and 512B values). The load generator sends a 50/50 mix of read-/write nanoRequest queries with keys picked uniformly. Figure <ref type="figure" target="#fig_9">9</ref> compares the 99th %ile tail response time vs load for the traditional, nanoPU naive, and nanoPU optimized versions of this application. The naive nanoPU implementation outperforms the traditional implementation, likely because it is able to use an L1-cache resident in-memory buffer rather than an LLC-resident DMA buffer. The optimized nanoPU imple-  mentation is able to achieve about 30% higher throughput and lower response times by efficiently using the register file interface when processing network messages. Raft. Raft is a widely-used consensus algorithm for distributed applications <ref type="bibr" target="#b45">[47]</ref>. We evaluate a production grade version of Raft [53] using a 16B-key, 64B-value MICA keyvalue store state machine, with three servers and one client connected to a single switch. The switch has a forwarding latency of 300ns (typical of modern cut-through commercial switch ASICs <ref type="bibr">[58]</ref>) and all links have a latency of 43ns. Although our Raft cluster correctly implements leader election, can tolerate server failure, and our client automatically identify a new Raft leader, we evaluate our Raft cluster in the steady-state, failure-free case, with a single leader and three fully-functioning replicas.</p><p>We define the response time to be from when the client issues a three-way replicated write request to the Raft cluster, until the client hears back from the cluster leader that the request has been fully replicated and committed across all three Raft servers. In 10K trials, the median response time was 3.08µs, with a 3.26µs 99th %ile tail response time. eRPC <ref type="bibr" target="#b27">[28]</ref>, a high performance, highly-optimized RPC library reports a 5.5µs median and 6.3µs 99th %ile tail response time -about a factor of two slower. Set algebra. In information retrieval systems, set intersections are commonly performed for data mining, text analytics, and search. For example, Lucene <ref type="bibr" target="#b7">[8]</ref> uses a reverse index that maps each word to a set of documents that contain the word. Searches yield a document set for each search word, then compute the intersection of these sets.</p><p>We created a reverse index of 100 Wikipedia <ref type="bibr" target="#b58">[65]</ref> articles with 200 common English words. Our load generator sends search requests with 1-4 words chosen from a Zipf distribution based on word frequency. application to the nanoPU was straight forward. The only difference between the nanoPU and traditional versions of the applications is the logic to send and receive network messages (∼50 LOC). We did not need to make any modifications to the application logic that computes the intersection between sets of document IDs.</p><p>Figure <ref type="figure" target="#fig_10">10</ref> shows the tail response time for searches. The traditional design has a low-load tail response time of 1.7µs, compared to 1.4µs on a single nanoPU core. JBSQ helps to ensure that long running requests do not get stuck behind short ones. With JBSQ enabled for four cores, the 99th %ile tail response time remains low until 7Mrps. One-sided RDMA operations. As described in Section 4.1, the nanoPU can implement flexible, low latency one-sided RDMA operations. As a baseline, the median end-to-end latency of one-sided operations between two hosts using stateof-the-art RDMA NICs, connected by a single switch with a port-to-port latency of 300ns is about 2µs <ref type="bibr" target="#b27">[28]</ref>. <ref type="foot" target="#foot_12">14</ref> Table <ref type="table" target="#tab_3">2</ref> shows the median and 90% tail latency of several one-sided RDMA operations implemented on the nanoPU, using the same topology as the baseline. The median latency, measured by the nanoPU client, is 680-690ns with a 90% tail latency of approximately 700ns, 65% lower latency than state-ofthe-art RDMA NICs. Most of the latency reduction is from eliminating the traversal of PCIe on the client and server.</p><p>In addition to the standard one-sided RDMA operations (read, write, compare-and-swap, fetch-and-add) we also implement indirect read, in which the server simply dereferences a pointer to determine the actual memory address to read. This operation would require two network round trips on a standard RDMA NIC; on the nanoPU, it takes only a few nanoseconds longer than a standard read.</p><p>6 Discussion nanoPU deployment possibilities. We believe there are a number of ways to deploy nanoPU ideas, in addition to a modified regular CPU. For example, the nanoPU fast path could be added to embedded CPUs on smartNICs for the data center <ref type="bibr" target="#b4">[5,</ref><ref type="bibr">41,</ref><ref type="bibr" target="#b42">44]</ref>. This could be a less invasive way to introduce nanoPU ideas without needing to modify server CPUs. A more extreme approach would be to build a nanoPU domain-specific architecture explicitly for nanoRequests. For example, it would be practical today to build a single chip 512-core nanoPU, similar to Celerity <ref type="bibr" target="#b14">[15]</ref>, with one hundred 100GE interfaces, capable of servicing RPCs at up to 10Tb/s. In-order execution. Our prototype is based on a simple 5stage, in-order RISC-V Rocket core and required only minor modifications to the CPU pipeline. An out-of-order processor would require bigger changes to ensure that words read from netRX are delivered to the application in FIFO order.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">Related Work</head><p>Low-latency RPCs (software). Recent work focuses on algorithms to choose a core by approximating a single-queue system using work-stealing (like ZygOS <ref type="bibr" target="#b49">[51]</ref>) or preempting requests at microsecond timescales (Shinjuku <ref type="bibr" target="#b26">[27]</ref>). However, the overheads associated with inter-core synchronization and software preemption make these approaches too slow and coarse-grained for nanoRequests.</p><p>eRPC <ref type="bibr" target="#b27">[28]</ref> takes the other extreme to the nanoPU and runs everything in software, and through clever optimizations, achieves impressively low latency on a commodity server for the common case. eRPC has good median response times, but its common-case optimizations sacrifice tail response times, which often dictate application performance. The nanoPU's hardware pipeline makes median and tail RPC response times almost identical. Low-latency RPCs (hardware). We are not the first to implement core-selection algorithms in hardware. RPCvalet <ref type="bibr" target="#b11">[12]</ref> and NeBuLa <ref type="bibr" target="#b53">[57]</ref> are both built on the Scale-out NUMA architecture <ref type="bibr" target="#b44">[46]</ref>. RPCvalet implements a single queue system, which in theory provides optimal performance. However, it ran into memory bandwidth contention issues, which they later resolve in NeBuLa. Both NeBuLa and R2P2 <ref type="bibr" target="#b35">[36]</ref> implement the JBSQ load balancing policy; NeBuLa runs JBSQ on the server whereas R2P2 runs JBSQ in a programmable switch. Like NeBuLa, the nanoPU also implements JBSQ to steer requests to cores.</p><p>Many NICs support RDMA in hardware. Several systems (HERD <ref type="bibr" target="#b28">[29]</ref>, FaSST <ref type="bibr" target="#b29">[30]</ref>, and DrTM+R <ref type="bibr" target="#b10">[11]</ref>) exploit RDMA to build applications on top. As described in Sections 4.1 and 5.3, the nanoPU can be used to implement programmable one-sided RDMA operations while providing lower latency than state-of-the-art commercial NICs.</p><p>SmartNICs (NICs with CPUs on them) <ref type="bibr" target="#b4">[5,</ref><ref type="bibr">41,</ref><ref type="bibr" target="#b42">44]</ref> are being deployed to offload infrastructure software from the main server to CPUs on the NIC. However, these may actually increase the RPC latency, unless they adopt nanoPU-like designs on the NIC. Transport protocols in hardware. We are not the first to implement the transport layer and congestion control in hardware. Modern NICs that support RDMA over Converged Ethernet (RoCE) implement DCQCN <ref type="bibr" target="#b60">[67]</ref> in hardware. In the academic research community, Tonic <ref type="bibr" target="#b1">[2]</ref> proposes a framework for implementing congestion control in hardware. The nanoPU's programmable transport layer (and NDP implementation) draws upon ideas in Tonic. Register file interface. GPRs were first used by the Jmachine <ref type="bibr" target="#b12">[13]</ref> for low-latency inter-core communication on the same machine, but were abandoned because of the difficulty implementing thread-safety. The idea has reappeared in several designs, including the RAW processor <ref type="bibr" target="#b57">[64]</ref>, and the SNAP processor for low-power sensor networks <ref type="bibr" target="#b31">[32]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">Conclusion</head><p>Today's CPUs are optimized for load-store operations to and from memory. Memory data is treated as a first-class citizen. But modern workloads frequently process huge numbers of small RPCs. Rather than burden RPC messages with traversing a hierarchy optimized for data sitting in memory, we propose providing them with a new optimized fast path, inserting them directly into the heart of the CPU, bypassing the unnecessary complications of caches, PCIe and address translation. Hence, we aim to elevate network data to the same importance as memory data.</p><p>As datacenter applications continue to scale out, with one request fanning out to generate many more, we must find ways to minimize not only the communication overhead, but also the tail response time. Long tail response times are inherently caused by resource contention (e.g., shared CPU cores, cache space, and memory and network bandwidths). By moving key scheduling decisions into hardware (i.e., congestion control, core selection, and thread scheduling), these resources can be scheduled extremely efficiently and predictably, leading to lower tail response times.</p><p>If future cloud providers can provide bounded, end-to-end RPC response times for very small nanoRequests, on shared servers also carrying regular workloads, we will likely see much bigger distributed applications based on finer grain parallelism. Our work helps to address part of the problem: bounding the RPC response time once the request arrives at the NIC. If coupled with efforts to bound network latency, it might complete the end-to-end story. We hope our results will encourage other researchers to push these ideas further.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: The nanoPU design. The NIC includes ingress and egress PISA pipelines as well as a hardware-terminated transport and a core selector with global RX queues; each CPU core is augmented with a hardware thread scheduler and local RX/TX queues connected directly to the register file.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Our nanoPU prototype latency breakdown. Total wire-to-wire latency for an 8B message (72B packet) is 69ns.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Loopback median response time vs. message length; nanoPU fast path and traditional.</figDesc><graphic url="image-161.png" coords="12,66.74,72.00,151.20,84.32" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Loopback throughput vs. message length; nanoPU fast path and traditional.</figDesc><graphic url="image-162.png" coords="12,230.40,73.23,151.21,83.08" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Loopback-with-increment throughput vs. message length; nanoPU fast path and traditional.</figDesc><graphic url="image-163.png" coords="12,394.05,73.10,151.20,83.22" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Dot-product throughput speedup for various vector sizes; nanoPU fast path (naive &amp; optimal) relative to traditional NIC.</figDesc><graphic url="image-164.png" coords="12,66.74,201.15,151.21,81.81" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: 99th %ile response time vs load; hardware thread scheduler (HTS) vs. traditional timerinterrupt driven scheduler (TIS).</figDesc><graphic url="image-165.png" coords="12,230.40,208.16,151.20,74.80" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: 99th %ile response time vs load for well-behaved and misbehaved threads, with and without bounded message processing time.</figDesc><graphic url="image-166.png" coords="12,394.05,207.94,151.20,75.02" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: MICA KV store: 99th %ile tail response time for READ and WRITE requests.</figDesc><graphic url="image-167.png" coords="14,54.00,72.00,240.12,90.28" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Set intersection: 99th %ile tail response time.</figDesc><graphic url="image-168.png" coords="14,54.00,199.14,240.11,88.12" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0"><head></head><label></label><figDesc></figDesc><graphic url="image-1.png" coords="1,-9.00,-10.01,630.00,255.87" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0"><head></head><label></label><figDesc></figDesc><graphic url="image-2.png" coords="1,-9.00,543.00,630.00,259.01" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>Example applications that have been implemented on the nanoPU. These applications use small network messages, few memory references, and cacheresident function stack and variables (in the common case), and are designed to efficiently process messages out of the register file. Table indicates median and 99th %ile wire-to-wire response time at low load. *Measured at client.</figDesc><table><row><cell>Application</cell><cell>Description</cell><cell>Response Time p50 / p99 (µs)</cell></row><row><cell>MICA</cell><cell>Implements a fast in-memory key-value store</cell><cell>0.40 / 0.50</cell></row><row><cell>Raft</cell><cell>Runs leader-based state machine replication</cell><cell>3.08 / 3.26 *</cell></row><row><cell>Chain Repl.</cell><cell>Runs a vertical Paxos consensus algorithm</cell><cell>1.10 / 1.40 *</cell></row><row><cell>Set Algebra</cell><cell>Processes data-mining and text-analytics workloads</cell><cell>0.60 / 1.50</cell></row><row><cell>HD Search</cell><cell>Analyzes and processes image, video, and speech data</cell><cell>0.80 / 1.20</cell></row><row><cell>N-Body Sim.</cell><cell>Computes gravitational force for simulated bodies</cell><cell>0.35 / N/A</cell></row><row><cell>INT Processing</cell><cell>Processes network telemetry data (e.g., path latency)</cell><cell>0.13 / N/A</cell></row><row><cell>Packet Classifier</cell><cell>Classifies packets for intrusion detection (100K rules)</cell><cell>0.90 / 2.20</cell></row><row><cell>Othello Player</cell><cell>Searches the Othello state space</cell><cell>0.90 / 1.70 [26]</cell></row><row><cell>One-sided RDMA</cell><cell>Performs one-sided RDMA operations in software</cell><cell>0.68 / N/A *</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 2 :</head><label>2</label><figDesc>Porting the set intersection Median and 90th %ile latency of one-sided RDMA operations implemented on the nanoPU. Measurements are made at the client, and the one-way latency through the switch and links is 300ns.</figDesc><table><row><cell>One-sided RDMA</cell><cell cols="2">Latency (ns) Median 90th %ile</cell></row><row><cell>Read</cell><cell>678</cell><cell>680</cell></row><row><cell>Write</cell><cell>679</cell><cell>686</cell></row><row><cell>Compare-and-Swap</cell><cell>687</cell><cell>690</cell></row><row><cell>Fetch-and-Add</cell><cell>688</cell><cell>692</cell></row><row><cell>Indirect Read</cell><cell>691</cell><cell>715</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0">nanoPU Artifact: https://github.com/l-nic/chipyard/wiki</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1">It is the responsibility of the the host software to configure this table with entries for all nanoRequest processing applications.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_2">We think of these FIFO memories as equivalent to an L1 cache, but for network messages; both are built into the CPU pipeline and sit right next to the register file.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_3">Our interlock logic would have been prohibitively expensive in the early days; but since 1989, Moore's Law lets us put four orders of magnitude more gates on a chip, making the logic quite manageable (Section</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_4">).</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="5" xml:id="foot_5">nanoPU Artifact: https://github.com/l-nic/chipyard/wiki</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="6" xml:id="foot_6">The maximum message size is a configurable parameter of the architecture and we have experimented with messages as long as 38 packets.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="9" xml:id="foot_7">A future implementation may also want to use this signal to flush any unread bytes of the current message from the local RX queue. Doing so would guarantee that the next read to netRX would yield the application header of the subsequent message and help prevent application logic from becoming desynchronized with message boundaries.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="10" xml:id="foot_8">Our prototype does not include MAC &amp; Serial IO, so we add real values measured on a 100GE switch (with Forward Error Correction disabled).</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="11" xml:id="foot_9">TIS would run in software in practice, likely on a separate core, and would therefore be slower than in hardware.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="12" xml:id="foot_10">Our prototype does not currently allocate NIC buffer space perapplication, causing high-priority requests to be dropped when the lowpriority queue is fill. This will be fixed in the next</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="13" xml:id="foot_11">version.<ref type="bibr" target="#b12">13</ref> This is despite our Poisson arrival process occasionally placing more than one message in the RX queue.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="14" xml:id="foot_12">Note that when using an ARM-based smartNIC, such as the Mellanox BlueField [41], the time to traverse the embedded cores will increase this end-to-end latency by at least a factor of two<ref type="bibr" target="#b38">[39,</ref><ref type="bibr" target="#b56">61]</ref>.</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>We would like to thank our shepherd, Yiying Zhang, Amin Vahdat, John Ousterhout, and Kunle Olukotun for their invaluable suggestions throughout the duration of this project. This work was supported by Xilinx, Google, Stanford Platform Lab, and DARPA Contract Numbers HR0011-20-C-0107 and FA8650-18-2-7865.</p></div>
+			</div>
+
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A Artifact Appendix Abstract</head><p>This artifact contains the Chisel source code of our nanoPU prototype as well as the application code and simulation infrastructure that is required to reproduce the key results presented in this paper. Our prototype is evaluated using both Verilator for cycle-accurate simulations in software, and Firesim for cycle-accurate simulations on FPGAs in AWS. The artifact is packaged as an AWS EC2 image with all of the dependencies pre-installed to make it easy for others to use and build upon our work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Scope</head><p>The artifact can be used to reproduce the key results presented in the following figures:</p><p>• Figure <ref type="figure">3</ref> -Loopback latency; nanoPU vs. traditional.</p><p>• Figure <ref type="figure">4</ref> -Loopback throughput; nanoPU vs. traditional.</p><p>• Figure <ref type="figure">5</ref> -Loopback-with-inc. throughput; nanoPU vs. traditional.</p><p>• Figure <ref type="figure">6</ref> -Dot-product throughput speedup.</p><p>• Figure <ref type="figure">7</ref> -Tail response time using priority thread scheduling.</p><p>• Figure <ref type="figure">8</ref> -Tail response time using bounded message processing time.</p><p>• Figure <ref type="figure">9</ref> -MICA tail response time.</p><p>• Figure <ref type="figure">10</ref> -Set intersection tail response time.</p><p>Additionally, there are a number of ways to use the artifact to build upon our work. For example, you can write new applications for the nanoPU and evaluate them at close to real-time using a custom topology with Firesim. Alternatively, you can modify the nanoPU architecture and use the provided simulation infrastructure to easily test your changes.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Contents</head><p>The documentation for the nanoPU artifact can be found at: https://github.com/l-nic/chipyard/wiki. The primary repositories are briefly described below:</p><p>• Chipyard -The main top-level repository which contains the others listed below as git submodules. Contains application code as well as Verilator simulation infrastructure.</p><p>• Rocket Chip -Contains the chisel source code for our modified RISC-V Rocket core (as well as all of the other components that are needed to create a full SoC).</p><p>• L-NIC -Contains the chisel source code for the nanoPU NIC.</p><p>• Firesim -Provides all of the infrastructure that is required to run FPGA-accelerated, cycle-accurate simulations on AWS.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Hosting</head><p>The nanoPU artifact is hosted on GitHub: https://github.com/l-nic/chipyard/tree/nanoPU-artifact-v1.0</p><p>The development branch is called lnic-dev and, at the time of this writing, the latest release is tagged nanoPU-artifact-v1.0. In order to make it easy for others to reuse and build upon our work, we have developed a custom Amazon Machine Image (AMI) with the artifact and all required dependencies pre-installed. See the documentation for detailed instructions regarding how to access and use this AMI.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Requirements</head><p>In order to use the nanoPU artifact, you will need access to an AWS account and you will need to subscribe to the AWS FPGA developer AMI. Additionally, you will need permission from AWS to launch F1 instances. These requirements are explained in greater detail in the online documentation.</p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<ptr target="https://aws.amazon.com/ec2/instance-types/f1/" />
+		<title level="m">Amazon ec2 f1 instances</title>
+				<imprint>
+			<date type="published" when="2020-08-10">2020-08-10</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Enabling programmable transport protocols in high-speed nics</title>
+		<author>
+			<persName><forename type="first">Mina</forename><surname>Tahmasbi Arashloo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexey</forename><surname>Lavrov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manya</forename><surname>Ghobadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jennifer</forename><surname>Rexford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Walker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Wentzlaff</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">17th USENIX Symposium on Networked Systems Design and Implementation (NSDI 20)</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="93" to="109" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title level="m" type="main">The rocket chip generator</title>
+		<author>
+			<persName><forename type="first">Krste</forename><surname>Asanovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rimas</forename><surname>Avizienis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Bachrach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Beamer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Biancolin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Celio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Henry</forename><surname>Cook</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Dabbelt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Hauser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Izraelevitz</surname></persName>
+		</author>
+		<idno>UCB/EECS-2016-17</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+		<respStmt>
+			<orgName>EECS Department, University of California, Berkeley</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Tech. Rep.</note>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Workload Analysis of a Large-Scale Key-Value Store</title>
+		<author>
+			<persName><forename type="first">Berk</forename><surname>Atikoglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuehai</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eitan</forename><surname>Frachtenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Jiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Paleczny</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th ACM SIGMETRICS/PERFORMANCE Joint International Conference on Measurement and Modeling of Computer Systems, SIGMETRICS &apos;12</title>
+				<meeting>the 12th ACM SIGMETRICS/PERFORMANCE Joint International Conference on Measurement and Modeling of Computer Systems, SIGMETRICS &apos;12<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="53" to="64" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<ptr target="https://aws.amazon.com/ec2/nitro/" />
+		<title level="m">Aws nitro system</title>
+				<imprint>
+			<date type="published" when="2020-12-10">2020-12-10</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Chisel: constructing hardware in a scala embedded language</title>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Bachrach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huy</forename><surname>Vo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><surname>Richards</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunsup</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Waterman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rimas</forename><surname>Avižienis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Wawrzynek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krste</forename><surname>Asanović</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">DAC Design Automation Conference</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2012">2012. 2012</date>
+			<biblScope unit="page" from="1212" to="1221" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Attack of the killer microseconds</title>
+		<author>
+			<persName><forename type="first">Luiz</forename><surname>Barroso</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Marty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Patterson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">60</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="48" to="54" />
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Grant Ingersoll, and Lucid Imagination. Apache lucene 4</title>
+		<author>
+			<persName><forename type="first">Andrzej</forename><surname>Białecki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Muir</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGIR 2012 workshop on open source information retrieval</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page">17</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">The end of slow networks: It&apos;s time for a redesign</title>
+		<author>
+			<persName><forename type="first">Carsten</forename><surname>Binnig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Crotty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Galakatos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Kraska</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Erfan</forename><surname>Zamanian</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2016-03">March 2016</date>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="528" to="539" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Forwarding metamorphosis: Fast programmable match-action processing in hardware for sdn</title>
+		<author>
+			<persName><forename type="first">Pat</forename><surname>Bosshart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Glen</forename><surname>Gibb</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hun-Seok</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><surname>Varghese</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Mckeown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Izzard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fernando</forename><surname>Mujica</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Horowitz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGCOMM Computer Communication Review</title>
+		<imprint>
+			<biblScope unit="volume">43</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="99" to="110" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Fast and general distributed transactions using rdma and htm</title>
+		<author>
+			<persName><forename type="first">Yanzhe</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xingda</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiaxin</forename><surname>Shi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rong</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haibo</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Eleventh European Conference on Computer Systems</title>
+				<meeting>the Eleventh European Conference on Computer Systems</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="17" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Rpcvalet: Ni-driven tail-aware balancing of µs-scale rpcs</title>
+		<author>
+			<persName><forename type="first">Alexandros</forename><surname>Daglis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sutherland</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+				<meeting>the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="35" to="48" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<monogr>
+		<title level="m" type="main">Waldemar Horwat, and John Keen. The j-machine: A fine grain concurrent computer</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>William J Dally</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stuart</forename><surname>Chien</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Fiske</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1989">1989</date>
+			<publisher>MAS-SACHUSETTS INST OF TECH CAMBRIDGE MI-CROSYSTEMS RESEARCH CENTER</publisher>
+		</imprint>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Principles and Practices of Interconnection Networks</title>
+		<author>
+			<persName><forename type="first">William</forename><surname>James</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dally</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><forename type="middle">Patrick</forename><surname>Towles</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+			<publisher>Morgan Kaufmann Publishers Inc</publisher>
+			<pubPlace>San Francisco, CA, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">The celerity opensource 511-core risc-v tiered accelerator fabric: Fast architectures and design methodologies for fast chips</title>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Davidson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shaolin</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Torng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Khalid</forename><surname>Al-Hawai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Austin</forename><surname>Rovinski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tutu</forename><surname>Ajayi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luis</forename><surname>Vega</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chun</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ritchie</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steve</forename><surname>Dai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">38</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="30" to="41" />
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Intel corporation</title>
+		<ptr target="https://www.intel.com/content/dam/www/public/us/en/documents/technology-briefs/data-direct-i-o-technology-brief.pdf.Ac-cessedon2020-08-17" />
+	</analytic>
+	<monogr>
+		<title level="m">intel data direct i/o technology (intel ddio): A primer</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">The tail at scale</title>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luiz</forename><surname>André</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barroso</forename></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">56</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="74" to="80" />
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<ptr target="https://www.dpdk.org/" />
+		<title level="m">DPDK: Data Plane Development Kit</title>
+				<imprint>
+			<date type="published" when="2020-12-04">2020-12-04</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<ptr target="https://prototype-kernel.readthedocs.io/en/latest/bpf/" />
+		<title level="m">Berkeley Packet Filter</title>
+				<imprint>
+			<date type="published" when="2020-12-08">2020-12-08</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<ptr target="https://www.cisco.com/c/en/us/products/collateral/interfaces-modules/nexus-smartnic/datasheet-c78-743828.html" />
+		<title level="m">Cisco Nexus X100 SmartNIC K3P-Q Data Sheet</title>
+				<imprint>
+			<date type="published" when="2020-12-01">2020-12-01</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Reexamining direct cache access to optimize i/o intensive applications for multi-hundredgigabit networks</title>
+		<author>
+			<persName><forename type="first">Alireza</forename><surname>Farshin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Roozbeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gerald</forename><forename type="middle">Q</forename><surname>Maguire</surname><genName>Jr</genName></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dejan</forename><surname>Kostić</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 USENIX Annual Technical Conference (USENIX ATC 20)</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="673" to="689" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">A thunk to remember: make-j1000 (and other jobs) on functionsas-a-service infrastructure</title>
+		<author>
+			<persName><forename type="first">Sadjad</forename><surname>Fouladi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Iter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuvo</forename><surname>Chatterjee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matei</forename><surname>Zaharia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Keith</forename><surname>Winstein</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Encoding, Fast and Slow: Low-latency Video Processing Using Thousands of Tiny Threads</title>
+		<author>
+			<persName><forename type="first">Sadjad</forename><surname>Fouladi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Riad</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brennan</forename><surname>Wahby</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karthikeyan</forename><surname>Shacklett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><surname>Vasuki Balasubramaniam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rahul</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anirudh</forename><surname>Bhalerao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><surname>Sivaraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Keith</forename><surname>Porter</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Winstein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX NSDI</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Re-architecting datacenter networks and stacks for low latency and high performance</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Handley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Costin</forename><surname>Raiciu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandru</forename><surname>Agache</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrei</forename><surname>Voinescu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">W</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gianni</forename><surname>Antichi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marcin</forename><surname>Wójcik</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Conference of the ACM Special Interest Group on Data Communication</title>
+				<meeting>the Conference of the ACM Special Interest Group on Data Communication</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="29" to="42" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Event-driven packet processing</title>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Ibanez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gianni</forename><surname>Antichi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gordon</forename><surname>Brebner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Mckeown</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 18th ACM Workshop on Hot Topics in Networks</title>
+				<meeting>the 18th ACM Workshop on Hot Topics in Networks</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="133" to="140" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">and Nick McKeown. The case for a network fast path to the cpu</title>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Ibanez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Muhammad</forename><surname>Shahbaz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 18th ACM Workshop on Hot Topics in Networks</title>
+				<meeting>the 18th ACM Workshop on Hot Topics in Networks</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="52" to="59" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Shinjuku: Preemptive scheduling for µsecond-scale tail latency</title>
+		<author>
+			<persName><forename type="first">Kostis</forename><surname>Kaffes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><surname>Chong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jack</forename><forename type="middle">Tigar</forename><surname>Humphries</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Belay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Mazières</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">16th USENIX Symposium on Networked Systems Design and Implementation (NSDI 19)</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="345" to="360" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Datacenter rpcs can be general and fast</title>
+		<author>
+			<persName><forename type="first">Anuj</forename><surname>Kalia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Andersen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">16th USENIX Symposium on Networked Systems Design and Implementation (NSDI 19)</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1" to="16" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Using rdma efficiently for key-value services</title>
+		<author>
+			<persName><forename type="first">Anuj</forename><surname>Kalia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2014 ACM conference on SIGCOMM</title>
+				<meeting>the 2014 ACM conference on SIGCOMM</meeting>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="295" to="306" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Fasst: Fast, scalable and simple distributed transactions with two-sided (RDMA) datagram rpcs</title>
+		<author>
+			<persName><forename type="first">Anuj</forename><surname>Kalia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">12th USENIX Symposium on Operating Systems Design and Implementation (OSDI 16)</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="185" to="201" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Fpga-accelerated cycle-exact scale-out system simulation in the public cloud</title>
+		<author>
+			<persName><forename type="first">Sagar</forename><surname>Karandikar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Howard</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donggyu</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Biancolin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alon</forename><surname>Amid</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dayeol</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nathan</forename><surname>Pemberton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Emmanuel</forename><surname>Amaro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Colin</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aditya</forename><surname>Chopra</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM/IEEE 45th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018. 2018</date>
+			<biblScope unit="page" from="29" to="42" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Snap: A sensor-network asynchronous processor</title>
+		<author>
+			<persName><forename type="first">Clinton</forename><surname>Kelly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Virantha</forename><surname>Ekanayake</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajit</forename><surname>Manohar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Ninth International Symposium on Asynchronous Circuits and Systems, 2003. Proceedings</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page" from="24" to="33" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">CRAY T3D: A New Dimension for Cray Research</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Richard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">L</forename><surname>Kessler</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Schwarzmeier</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Digest of Papers. COMPCON Spring</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1993">1993</date>
+			<biblScope unit="page" from="176" to="182" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">A massively parallel distributed n-body application implemented with hpx</title>
+		<author>
+			<persName><forename type="first">Zahra</forename><surname>Khatami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hartmut</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Patricia</forename><surname>Grubel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adrian</forename><surname>Serio</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ramanujam</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2016 7th Workshop on Latest Advances in Scalable Algorithms for Large-Scale Systems (ScalA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="57" to="64" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Antonin Bas, Advait Dixit, and Lawrence J Wobker. Inband network telemetry via programmable dataplanes</title>
+		<author>
+			<persName><forename type="first">Changhoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anirudh</forename><surname>Sivaraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naga</forename><surname>Katta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ACM SIGCOMM</title>
+				<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">R2p2: Making rpcs first-class datacenter citizens</title>
+		<author>
+			<persName><forename type="first">Marios</forename><surname>Kogias</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><surname>Prekas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adrien</forename><surname>Ghosn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonas</forename><surname>Fietz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Bugnion</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 USENIX Annual Technical Conference (USENIXATC 19)</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="863" to="880" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Millisort and milliquery: Large-scale data-intensive computing in milliseconds</title>
+		<author>
+			<persName><forename type="first">Yilong</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Seo</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jin</forename><surname>Park</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Ousterhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">18th {USENIX} Symposium on Networked Systems Design and Implementation</title>
+				<imprint>
+			<biblScope unit="page">2021</biblScope>
+		</imprint>
+	</monogr>
+	<note>{NSDI} 21</note>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">MICA: A holistic approach to fast in-memory key-value storage</title>
+		<author>
+			<persName><forename type="first">Hyeontaek</forename><surname>Lim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dongsu</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">G</forename><surname>Andersen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Kaminsky</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">11th USENIX Symposium on Networked Systems Design and Implementation (NSDI 14)</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="429" to="444" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Offloading distributed applications onto smartnics using ipipe</title>
+		<author>
+			<persName><forename type="first">Ming</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianyi</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Henry</forename><surname>Schuh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arvind</forename><surname>Krishnamurthy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Peter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karan</forename><surname>Gupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM Special Interest Group on Data Communication</title>
+				<meeting>the ACM Special Interest Group on Data Communication</meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="318" to="333" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Snap: a microkernel approach to host networking</title>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Marty</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marc</forename><surname>De Kruijf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Adriaens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Alfeld</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sean</forename><surname>Bauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carlo</forename><surname>Contavalli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Dalton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nandita</forename><surname>Dukkipati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><forename type="middle">C</forename><surname>Evans</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steve</forename><surname>Gribble</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th ACM Symposium on Operating Systems Principles</title>
+				<meeting>the 27th ACM Symposium on Operating Systems Principles</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="399" to="413" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Homa: A receiver-driven lowlatency transport protocol using network priorities</title>
+		<author>
+			<persName><forename type="first">Yilong</forename><surname>Behnam Montazeri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Alizadeh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ousterhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 Conference of the ACM Special Interest Group on Data Communication (SIGCOMM 18)</title>
+				<meeting>the 2018 Conference of the ACM Special Interest Group on Data Communication (SIGCOMM 18)</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="221" to="235" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">introduction-to-receive-side-scaling. Accessed on</title>
+		<ptr target="https://docs.microsoft.com/en-us/windows-hardware/drivers/network/" />
+	</analytic>
+	<monogr>
+		<title level="m">Introduction to Receive Side Scaling</title>
+				<imprint>
+			<publisher>Microsoft</publisher>
+			<biblScope unit="page" from="2020" to="2032" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<ptr target="https://www.pensando.io/assets/documents/Naples_100_ProductBrief-10-2019.pdf.Ac-cessedon2020-12-10" />
+		<title level="m">Naples dsc-100 distributed services card</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Understanding pcie performance for end host networking</title>
+		<author>
+			<persName><forename type="first">Rolf</forename><surname>Neugebauer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gianni</forename><surname>Antichi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">José</forename><surname>Fernando Zazo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yury</forename><surname>Audzevich</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sergio</forename><surname>López-Buedo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">W</forename><surname>Moore</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2018 Conference of the ACM Special Interest Group on Data Communication</title>
+				<meeting>the 2018 Conference of the ACM Special Interest Group on Data Communication</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="327" to="341" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Scale-out numa</title>
+		<author>
+			<persName><forename type="first">Stanko</forename><surname>Novakovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandros</forename><surname>Daglis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Bugnion</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGPLAN Notices</title>
+		<imprint>
+			<biblScope unit="volume">49</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="3" to="18" />
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">In search of an understandable consensus algorithm</title>
+		<author>
+			<persName><forename type="first">Diego</forename><surname>Ongaro</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Ousterhout</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 USENIX Annual Technical Conference (USENIX ATC 14)</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="305" to="319" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<ptr target="https://gcc.gnu.org/onlinedocs/gcc/Code" />
+	</analytic>
+	<monogr>
+		<title level="m">Options for Code Generation Conventions</title>
+				<imprint>
+			<date type="published" when="2020-11-11">2020-11-11</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Shenango: Achieving high CPU efficiency for latency-sensitive datacenter workloads</title>
+		<author>
+			<persName><forename type="first">Amy</forename><surname>Ousterhout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joshua</forename><surname>Fried</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Behrens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Belay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hari</forename><surname>Balakrishnan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">16th USENIX Symposium on Networked Systems Design and Implementation (NSDI 19)</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="361" to="378" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Optimus Prime: Accelerating Data Transformation in Servers</title>
+		<author>
+			<persName><forename type="first">Arash</forename><surname>Pourhabibi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Siddharth</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hussein</forename><surname>Kassir</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sutherland</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zilu</forename><surname>Tian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mario</forename><forename type="middle">Paulo</forename><surname>Drumond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christoph</forename><surname>Koch</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS 20)</title>
+				<meeting>the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS 20)</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Zygos: Achieving low tail latency for microsecond-scale networked tasks</title>
+		<author>
+			<persName><forename type="first">George</forename><surname>Prekas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marios</forename><surname>Kogias</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edouard</forename><surname>Bugnion</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th Symposium on Operating Systems Principles (SOSP 17)</title>
+				<meeting>the 26th Symposium on Operating Systems Principles (SOSP 17)</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="325" to="341" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<monogr>
+		<ptr target="https://developers.google.com/protocol-buffers" />
+		<title level="m">Google protocol buffers</title>
+				<imprint>
+			<date type="published" when="2020-12-08">2020-12-08</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Strom: smart remote memory</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Sidler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zeke</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Monica</forename><surname>Chiosa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amit</forename><surname>Kulkarni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gustavo</forename><surname>Alonso</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fifteenth European Conference on Computer Systems</title>
+				<meeting>the Fifteenth European Conference on Computer Systems</meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="1" to="16" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">µ suite: A benchmark suite for microservices</title>
+		<author>
+			<persName><forename type="first">Akshitha</forename><surname>Sriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Symposium on Workload Characterization (IISWC)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="1" to="12" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Virendra Marathe, Dionisios Pnevmatikatos, and Alexandros Daglis. The NEBULA rpc-optimized architecture</title>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Sutherland</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Siddharth</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<ptr target="https://www.mellanox.com/related-docs/prod_eth_switches/PB_SX1036.pdf" />
+	</analytic>
+	<monogr>
+		<title level="m">Sx1036 product brief</title>
+				<imprint>
+			<date type="published" when="2020-09-12">2020. 2020-09-12</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<monogr>
+		<ptr target="https://thrift.apache.org/.Ac-cessedon2020-12-08" />
+		<title level="m">Apache thrift</title>
+				<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">Resq: Enabling slos in network function virtualization</title>
+		<author>
+			<persName><forename type="first">Aurojit</forename><surname>Amin Tootoonchian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chang</forename><surname>Panda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Melvin</forename><surname>Lan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katerina</forename><surname>Walls</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sylvia</forename><surname>Argyraki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Ratnasamy</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Shenker</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">15th USENIX Symposium on Networked Systems Design and Implementation (NSDI 18)</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="283" to="297" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">Disaggregating persistent memory and controlling them remotely: An exploration of passive disaggregated keyvalue stores</title>
+		<author>
+			<persName><forename type="first">Shin-Yeh</forename><surname>Tsai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yizhou</forename><surname>Shan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiying</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2020 {USENIX} Annual Technical Conference ({USENIX} {ATC} 20)</title>
+				<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="33" to="48" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">Baring it all to software: Raw machines</title>
+		<author>
+			<persName><forename type="first">Elliot</forename><surname>Waingold</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Taylor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Devabhaktuni</forename><surname>Srikrishna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vivek</forename><surname>Sarkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Walter</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Victor</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jang</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Frank</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Finch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajeev</forename><surname>Barua</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computer</title>
+		<imprint>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="issue">9</biblScope>
+			<biblScope unit="page" from="86" to="93" />
+			<date type="published" when="1997">1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<ptr target="https://en.wikipedia.org/wiki/Wikipedia:Database_download" />
+		<title level="m">Wikipedia:database download</title>
+				<imprint>
+			<date type="published" when="2020-12-08">2020-12-08</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">Halo: accelerating flow classification for scalable packet processing in nfv</title>
+		<author>
+			<persName><forename type="first">Yifan</forename><surname>Yuan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yipeng</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ren</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jian</forename><surname>Huang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 ACM/IEEE 46th Annual International Symposium on Computer Architecture (ISCA)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="601" to="614" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Jitendra Padhye, Shachar Raindel, Mohamad Haj Yahia, and Ming Zhang. Congestion control for large-scale rdma deployments</title>
+		<author>
+			<persName><forename type="first">Yibo</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Haggai</forename><surname>Eran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Firestone</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chuanxiong</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marina</forename><surname>Lipshteyn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yehonatan</forename><surname>Liron</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGCOMM Computer Communication Review (CCR)</title>
+		<imprint>
+			<biblScope unit="volume">45</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="523" to="536" />
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

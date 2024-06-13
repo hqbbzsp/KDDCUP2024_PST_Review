@@ -1,0 +1,1207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Ithemal: Accurate, Portable and Fast Basic Block Throughput Estimation using Deep Neural Networks</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author role="corresp">
+							<persName><forename type="first">Charith</forename><surname>Mendis</surname></persName>
+							<email>&lt;charithm@mit.edu&gt;.</email>
+						</author>
+						<author>
+							<persName><forename type="first">Alex</forename><surname>Renda</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Saman</forename><surname>Amarasinghe</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Michael</forename><surname>Carbin</surname></persName>
+						</author>
+						<title level="a" type="main">Ithemal: Accurate, Portable and Fast Basic Block Throughput Estimation using Deep Neural Networks</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2023-01-01T13:34+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Predicting the number of clock cycles a processor takes to execute a block of assembly instructions in steady state (the throughput) is important for both compiler designers and performance engineers. Building an analytical model to do so is especially complicated in modern x86-64 Complex Instruction Set Computer (CISC) machines with sophisticated processor microarchitectures in that it is tedious, error prone, and must be performed from scratch for each processor generation. In this paper we present Ithemal, the first tool which learns to predict the throughput of a set of instructions. Ithemal uses a hierarchical LSTM-based approach to predict throughput based on the opcodes and operands of instructions in a basic block. We show that Ithemal is more accurate than state-of-the-art hand-written tools currently used in compiler backends and static machine code analyzers. In particular, our model has less than half the error of state-of-the-art analytical models (LLVM's llvm-mca and Intel's IACA).</p><p>Ithemal is also able to predict these throughput values just as fast as the aforementioned tools, and is easily ported across a variety of processor microarchitectures with minimal developer effort.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>The throughput of a sequence of instructions-the number processor clock cycles taken to execute the sequence when looped in steady state-determines how fast those instructions can process data. Accurately predicting the throughput of a basic block 1 is an essential requirement in many systems, to be able to predict and optimize runtime performance. For instance, constraint-based register allocation and instruction scheduling <ref type="bibr" target="#b23">(Lozano et al., 2012)</ref> relies on accurate throughput estimations, as do learningbased techniques like genetic algorithm based register allocation <ref type="bibr" target="#b40">(Stephenson et al., 2003)</ref> and reinforcement learning based instruction scheduling <ref type="bibr" target="#b25">(McGovern &amp; Moss, 1999)</ref>.</p><p>The alternative -measuring throughput on demand by executing the basic block -is too expensive for most compilers and learning-based solutions. In practice, most systems employ analytical models to predict throughput. For instance, the LLVM compiler team <ref type="bibr" target="#b20">(Lattner &amp; Adve, 2004)</ref> recently merged 2 a command-line tool, llvm-mca <ref type="bibr" target="#b8">(Di Biagio &amp; Davis, 2018)</ref>, that exposes a machine model for throughput estimation. Intel has also released a closedsource machine code analyzer, IACA <ref type="bibr" target="#b18">(Intel, 2017)</ref>, which relies on internal knowledge of Intel's processor design. These models are typically an order of magnitude faster than measuring a basic block's throughput. However, manually writing an accurate and complete model is tedious, error-prone, and exceedingly difficult without knowledge of the exact mechanisms of the processor.</p><p>In the hunt for accuracy, developers build complicated models which must make significant tradeoffs with the model's portability and speed.</p><p>Accuracy. Modern x86-64 Complex Instruction Set Computer (CISC) processors contain many hardware optimizations that significantly complicate building accurate analytical models. In order to implement an instruction set architecture (ISA) like x86-64, processors actually implement an underlying microarchitecture, a physical implementation of the ISA specification. Processors translate instructions from the ISA to instructions in the latent microarchitectural language (termed micro-ops), then execute those micro-ops. The micro-ops may undergo optimizations such as micro-op fusion, in which micro-ops of different instructions may be combined together; out-of-order execution, in which instructions can be executed in any semantics-preserving order; register renaming, where false dependencies can be broken to enable more parallel execution; and many more vendorspecific optimizations. This makes the prediction problem highly complex and non-linear.</p><p>Portability. While ISAs like x86-64 stay relatively stable, processor vendors release updated processor implementations with different microarchitectures every few years. For example, Intel released the Haswell and Skylake microarchitectures in 2013 and 2015 respectively for the x86-64 instruction set. Each microarchitecture of a processor family has its own quirks and intricacies. Manually writing a throughput estimator to support different microarchitectures requires rewriting instruction tables, resource utilization charts, and modeling microarchitectural optimizations, all of which are tedious and error-prone. This is complicated by the vast, incomplete, and incorrect documentation for many processors, where understanding of these behaviors has to be obtained by reverse-engineering the processor. Ideally, the throughput estimator should be able to automatically capture such intricacies with minimal human intervention.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Speed.</head><p>A throughput estimator also needs to be fast. Compilers need to search through many code blocks before emitting the fastest version of a given instruction sequence. Running the basic blocks to get the ground truth throughput requires sandboxing and many iterations of execution to arrive at a consistent steady-state throughput estimate, which is impractical for real-time systems.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.1">Ithemal: A Data Driven Approach</head><p>In this paper we introduce Ithemal (Instruction THroughput Estimator using MAchine Learning), which takes a novel data-driven approach to predicting throughput for a block of instructions, inspired by recent advances in Deep Neural Networks (DNNs). Ithemal models the throughput estimation problem as a regression task and leverages a DNN to learn to predict throughput by using a large corpus of labeled data, mapping assembly sequences to real valued throughputs. More concretely, Ithemal uses a hierarchical multiscale <ref type="bibr">RNN (El Hihi &amp; Bengio, 1995;</ref><ref type="bibr" target="#b6">Chung et al., 2017;</ref><ref type="bibr" target="#b2">Baraldi et al., 2017)</ref>, which generates an independent embedding for each instruction, then sequentially combines the instruction embeddings to predict throughput.</p><p>We show that Ithemal's learned model is significantly more accurate than the analytical models, dropping the mean absolute percent error by more than 50% across all benchmarks, while still delivering fast estimation speeds.</p><p>To generate high-quality predictions, Ithemal needs only training data and a specification of the ISA, including the specification of instructions and their explicit and implicit operands (for instance, the instruction push rax in x86-64 pushes the register rax on to the stack and also implicitly modifies the stack pointer register, rsp). Unlike analytical models, Ithemal learns any salient microarchitectural details that contribute to throughput on its own, without any explicit specification or modeling.</p><p>In this paper, we present the following contributions:</p><p>• Data-Driven Throughput Estimation. We present Ithemal, the first system for data-driven basic block throughput estimation, using a hierarchical multiscale RNN.   Implementation Errors: Intel provides extensive documentation of its microarchitectural implementation that enables developers to build performance models for assembly</p><formula xml:id="formula_0">h ∅ V mov V &lt;S&gt; V CONST V &lt;D&gt; V &lt;E&gt; V ecx LSTM LSTM LSTM LSTM LSTM LSTM</formula></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Token Layer</head><p>Instruction Layer </p><formula xml:id="formula_1">h ∅ V add V &lt;S&gt; V ebx V ecx V ebx V &lt;D&gt; LSTM LSTM LSTM LSTM LSTM LSTM add &lt;S&gt; ebx ecx &lt;D&gt; ebx ) ( LSTM V &lt;E&gt; &lt;E&gt; Token Embedding Lookup Table × Canonicalization Figure 1. Ithemal System Architecture</formula><p>code. However, the sheer volume of implementation details makes it challenging to deliver a complete model. Sequence (a) shows a single instruction sequence that zeros out the vector register xmm0. Zeroing out registers is so common that Intel processors execute these instructions using a faster, optimized data path -separate from the normal instruction execution path. IACA closely predicts the measured value but llvm-mca's predictions are much farther off, because it does not model this optimization.</p><p>Sequence (b) shows a pair of mov instructions with a measured throughput of 103. IACA and LLVM both find an execution schedule which would predict a throughput of 100 cycles; however, IACA also identifies a micro-op fusion opportunity, and therefore predicts 84 cycles. This optimization opportunity does not manifest in the observed timing numbers.</p><p>Ithemal, which is driven by actual performance data, learns to closely predict both of these values without any explicit error-prone encoding of Intel's optimizations.</p><p>Vendor Documentation Errors: The sheer volume of implementation details also means that Intel's documentation can be incorrect. Tools that faithfully adhere to the documentation can therefore still be incorrect. Sequence (c) is a short sequence with a data dependency that is bypassed within the processor pipeline: the mov instruction does not consume many additional clock cycles over that of shl. The throughput of this basic block is therefore dominated by the throughput of shl. However, the throughput value that Intel provides in its documentation (50 cycles) assumes that there are no dependencies. Therefore, while IACA -Intel's own tool -closely predicts the value, llvm-mca is incorrect because it uses the dependency-free throughput value. In comparison, Ithemal closely predicts the actual throughput because it works with actual performance data.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Model Architecture</head><p>Figure <ref type="figure">1</ref> presents the high-level design of Ithemal's approach. We model the problem of throughput estimation as a regression problem: given the assembly input, Ithemal predicts the throughput of the instruction sequence as a real-valued number. At the core of Ithemal is a hierarchical multiscale RNN <ref type="bibr" target="#b37">(Shuai et al., 2015;</ref><ref type="bibr" target="#b44">Zhu et al., 2016)</ref> that sequentially processes all instructions in the basic block and outputs an embedding, which Ithemal then uses to directly estimate the throughput. Altogether, we decompose the endto-end model into the following stages: canonicalization, embedding and estimation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Canonicalization</head><p>The canonicalization stage converts the assembly input into a more structured form, dictated by the syntax of the assembly instructions. Ithemal takes a compiled assembly block, disassembles it, and maps it to a list of instructions. Each instruction consists of a list of tokens representing its operation code (opcode, e.g. add), source operands, and destination operands, separated by distinguished delimiter tokens.</p><p>For example, consider the instruction mul ecx, which multiplies the value in register ecx with eax, and places the result into registers edx and eax. Note that the source operand eax and both of the destination operands eax and edx are implicit in the Intel syntax mul ecx. The final canonicalized set of tokens for the instruction is:</p><p>(mul, &lt;S&gt;, eax, ecx, &lt;D&gt;, edx, eax, &lt;E&gt;)</p><p>where the bracketed tokens are the delimiters representing the break between the opcode, source, and destination operands.</p><p>Assembly code permits more than just register operands, such as constants and memory operands. We map all constants (e.g. integer constants, memory addresses, etc.) to a single CONST token. We demarcate memory operands (consisting of a base address, and an optional offset and displacement) by surrounding them with &lt;M&gt; and &lt;/M&gt; delimiter tokens. We present the full canonicalization scheme in Appendix A.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Embedding</head><p>Ithemal's embedding stage takes a canonicalized token stream of instructions, and for each instruction produces an embedding: a representation of an instruction as a realvalued vector in a high-dimensional space. The first step is the token layer, which maps a given token to an embedding. We implement the token layer by mapping each token in the sequence to an n-dimensional vector by learning a linear transformation of the one-hot token vectors (this is equivalent to learning a lookup table <ref type="table">)</ref>.</p><p>Ithemal then maps the sequence of token embeddings to an embedding for each instruction in the basic block. We call this the instruction layer. Because each instruction can have a variable number of tokens depending on its number of source and destination operands, the size of the input to the embedding stage is variable. We therefore implement the instruction layer with a sequential Recurrent Neural Network (RNN) architecture with Long Short Term Memory (LSTM) <ref type="bibr" target="#b15">(Hochreiter &amp; Schmidhuber, 1997)</ref> cells.</p><p>Figure <ref type="figure">1</ref> presents the operation of our RNN-based instruction embedding approach on a small example. The bottommost row shows the original assembly input. The second row shows the sequence of tokens for each instruction. The third row (the token layer) shows the sequence of token embeddings, e.g. v mov , which are mapped directly from each syntactic token. The fourth row (the instruction layer) shows the application of an LSTM to reduce the token embedding sequence into the final instruction embedding, h mov .</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Prediction</head><p>The final prediction comes from the prediction layer, which maps a basic block (a sequence of instruction embeddings) to a throughput value. This is again implemented with an RNN with LSTM cells, which has entirely disjoint weights from the LSTM in the instruction layer. This corresponds to the topmost layer in Figure <ref type="figure">1</ref>. Using the final output from the instruction LSTM (h block ), Ithemal predicts the basic block's throughput with a linear layer. Specifically, Ithemal computes w • h block + b, where w is a learned weight vector and b is a bias. This produces a final real-valued number that represents the network's throughput prediction.</p><p>The hierarchical combination of the RNN in the instruction layer and the RNN in the prediction layer has several benefits over a non-hierarchical model:</p><p>• Memory and backpropagation paths are significantly shorter than a model using a non-hierarchical (i.e., single) RNN. The average length of a block in our dataset is 6.04 instructions, and the average length of an instruction is 7.97 tokens. The average length of a tokenlevel RNN across the entire basic block would instead be about 48 RNN cell applications, more than three times as long as a path through the hierarchical RNN.</p><p>• Instructions are embedded atomically: the prediction layer is only able to generate throughput estimates at specific points in the overall token stream, i.e. after complete instructions. This means that the network does not have an obligation to produce states that correspond to predictions at points in between instructions.</p><p>We compare this hierarchical architecture against other architecture choices in Section 6, showing the efficacy of Ithemal's hierarchical architecture.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Data and Training</head><p>We collected a dataset of basic blocks from well-known programs and benchmark suites, and timed them with a procedure that matches the assumptions of the baseline analytical models. We then train Ithemal using standard supervised learning techniques.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Dataset</head><p>Table <ref type="table" target="#tab_4">2</ref> summarizes the set of applications in our dataset.</p><p>We designed the dataset to include a diverse set of applications with different performance characteristics while covering a wide range of x86-64 instructions. It consists of performance critical applications used for benchmarking compiler optimizations as well as end user applications used in day-to-day computing.</p><p>To extract each application's basic blocks, we first compile each application using GCC 4.9.4 with the -O3 optimization level targeting an Intel Haswell processor. Next, we use Dynamorio <ref type="bibr" target="#b4">(Bruening et al., 2012)</ref>, a dynamic binary instrumentation tool, to dump the encoded bytes of the executed x86-64 basic blocks. We execute the benchmarks using the standard inputs provided by the benchmark suites.</p><p>Next, we de-duplicate the dataset by removing basic blocks with same encoded byte patterns. This step is important to eliminate repeated occurrences of basic blocks created by code shared through common header files and by common compilation patterns.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Throughput Profiling</head><p>IACA and llvm-mca predict the steady-state throughput of a basic block, under the assumptions that all memory accesses result in L1 cache hits and that the execution environment is non-preemptive. To collect compatible throughput numbers, we profile the execution of a loop that executes each basic block in isolation 100 times (enough to reach the steady-state behavior; 100 iterations is also the default value used by llvm-mca). We measure throughput in terms of clock cycles using a script that we have developed that is similar to Agner Fog's timing script<ref type="foot" target="#foot_1">4</ref> . Agner Fog's timing  <ref type="bibr">(NASA, 1991</ref><ref type="bibr">(NASA, -2014) )</ref> benchmarks with stencil computations (dense loops) 3935 1813 polybench-3.1 <ref type="bibr" target="#b31">(Pouchet, 2012)</ref> polyhedral compilation test suite (dense loops) 1900 859 TSVC <ref type="bibr" target="#b24">(Maleki et al., 2011)</ref> suite for testing compiler auto-vectorization 5129 2350 cortexsuite <ref type="bibr" target="#b42">(Venkata et al., 2009)</ref>  script is commonly used for validating individual instruction throughputs. Our timing script additionally ensures that almost all memory accesses have a L1 cache hit. Additionally, we measure L1 instruction and data cache misses and software context switches to detect and filter out invalid executions that do not conform to the assumptions made by IACA and llvm-mca in their predictions.</p><p>Using this methodology, we collected valid throughput values for the Intel Ivy Bridge (Intel(R) Xeon(R) CPU E5-2695 v2), Haswell (Intel(R) Xeon(R) CPU E5-2680 v3) and Skylake (Intel(R) Xeon(R) W-2123 CPU) microarchitectures. Data collection takes approximately 4-5 days for each microarchitecture. Table <ref type="table" target="#tab_4">2</ref> shows the breakdown of basic block counts for each benchmark for Haswell microarchitecture in total as well as after de-duplicating repeated basic blocks on a per benchmark basis. The final Haswell dataset, which is de-duplicated across benchmarks, constitutes 1,416,473 unique basic blocks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Training and Methodology</head><p>We implemented our neural network model in PyTorch (0.4.0a0+59bda9a). The learnable parameters in Ithemal include the token embeddings, the token LSTM and instruction LSTM parameters, and the affine coefficients in the final linear layer. For our loss function we use a normalized error metric, based on the L1 norm:</p><p>L(pred, actual) = |pred − actual| actual We randomly assign 80% of the collected blocks to the train set and 20% to the test set. We use Asynchronous Stochastic Gradient Descent <ref type="bibr" target="#b32">(Robbins &amp; Monro, 1951;</ref><ref type="bibr" target="#b27">Niu et al., 2011)</ref> to train the model. Our full training regime is detailed in Appendix B.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Evaluation</head><p>We have evaluated Ithemal against two state-of-the-art, handwritten analytical models: IACA <ref type="bibr">(Intel, 2017) (v3.0-28-g1ba2cbb)</ref> and llvm-mca (Di Biagio &amp; Davis, 2018) (LLVM 8.0.0). Both of these models are designed to model the complexities of modern processors (including pipelining, superscalar, and out-of-order units). We show that our datadriven model beats the accuracy of these sophisticated handwritten models (Section 5.1) while maintaining just as fast prediction speeds (Section 5.2). Further, we show that our approach is portable across different microarchitectures in Section 5.3 by showing that Ithemal learns a model that outperforms IACA and llvm-mca without any neural network architecture or hyperparameter modifications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Accuracy</head><p>We evaluate the accuracy of each model against the actual throughput values for Intel's Haswell, Ivy Bridge, and Skylake microarchitectures. The version of IACA we use does not support throughput estimation for Ivy Bridge; we therefore evaluate accuracy only for Ithemal and llvm-mca for Ivy Bridge. We prepared datasets for each microarchitecture according to the methodology described in Section 4.3.</p><p>Table <ref type="table" target="#tab_6">3</ref> presents the results of our accuracy comparison. We report the average error with respect to the ground truth of each tool for each microarchitecture. We also report both the Spearman and Pearson correlation of each tool's predictions with the ground truth.</p><p>Ithemal is more accurate in its throughput predictions for basic blocks across all three microarchitectures. Our model's predictions are closer to the ground truth than both IACA and LLVM in 74% of the blocks in the Haswell test set. Ithemal's predictions also have a higher correlation with the ground truth values for both the Spearman (rank correlation) and Pearson (linear correlation) metrics. The higher Spearman correlation is especially useful because it directly corresponds to higher utility for use within an optimizing compiler (such as an instruction scheduling pass). Specifically, compilers typically only need to determine which of several configurations of a basic block is the fastest, and do not calculate each block's absolute performance.</p><p>Figure <ref type="figure" target="#fig_1">2</ref> presents three heatmaps relating actual and predicted values in for basic blocks with throughputs less than 1000 cycles for each prediction method (representing 95% of our dataset).</p><p>To generate each heatmap, we binned the actual and predicted data into axis-aligned bins of width and height 20 cycles. The color in each bin represents the count of blocks in that bin. A perfect estimator would have all points along the line y = x (shown as a faint grey, dashed line on the heatmaps), since the predicted throughputs would always match the measured throughputs. We see a higher density near the identity line for Ithemal, compared to both llvmmca and IACA. Both llvm-mca and IACA also have more horizontal banding, representing more predictions of the same throughput value for different blocks that do actually have different behaviors.</p><p>Figure <ref type="figure" target="#fig_2">3</ref> shows the average error of each system across a range of throughputs. Compared to llvm-mca and IACA, Ithemal is better for blocks of almost all sizes. All estimators struggle with blocks with measured throughputs just below peaks in the measured throughput distribution. We hypothesize that these blocks correspond to special microarchitectural optimizations that llvm-mca and IACA do not model. Ithemal also struggles some with these rare blocks, but still outperforms both analytical estimators.  the number of basic blocks each tool can time per second, and multiplying that by the average number of instructions per basic block. In the last row, we also show the corresponding estimator throughput if we instead measure the ground-truth throughput for a given block. We measured these estimator throughputs on the Haswell test set on a machine with an Intel Xeon E5-2680 CPU.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Speed</head><p>Ithemal is as fast as llvm-mca and IACA in our measurements, and is significantly faster than empirical evaluation of basic blocks. It is worth noting that llvm-mca and IACA can both also output diagnostic information about basic blocks, and also that empirical evaluation of ground-truth data could be sped up by running fewer repeated measurements (it may be possible that as few as 2 or 3 measurements would suffice in some contexts). However even with these qualifications, we show that Ithemal functions as an equivalently performant and more accurate drop-in replacement for llvm-mca and IACA in systems which only need throughput estimations, while still performing significantly faster than empirical evaluation. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Portability</head><p>We designed and trained Ithemal on Haswell and validated our architecture and hyperparameters by re-training on Skylake. Without any changes to its structure or training regime, we then trained and evaluated Ithemal on the Ivy Bridge dataset. Table <ref type="table" target="#tab_6">3</ref> summarizes the average errors for each microarchitecture. Ithemal learns to estimate throughput values for each microarchitecture with a maximum average error of 0.089 across all datasets. The hand-written models exhibit a minimum average error of 0.167.</p><p>In sum, Ithemal provides state-of-the-art prediction performance; its results beat the baselines across the board. Moreover, Ithemal does so without requiring a user to provide information about the processor's underlying microarchitecture, whereas these analytical models require significant re-engineering for each microarchitecture of interest.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Neural Network Architecture Exploration</head><p>We evaluated a number of neural network architectures with varying levels of structure and complexity before arriving at Ithemal's network architecture (Section 3).</p><p>Figure <ref type="figure">4</ref> shows a DAG-RNN <ref type="bibr" target="#b37">(Shuai et al., 2015;</ref><ref type="bibr" target="#b44">Zhu et al., 2016)</ref>. Instructions are embedded identically as to in Ithemal (i.e. the token layer and instruction layer remain the same). However rather than running an RNN sequentially over the instructions in the prediction layer, the DAG-RNN constructs a dependence graph of the instructions in the basic block, with a directed edge between a pair of instructions if the second instruction depends on an output of the first instruction. Because an instruction can depend on multiple previous instructions, we apply an element-wise max to reduce the states feeding in to a given instruction. Then, the DAG-RNN applies an LSTM cell, using the generated instruction embedding as the input, and the result of the element-wise max as the input state. To generate the final prediction, we take an element-wise max of the output states of all leaf instructions (all instructions with no dependents), and pass the result through a linear layer.</p><p>The DAG-RNN is inspired by the theoretical behavior of a perfect out-of-order processor: the throughput of a basic block running on a perfect out-of-order processor is equivalent to the throughput of the longest path that must be serially executed in that basic block. Using a DAG-RNN implicitly encodes this prior, by only allowing information to propagate through the paths that must be serially executed in the block.</p><p>We also tested a simple token-level RNN with LSTM cells, which has a similar base architecture as Ithemal, but without the topmost prediction layer. Instead, this model sequentially consumes all tokens in a basic block making no explicit distinction between instructions, giving a baseline measure for the efficacy of Ithemal's hierarchical model. The full architecture diagram for the token-level RNN is shown in Appendix E.</p><p>Results. Figure <ref type="figure" target="#fig_3">5</ref> shows the training and validation loss for each model across the first five epochs. It is clear that the hierarchical LSTM is the best model among these three.</p><p>The sequential LSTM performs the worst by far, motivating the need to process individual tokens and instructions at multiple scales. The fact that the DAG-RNN performs worse than the hierarchical LSTM implies that the exact ordering of instructions in a basic block does matter, not just the dependency chains. This aligns with the fact that instruction scheduling optimizations in compilers do result in changed performance, despite the underlying dependency graph being the same. While the perfect out-of-order execution  <ref type="bibr" target="#b10">Bengio, 1995)</ref>. Ithemal uses a hierarchical multiscale RNN as the core of its prediction methodology, similar to many other proposed hierarchical RNN models. Ithemal has some inherent advantages over other models from the literature: as opposed to the methodology proposed in <ref type="bibr" target="#b6">(Chung et al., 2017)</ref>, the hierarchical structure in instruction embedding and throughput prediction is explicit rather than latent. Ithemal's structure is instead most similar to boundary-aware hierarchical RNNs, such as the one presented in <ref type="bibr" target="#b2">(Baraldi et al., 2017)</ref> for video captioning based on a hierarchy of frames and scenes.</p><p>DAG-RNNs and Graph Neural Networks Neural networks with generic graph based structures have been used in NLP tasks to model relations among words in sentences <ref type="bibr" target="#b30">(Peng et al., 2017;</ref><ref type="bibr" target="#b7">Dhingra et al., 2017)</ref>. Programs also can be represented using Gated Graph Neural Networks <ref type="bibr" target="#b1">(Allamanis et al., 2018)</ref>, to perform high-level tasks such as variable naming, or identifying variable misuses. <ref type="bibr" target="#b43">Xu et al. (2017)</ref> uses graph neural networks to find binary similarity between different execution platforms. In with a DAG-RNN <ref type="bibr" target="#b37">(Shuai et al., 2015;</ref><ref type="bibr" target="#b44">Zhu et al., 2016)</ref>, we hoped to be able to take advantage of the program semantics of a basic block, although that approach does not perform as well in our collected datasets.</p><p>Analytical Models for Throughput and Runtime Estimation Apart from state-of-the-art tools like llvm-mca and IACA, other analytical models exist for throughput estimation <ref type="bibr" target="#b41">(Taha &amp; Wills, 2003)</ref> of instructions. OS-ACA <ref type="bibr" target="#b21">(Laukemann et al., 2018)</ref> is an open source analytical model similar to llvm-mca and IACA, which automates some of the collection of the tabular data which is plugged into the model. There are also analytical models such as <ref type="bibr" target="#b5">(Chen &amp; Aamodt, 2009)</ref> to estimate throughput for multithreaded programs. Cycle-accurate simulators such as ZSim <ref type="bibr" target="#b34">(Sanchez &amp; Kozyrakis, 2013)</ref> and Marss <ref type="bibr" target="#b29">(Patel et al., 2011)</ref> have a high start-up cost and are more suited for coarse grained simulations.</p><p>Coarser analytical models exist for predicting program runtimes <ref type="bibr" target="#b28">(Park, 1993)</ref>. Work has also been done in developing analytical models to predict performance of restricted classes of programs. For example, work on predicting parallel program runtimes include <ref type="bibr" target="#b33">(Rugina &amp; Schauser, 1998;</ref><ref type="bibr" target="#b0">Adve &amp; Vernon, 2004;</ref><ref type="bibr" target="#b13">Hartleb &amp; Mertsiotakis, 1992;</ref><ref type="bibr" target="#b3">Blanco et al., 2004;</ref><ref type="bibr" target="#b11">Fahringer &amp; Zima, 1993)</ref> and work on predicting worst case execution times include <ref type="bibr" target="#b12">(Ferdinand et al., 2001;</ref><ref type="bibr" target="#b22">Li et al., 2007)</ref>.</p><p>All of these models require detailed processor modeling and considerable human development effort.</p><p>Learned Models for Throughput and Runtime Estimation There has been work on developing machine learningbased models for absolute and relative runtime estimation. <ref type="bibr" target="#b16">(Huang et al., 2010)</ref> introduces sparse polynomial regression to predict execution time of programs by using a set of hand-crafted features of high level programs. <ref type="bibr" target="#b9">Dubach et al. (2007)</ref> uses neural networks with hand-crafted features to estimate the speedup between two code sequences. Ga-meTime <ref type="bibr" target="#b35">(Seshia &amp; Kotker, 2011;</ref><ref type="bibr" target="#b36">Seshia &amp; Rakhlin, 2012)</ref> uses SMT solvers to generate inputs and game theoretic approaches to predict the distribution of runtimes of programs.</p><p>These models require manual feature engineering, and runtime predictions are done at a coarser granularity (e.g. at the full program level). In contrast, Ithemal automatically learns how to predict throughput of basic blocks with minimal architectural knowledge embedded into the model.</p><p>Microarchitectural Predictions Similar to basic block throughput estimation, various microarchitectural prediction tasks have been explored with machine learning. For example, RNN models can be used for predicting memory access <ref type="bibr" target="#b14">(Hashemi et al., 2018)</ref>, and perceptron models can be used for branch prediction <ref type="bibr" target="#b19">(Jimenez &amp; Lin, 2001)</ref> 8 Conclusion</p><p>We present Ithemal, a data-driven system for basic block throughput estimation. Ithemal's accuracy surpasses that of state-of-the-art, hand-written analytical models; it achieves its accuracy by leveraging a deep neural network designed to capture the behavior of modern processors. Ithemal demonstrates that future compilation and performance engineering tools can be augmented with data-driven approaches to improve their performance and portability, while minimizing developer effort.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 .</head><label>2</label><figDesc>Figure 2. Heatmaps for measured and predicted throughput values under different models for basic blocks with measured throughput values less than 1000 cycles (Haswell)</figDesc><graphic url="image-1.png" coords="6,57.93,77.02,160.38,130.73" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 .</head><label>3</label><figDesc>Figure 3. Average error across throughputs for different estimation methods for basic blocks with throughput values less than 1000 cycles (Haswell)</figDesc><graphic url="image-5.png" coords="6,307.44,563.78,234.00,74.47" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 5 .</head><label>5</label><figDesc>Figure 5. Learning curves for the models</figDesc><graphic url="image-6.png" coords="8,55.44,67.06,234.01,136.83" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 .</head><label>1</label><figDesc>Example</figDesc><table><row><cell>x86-64 assembly code sequences (Intel syntax)</cell></row><row><cell>and associated throughput predictions, in clock cycles</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 2 .</head><label>2</label><figDesc>Composition of the dataset for Haswell, showing the total number of basic blocks per benchmark as well as the unique number of blocks after de-duplicating repeated blocks on a per-benchmark basis. Note that the #Unique Blocks on the full dataset is not equal to the sum of unique blocks per individual benchmark, as we de-duplicate across all benchmarks.</figDesc><table><row><cell></cell><cell>computer vision workloads including neural networks</cell><cell>6582</cell><cell>3968</cell></row><row><cell>simd (Ihar et al., 2018)</cell><cell>heavily hand vectorized image processing library (exposes lot of SSE2, AVX, AVX2 variants)</cell><cell>212544</cell><cell>25462</cell></row><row><cell>compilers/interpreters</cell><cell>clang (Lattner &amp; Adve, 2004) and different versions of python (2.7,3.5)</cell><cell>2746275</cell><cell>924663</cell></row><row><cell>end user applications</cell><cell>gimp filters, firefox, open-office, rhythmbox, etc.</cell><cell>83555</cell><cell>35513</cell></row><row><cell>Full Dataset</cell><cell></cell><cell>4237712</cell><cell>1416473</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 4</head><label>4</label><figDesc></figDesc><table><row><cell>Micro-</cell><cell>Method</cell><cell>Error</cell><cell>Spearman</cell><cell>Pearson</cell></row><row><cell>architecture</cell><cell></cell><cell></cell><cell>Correlation</cell><cell>Corr.</cell></row><row><cell cols="3">Ivy Bridge llvm-mca 0.181</cell><cell>0.902</cell><cell>0.777</cell></row><row><cell></cell><cell>Ithemal</cell><cell>0.089</cell><cell>0.955</cell><cell>0.913</cell></row><row><cell>Haswell</cell><cell cols="2">llvm-mca 0.200</cell><cell>0.890</cell><cell>0.790</cell></row><row><cell></cell><cell>IACA</cell><cell>0.209</cell><cell>0.917</cell><cell>0.833</cell></row><row><cell></cell><cell>Ithemal</cell><cell>0.089</cell><cell>0.960</cell><cell>0.918</cell></row><row><cell>Skylake</cell><cell cols="2">llvm-mca 0.239</cell><cell>0.852</cell><cell>0.729</cell></row><row><cell></cell><cell>IACA</cell><cell>0.167</cell><cell>0.926</cell><cell>0.835</cell></row><row><cell></cell><cell>Ithemal</cell><cell>0.079</cell><cell>0.960</cell><cell>0.895</cell></row></table><note>presents the results of our evaluation of estimator throughput: the number of instructions able to be timed per second for each estimator. We calculate this by measuring</note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head>Table 3 .</head><label>3</label><figDesc>Average error for different models and microarchitectures</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_7"><head>Table 4 .</head><label>4</label><figDesc>Estimation throughputs for different estimators measured in instructions per second</figDesc><table><row><cell>Method</cell><cell>Throughput (Instructions / second)</cell></row><row><cell>llvm-mca</cell><cell>492</cell></row><row><cell>IACA</cell><cell>541</cell></row><row><cell>Ithemal</cell><cell>560</cell></row><row><cell>Empirical execution</cell><cell>13</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="3" xml:id="foot_0">Note that -following convention -we define throughput to be the number of clock cycles taken to execute a basic block; this is actually the reciprocal of the standard definition of throughput. We also report throughput for 100 iterations of a given basic block.</note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="4" xml:id="foot_1">https://www.agner.org/optimize/testp.zip</note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgments</head><p>We would like to thank Yishen Chen, Ajay Brahmakshatriya for their help in creating the datasets, and all reviewers for insightful comments and suggestions. We would also like to thank Ondřej Sýkora and Jon Orwant for their many helpful discussions. This research was supported by DARPA D3M Award #FA8750-17-2-0126, NSF Grant CCF-1751011, DARPA/Nvidia Symphony Award #HR0011-18-3-0007 and DARPA Award #HR001118C0059. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the authors and do not necessarily reflect the views of the funding agencies.</p></div>
+			</div>
+
+
+			<div type="funding">
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>2019 by the author(s). 1  In this work, we focus specifically on basic blocks, sequences of instructions with no branches or jumps.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Parallel program performance prediction using deterministic task graph analysis</title>
+		<author>
+			<persName><forename type="first">V</forename><forename type="middle">S</forename><surname>Adve</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">K</forename><surname>Vernon</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/966785.966788</idno>
+		<ptr target="http://doi.acm.org/10.1145/966785.966788" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Trans. Comput. Syst</title>
+		<idno type="ISSN">0734-2071</idno>
+		<imprint>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="94" to="136" />
+			<date type="published" when="2004-02">February 2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Learning to represent programs with graphs</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Allamanis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Brockschmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Khademi</surname></persName>
+		</author>
+		<ptr target="https://openreview.net/forum?id=BJOFETxR-" />
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Learning Representations</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title level="m" type="main">Hierarchical boundary-aware neural encoder for video captioning</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Baraldi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Grana</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Cucchiara</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Predicting the performance of parallel programs</title>
+		<author>
+			<persName><forename type="first">V</forename><surname>Blanco</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>González</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>León</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Rodrıguez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Rodrıguez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Printista</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Parallel Computing</title>
+		<imprint>
+			<biblScope unit="volume">30</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="337" to="356" />
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Transparent dynamic instrumentation</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bruening</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2151024.2151043</idno>
+		<ptr target="http://doi.acm.org/10.1145/2151024.2151043" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 8th ACM SIGPLAN/SIGOPS Conference on Virtual Execution Environments, VEE &apos;12</title>
+				<meeting>the 8th ACM SIGPLAN/SIGOPS Conference on Virtual Execution Environments, VEE &apos;12<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="133" to="144" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">A first-order fine-grained multithreaded throughput model</title>
+		<author>
+			<persName><forename type="first">X</forename><forename type="middle">E</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">M</forename><surname>Aamodt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-15 2009. IEEE 15th International Symposium on High Performance Computer Architecture</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="page" from="329" to="340" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<title level="m" type="main">Hierarchical multiscale recurrent neural networks</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno>ICLR&apos;17</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Linguistic Knowledge as Memory for Recurrent Neural Networks</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Dhingra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">W</forename><surname>Cohen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017-03">March 2017</date>
+		</imprint>
+	</monogr>
+	<note>ArXiv e-prints</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">A</forename><surname>Di Biagio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Llvm-Mca</surname></persName>
+		</author>
+		<ptr target="https://lists.llvm.org/pipermail/llvm-dev/2018-March/121490.html" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Fast compiler optimisation evaluation using code-feature based performance prediction</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Dubach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Cavazos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Franke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Fursin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">F</forename><surname>O'boyle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Temam</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1242531.1242553</idno>
+		<ptr target="http://doi.acm.org/10.1145/1242531.1242553" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 4th International Conference on Computing Frontiers, CF &apos;07</title>
+				<meeting>the 4th International Conference on Computing Frontiers, CF &apos;07<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="131" to="142" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Hierarchical recurrent neural networks for long-term dependencies</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>El Hihi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<ptr target="http://dl.acm.org/citation.cfm?id=2998828.2998898" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 8th International Conference on Neural Information Processing Systems, NIPS&apos;95</title>
+				<meeting>the 8th International Conference on Neural Information Processing Systems, NIPS&apos;95<address><addrLine>Cambridge, MA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>MIT Press</publisher>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="page" from="493" to="499" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">A static parameter based performance prediction tool for parallel programs</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Fahringer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">P</forename><surname>Zima</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 7th international conference on Supercomputing</title>
+				<meeting>the 7th international conference on Supercomputing</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="1993">1993</date>
+			<biblScope unit="page" from="207" to="219" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Reliable and precise wcet determination for a reallife processor</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Ferdinand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Heckmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Langenbach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Martin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Schmidt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Theiling</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Thesing</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Wilhelm</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Workshop on Embedded Software</title>
+				<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="469" to="485" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Bounds for the mean runtime of parallel programs</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Hartleb</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Mertsiotakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Sixth International Conference on Modelling Techniques and Tools for Computer Performance Evaluation</title>
+				<meeting>the Sixth International Conference on Modelling Techniques and Tools for Computer Performance Evaluation</meeting>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="volume">92</biblScope>
+			<biblScope unit="page" from="197" to="210" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Learning memory access patterns</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hashemi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Swersky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">A</forename><surname>Smith</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Ayers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<ptr target="http://proceedings.mlr.press/v80/hashemi18a.html" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 35th International Conference on Machine Learning, ICML 2018</title>
+				<meeting>the 35th International Conference on Machine Learning, ICML 2018<address><addrLine>Stockholmsmässan, Stockholm, Sweden</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2018">July 10-15, 2018. 2018</date>
+			<biblScope unit="page" from="1924" to="1933" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Long short-term memory</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Hochreiter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Schmidhuber</surname></persName>
+		</author>
+		<idno type="DOI">10.1162/neco.1997.9.8.1735</idno>
+		<ptr target="http://dx.doi.org/10.1162/neco.1997.9.8.1735" />
+	</analytic>
+	<monogr>
+		<title level="j">Neural Comput</title>
+		<idno type="ISSN">0899-7667</idno>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<biblScope unit="page" from="1735" to="1780" />
+			<date type="published" when="1997">1997</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Predicting execution time of computer programs using sparse polynomial regression</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Gon Chun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Maniatis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Naik</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<editor>
+			<persName><forename type="first">J</forename><forename type="middle">D</forename><surname>Lafferty</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">C</forename><forename type="middle">K I</forename><surname>Williams</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">J</forename><surname>Shawe-Taylor</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">R</forename><forename type="middle">S</forename><surname>Zemel</surname></persName>
+		</editor>
+		<editor>
+			<persName><forename type="first">A</forename><surname>Culotta</surname></persName>
+		</editor>
+		<imprint>
+			<publisher>Curran Associates, Inc</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="volume">23</biblScope>
+			<biblScope unit="page" from="883" to="891" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Simd library for image processing</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Ihar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mikhail</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Andrey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Fedorov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Matsaberydze</surname></persName>
+		</author>
+		<ptr target="http://ermig1979.github.io/Simd/index.html" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">Intel architecture code analyzer</title>
+		<author>
+			<persName><surname>Intel</surname></persName>
+		</author>
+		<ptr target="https://software.intel.com/en-us/articles/intel-architecture-code-analyzer" />
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Dynamic branch prediction with perceptrons</title>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Jimenez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2001.903263</idno>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings HPCA Seventh International Symposium on High-Performance Computer Architecture</title>
+				<meeting>HPCA Seventh International Symposium on High-Performance Computer Architecture</meeting>
+		<imprint>
+			<date type="published" when="2001-01">Jan 2001</date>
+			<biblScope unit="page" from="197" to="206" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Llvm: A compilation framework for lifelong program analysis &amp; transformation</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Lattner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Adve</surname></persName>
+		</author>
+		<ptr target="http://dl.acm.org/citation.cfm?id=977395.977673" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the International Symposium on Code Generation and Optimization: Feedback-directed and Runtime Optimization, CGO &apos;04</title>
+				<meeting>the International Symposium on Code Generation and Optimization: Feedback-directed and Runtime Optimization, CGO &apos;04<address><addrLine>Washington, DC, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page">75</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Automated instruction stream throughput prediction for intel and amd microarchitectures</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Laukemann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hammer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hofmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Hager</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Wellein</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PMBS.2018.8641578</idno>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE/ACM Performance Modeling</title>
+		<imprint>
+			<biblScope unit="page" from="121" to="131" />
+			<date type="published" when="2018-11">2018. Nov 2018</date>
+		</imprint>
+	</monogr>
+	<note>Benchmarking and Simulation of High Performance Computer Systems (PMBS)</note>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Chronos: A timing analyzer for embedded software</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Mitra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Roychoudhury</surname></persName>
+		</author>
+		<idno type="DOI">org/10.1016/j.scico.2007.01.014</idno>
+		<ptr target="http://www.sciencedirect.com/science/article/pii/S0167642307001633" />
+	</analytic>
+	<monogr>
+		<title level="j">Science of Computer Programming</title>
+		<idno type="ISSN">0167-6423</idno>
+		<imprint>
+			<biblScope unit="volume">69</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="56" to="67" />
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+	<note>Special issue on Experimental Software and Toolkits</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Constraint-based register allocation and instruction scheduling</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">C</forename><surname>Lozano</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Carlsson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Drejhammar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Schulte</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Principles and Practice of Constraint Programming</title>
+				<editor>
+			<persName><forename type="first">M</forename><surname>Milano</surname></persName>
+		</editor>
+		<meeting><address><addrLine>Berlin, Heidelberg; Berlin Heidelberg</addrLine></address></meeting>
+		<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="750" to="766" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">An evaluation of vectorizing compilers</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Maleki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">J</forename><surname>Garzar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">A</forename><surname>Padua</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Parallel Architectures and Compilation Techniques (PACT)</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Scheduling straight-line code using reinforcement learning and rollouts</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Mcgovern</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Moss</surname></persName>
+		</author>
+		<ptr target="http://dl.acm.org/citation.cfm?id=340534.340836" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 1998 Conference on Advances in Neural Information Processing Systems II</title>
+				<meeting>the 1998 Conference on Advances in Neural Information Processing Systems II<address><addrLine>Cambridge, MA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>MIT Press</publisher>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="903" to="909" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<monogr>
+		<title level="m" type="main">Nas c benchmark suite 3.0, 1991-2014</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">S D</forename><surname>Nasa</surname></persName>
+		</author>
+		<ptr target="https://github.com/benchmark-subsetting/NPB3.0-omp-C/" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Hogwild!: A lock-free approach to parallelizing stochastic gradient descent</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Niu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Recht</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Re</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">J</forename><surname>Wright</surname></persName>
+		</author>
+		<ptr target="http://dl.acm.org/citation.cfm?id=2986459.2986537" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th International Conference on Neural Information Processing Systems, NIPS&apos;11</title>
+				<meeting>the 24th International Conference on Neural Information Processing Systems, NIPS&apos;11<address><addrLine>USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Curran Associates Inc</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="693" to="701" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Predicting program execution times by analyzing static and dynamic program paths</title>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">Y</forename><surname>Park</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Real-Time Systems</title>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="31" to="62" />
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Marss: a full system simulator for multicore x86 cpus</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Patel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Afram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ghose</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Design Automation Conference (DAC), 2011 48th ACM/EDAC/IEEE</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="1050" to="1055" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Cross-sentence n-ary relation extraction with graph lstms</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Peng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Poon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Quirk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Toutanova</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W.-T</forename><surname>Yih</surname></persName>
+		</author>
+		<ptr target="https://www.transacl.org/ojs/index.php/tacl/article/view/1028" />
+	</analytic>
+	<monogr>
+		<title level="j">Transactions of the Association for Computational Linguistics</title>
+		<idno type="ISSN">2307- 387X</idno>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<biblScope unit="page" from="101" to="115" />
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">The polyhedral benchmark suite</title>
+		<author>
+			<persName><forename type="first">L.-N</forename><surname>Pouchet</surname></persName>
+		</author>
+		<ptr target="http://web.cse.ohio-state" />
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">A stochastic approximation method</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Robbins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Monro</surname></persName>
+		</author>
+		<ptr target="http://www.jstor.org/stable/2236626" />
+	</analytic>
+	<monogr>
+		<title level="j">The Annals of Mathematical Statistics</title>
+		<idno type="ISSN">00034851</idno>
+		<imprint>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<biblScope unit="page" from="400" to="407" />
+			<date type="published" when="1951">1951</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Predicting the running times of parallel programs by simulation</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Rugina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Schauser</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ipps</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="1998">1998</date>
+			<biblScope unit="page">654</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Fast and accurate microarchitectural simulation of thousand-core systems</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zsim</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">In ACM SIGARCH Computer architecture news</title>
+		<imprint>
+			<biblScope unit="volume">41</biblScope>
+			<biblScope unit="page" from="475" to="486" />
+			<date type="published" when="2013">2013</date>
+			<publisher>ACM</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">A toolkit for timing analysis of software</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">A</forename><surname>Seshia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kotker</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gametime</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of Tools and Algorithms for the Construction and Analysis of Systems (TACAS)</title>
+				<meeting>Tools and Algorithms for the Construction and Analysis of Systems (TACAS)</meeting>
+		<imprint>
+			<date type="published" when="2011-03">March 2011</date>
+			<biblScope unit="page" from="388" to="392" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Quantitative analysis of systems using game-theoretic learning</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">A</forename><surname>Seshia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Rakhlin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Embedded Computing Systems (TECS)</title>
+		<imprint>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="issue">S2</biblScope>
+			<biblScope unit="page">55</biblScope>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<monogr>
+		<title level="m" type="main">Dagrecurrent neural networks for scene labeling</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Shuai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zuo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Wang</surname></persName>
+		</author>
+		<idno>CoRR, abs/1509.00552</idno>
+		<ptr target="http://arxiv.org/abs/1509.00552" />
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<ptr target="https://www.spec.org/cpu2006/" />
+		<title level="m">Spec cpu2006 benchmark suite</title>
+				<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<ptr target="https://www.spec.org/cpu2017/" />
+		<title level="m">Spec cpu2017 benchmark suite</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Meta optimization: Improving compiler heuristics with machine learning</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stephenson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Amarasinghe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Martin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O'</forename><surname>Reilly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">U.-M</forename></persName>
+		</author>
+		<idno type="DOI">10.1145/781131.781141</idno>
+		<ptr target="http://doi.acm.org/10.1145/781131.781141" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM SIGPLAN 2003 Conference on Programming Language Design and Implementation, PLDI &apos;03</title>
+				<meeting>the ACM SIGPLAN 2003 Conference on Programming Language Design and Implementation, PLDI &apos;03<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page" from="77" to="90" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">An instruction throughput model of superscalar processors</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">M</forename><surname>Taha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">S</forename><surname>Wills</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings. 14th IEEE International Workshop on</title>
+				<meeting>14th IEEE International Workshop on</meeting>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2003">2003. 2003</date>
+			<biblScope unit="page" from="156" to="163" />
+		</imprint>
+	</monogr>
+	<note>Rapid Systems Prototyping</note>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Sd-vbs: The san diego vision benchmark suite</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">K</forename><surname>Venkata</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Ahn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Jeon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Louie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Garcia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Belongie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">B</forename><surname>Taylor</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/IISWC.2009.5306794</idno>
+	</analytic>
+	<monogr>
+		<title level="m">2009 IEEE International Symposium on Workload Characterization (IISWC)</title>
+				<imprint>
+			<date type="published" when="2009-10">Oct 2009</date>
+			<biblScope unit="page" from="55" to="64" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Neural network-based graph embedding for crossplatform binary code similarity detection</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Yin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Song</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3133956.3134018</idno>
+		<ptr target="http://doi.acm.org/10.1145/3133956.3134018" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2017 ACM SIGSAC Conference on Computer and Communications Security, CCS &apos;17</title>
+				<meeting>the 2017 ACM SIGSAC Conference on Computer and Communications Security, CCS &apos;17<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="363" to="376" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Dag-structured long short-term memory for semantic compositionality</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sobhani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Guo</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2016 Conference of the North American Chapter</title>
+				<meeting>the 2016 Conference of the North American Chapter</meeting>
+		<imprint>
+			<publisher>Human Language Technologies</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="917" to="926" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

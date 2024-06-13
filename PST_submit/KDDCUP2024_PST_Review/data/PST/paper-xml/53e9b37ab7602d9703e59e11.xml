@@ -1,0 +1,979 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Speedy Transactions in Multicore In-Memory Databases</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Stephen</forename><surname>Tu</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Wenting</forename><surname>Zheng</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Eddie</forename><surname>Kohler</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Barbara</forename><surname>Liskov</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Samuel</forename><surname>Madden</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Mit</forename><surname>Csail</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Harvard</forename><surname>University</surname></persName>
+						</author>
+						<title level="a" type="main">Speedy Transactions in Multicore In-Memory Databases</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/2517349.2522713</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T12:37+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Silo is a new in-memory database that achieves excellent performance and scalability on modern multicore machines. Silo was designed from the ground up to use system memory and caches efficiently. For instance, it avoids all centralized contention points, including that of centralized transaction ID assignment. Silo's key contribution is a commit protocol based on optimistic concurrency control that provides serializability while avoiding all shared-memory writes for records that were only read. Though this might seem to complicate the enforcement of a serial order, correct logging and recovery is provided by linking periodically-updated epochs with the commit protocol. Silo provides the same guarantees as any serializable database without unnecessary scalability bottlenecks or much additional latency. Silo achieves almost 700,000 transactions per second on a standard TPC-C workload mix on a 32-core machine, as well as near-linear scalability. Considered per core, this is several times higher than previously reported results.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Thanks to drastic increases in main memory sizes and processor core counts for server-class machines, modern high-end servers can have several terabytes of RAM and 80 or more cores. When used effectively, this is enough processing power and memory to handle data sets and computations that used to be spread across many disks and machines. However, harnassing this power is tricky; even single points of contention, like compare-andswaps on a shared-memory word, can limit scalability.</p><p>This paper presents Silo, a new main-memory database that achieves excellent performance on multicore machines. We designed Silo from the ground up to use system memory and caches efficiently. We avoid all centralized contention points and make all synchro-Permission to make digital or hard copies of part or all of this work for personal or classroom use is granted without fee provided that copies are not made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for third-party components of this work must be honored. For all other uses, contact the Owner/Author.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>nization scale with the data, allowing larger databases to support more concurrency.</p><p>Silo uses a Masstree-inspired tree structure for its underlying indexes. Masstree <ref type="bibr" target="#b22">[23]</ref> is a fast concurrent Btree-like structure optimized for multicore performance. But Masstree only supports non-serializable, single-key transactions, whereas any real database must support transactions that affect multiple keys and occur in some serial order. Our core result, the Silo commit protocol, is a minimal-contention serializable commit protocol that provides these properties.</p><p>Silo uses a variant of optimistic concurrency control (OCC) <ref type="bibr" target="#b17">[18]</ref>. An OCC transaction tracks the records it reads and writes in thread-local storage. At commit time, after validating that no concurrent transaction's writes overlapped with its read set, the transaction installs all written records at once. If validation fails, the transaction aborts. This approach has several benefits for scalability. OCC writes to shared memory only at commit time, after the transaction's compute phase has completed; this short write period reduces contention. And thanks to the validation step, read-set records need not be locked. This matters because the memory writes required for read locks can induce contention <ref type="bibr" target="#b10">[11]</ref>.</p><p>Previous OCC implementations are not free of scaling bottlenecks, however, with a key reason being the requirement for tracking "anti-dependencies" (write-afterread conflicts). Consider a transaction t 1 that reads a record from the database, and a concurrent transaction t 2 that overwrites the value t 1 saw. A serializable system must order t 1 before t 2 even after a potential crash and recovery from persistent logs. To achieve this ordering, most systems require that t 1 communicate with t 2 , such as by posting its read sets to shared memory or via a centrally-assigned, monotonically-increasing transaction ID <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b18">19]</ref>. Some non-serializable systems can avoid this communication, but they suffer from anomalies like snapshot isolation's "write skew" <ref type="bibr" target="#b1">[2]</ref>.</p><p>Silo provides serializability while avoiding all sharedmemory writes for read transactions. The commit protocol was carefully designed using memory fences to scalably produce results consistent with a serial order. This leaves the problem of correct recovery, which we solve using a form of epoch-based group commit. Time is divided into a series of short epochs. Even though transaction results always agree with a serial order, the system does not explicitly know the serial order except across epoch boundaries: if t 1 's epoch is before t 2 's, then t 1 precedes t 2 in the serial order. The system logs transactions in units of whole epochs and releases results to clients at epoch boundaries. As a result, Silo provides the same guarantees as any serializable database without unnecessary scalability bottlenecks or much additional latency. Epochs have other benefits as well; for example, we use them to provide database snapshots that long-lived readonly transactions can use to reduce aborts.</p><p>On a single 32-core machine, Silo achieves roughly 700,000 transactions per second on the standard TPC-C benchmark for online transaction processing (OLTP). This is about 22,000 transactions per second per core. Per-core transaction throughput at 32 cores is 91% of that at 8 cores, a small drop indicating that Silo scales well. For context, the database literature for highperformance in-memory OLTP systems cites per-core TPC-C throughput at least several times lower than Silo's <ref type="bibr" target="#b15">[16,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28]</ref>, and benchmarks on our hardware with a commercial main-memory database system perform at most 3,000 transactions per second per core.</p><p>An important Silo design choice is its shared-memory store: any database worker can potentially access the whole database. Several recent main-memory database designs instead use data partitioning, in which database workers effectively own subsets of the data <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b31">32]</ref>. Partitioning can shrink table sizes and avoids the expense of managing fine-grained locks, but works best when the query load matches the partitioning. To understand the tradeoffs, we built and evaluated a partitioned variant of Silo. Partitioning performs better for some workloads, but a shared-memory design wins when cross-partition transactions are frequent or partitions are overloaded.</p><p>Silo assumes a one-shot request model in which all parameters for each client request are available at the start, and requests always complete without further client interaction. This model is well-suited for OLTP workloads. If high-latency client communication were part of a transaction, the likelihood of abort due to concurrent updates would grow.</p><p>Our performance is higher than a full system would observe since our clients do not currently use the network. (In Masstree, network communication reduced throughput by 23% <ref type="bibr" target="#b22">[23]</ref>; we would expect a similar reduction for key-value workloads, less for workloads with more computation-heavy transactions.) Nevertheless, our experiments show that Silo has very high performance, that transactions can be serialized without contention, and that cache-friendly design principles work well for shared-memory serializable databases.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Related work</head><p>A number of recent systems have proposed storage abstractions for main-memory and multicore systems. These can be broadly classified according to whether or not they provide transactional support.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Non-transactional systems</head><p>The non-transactional system most related to Silo is Masstree <ref type="bibr" target="#b22">[23]</ref>, an extremely scalable and highthroughput main-memory B + -tree. Masstree uses techniques such as version validation instead of read locks and efficient fine-grained locking algorithms. It builds on several prior trees, including OLFIT <ref type="bibr" target="#b3">[4]</ref>, Bronson et al. <ref type="bibr" target="#b2">[3]</ref>, and B link -trees <ref type="bibr" target="#b19">[20]</ref>, and adds new techniques, including a trie-like structure that speeds up key comparisons. Silo's underlying concurrent B + -tree implementation was inspired by Masstree.</p><p>PALM <ref type="bibr" target="#b30">[31]</ref> is another high-throughput B + -tree structure designed for multicore systems. It uses a batching technique, extensive prefetching, and intra-core SIMD parallelism to provide extremely high throughput. PALM's techniques could potentially speed up Silo's tree operations.</p><p>The Bw-tree <ref type="bibr" target="#b20">[21]</ref> is a high-throughput multiversion tree structure optimized for multicore flash storage. New versions of data are installed using delta records and compare-and-swaps on a mapping table; there are no locks or overwrites (we found both helpful for performance). Silo's data structures are designed for main memory, whereas many of the Bw-tree's structures are designed for flash. Like Silo, the Bw-tree uses RCUstyle epochs for garbage collection; Silo's epochs also support scalable serializable logging and snapshots. LLAMA <ref type="bibr" target="#b21">[22]</ref> adds support for transactional logging, but its logger is centralized.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Transactional systems</head><p>Silo uses optimistic concurrency control <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b17">18]</ref>, which has several advantages on multicore machines, including a relatively short period of contention. However, OCC and its variants (e.g., <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b33">34]</ref>) often induce contention in the commit phase, such as centralized transaction ID assignment or communication among all concurrently executing transactions.</p><p>Larson et al. <ref type="bibr" target="#b18">[19]</ref> recently revisited the performance of locking and OCC-based multi-version concurrency control (MVCC) systems versus that of traditional single-copy locking systems in the context of multicore main-memory databases. Their OCC implementation exploits MVCC to avoid installing writes until commit time, and avoids many of the centralized critical sections present in classic OCC. These techniques form the basis for concurrency control in Hekaton <ref type="bibr" target="#b7">[8]</ref>, the mainmemory component of SQL Server. However, their de-sign lacks many of the multicore-specific optimizations of Silo. For example, it has a global critical section when assigning timestamps, and reads must perform non-local memory writes to update other transactions' dependency sets. It performs about 50% worse on simple key-value workloads than a single-copy locking system even under low levels of contention, whereas Silo's OCC-based implementation is within a few percent of a key-value system for small key-value workloads.</p><p>Several recent transactional systems for multicores have proposed partitioning as the primary mechanism for scalability. DORA <ref type="bibr" target="#b24">[25]</ref> is a locking-based system that partitions data and locks among cores, eliminating long chains of lock waits on a centralized lock manager and increasing cache affinity. Though this does improve scalability, overall the performance gains are modestabout 20% in most cases-compared to a locking system. Additionally, in some cases, this partitioning can cause the system to perform worse than a conventional system when transactions touch many partitions.</p><p>PLP <ref type="bibr" target="#b25">[26]</ref> is follow-on work to DORA. In PLP, the database is physically partitioned among many trees such that only a single thread manages a tree. The partitioning scheme is flexible, and thus requires maintaining a centralized routing table. As in DORA, running a transaction requires decomposing it into a graph of actions that each run against a single partition; this necessitates the use of rendezvous points, which are additional sources of contention. The authors only demonstrate a modest improvement over a two-phase locking (2PL) implementation.</p><p>H-Store <ref type="bibr" target="#b31">[32]</ref> and its commercial successor VoltDB employ an extreme form of partitioning, treating each partition as a separate logical database even when partitions are collocated on the same physical node. Transactions local to a single partition run without locking at all, and multi-partition transactions are executed via the use of whole-partition locks. This makes single-partition transactions extremely fast, but creates additional scalability problems for multi-partition transactions. We compare Silo to a partitioned approach and confirm the intuition that this partitioning scheme is effective with few multi-partition transactions, but does not scale well in the presence of many such transactions.</p><p>Multimed <ref type="bibr" target="#b29">[30]</ref> runs OLTP on a single multicore machine by running multiple database instances on separate cores in a replicated setup. A single master applies all writes and assigns a total order to all updates, which are then applied asynchronously at the read-only replicas. Multimed only enforces snapshot isolation, a weaker notion of consistency than serializability. Read scalability is achieved at the expense of keeping multiple copies of the data, and write-heavy workloads eventually bottleneck on the master.</p><p>In Silo, we eliminate the bottleneck of a centralized lock manager by co-locating locks with each record. VLL <ref type="bibr" target="#b28">[29]</ref> also adopts this approach, but is not focused on optimizing for multicore performance. Shore-MT <ref type="bibr" target="#b14">[15]</ref>, Jung et al. <ref type="bibr" target="#b16">[17]</ref>, and Horikawa [14] take traditional disk-and 2PL-based relational database systems and improve multicore scalability by removing centralized locking and latching bottlenecks. However, 2PL's long locking periods and requirement for read locking introduce inherent scalability concerns on multicore architectures.</p><p>Porobic et al. <ref type="bibr" target="#b27">[28]</ref> perform a detailed performance analysis of shared-nothing versus shared-everything OLTP on a single multicore machine, and conclude that shared-nothing configurations are preferable due to the effects of non-uniform memory accesses (NUMA). Our results argue otherwise.</p><p>Snapshot transactions like Silo's have been implemented before, including in distributed transactional systems <ref type="bibr" target="#b6">[7]</ref>. Our implementation offers very recent snapshots and tightly integrates with our epoch system.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Transactional memory</head><p>Silo's goals (fast transactions on an in-memory database) resemble those of a software transactional memory system (fast transactions on arbitrary memory). Recent STM systems, including TL2 <ref type="bibr" target="#b8">[9]</ref>, are based on optimistic concurrency control and maintain read and write sets similar to those in OCC databases. Some STM implementation techniques, such as read validation and collocation of lock bits and versions, resemble Silo's. (Many of these ideas predate STM.) Other STM implementation techniques are quite different, and overall Silo has more in common with databases than STMs. Our durability concerns are irrelevant in STMs; Silo's database structures are designed for efficient locking and concurrency, whereas STM deals with an arbitrary memory model.</p><p>STM would not be an appropriate implementation technique for Silo. Our transactions access many shared memory words with no transactionally relevant meaning, such as nodes in the interior of the tree. Unlike STM systems, Silo can distinguish relevant from irrelevant modifications. Ignoring irrelevant modifications is critical for avoiding unnecessary aborts. Finally, we know of no STM that beats efficient locking-based code.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Architecture</head><p>Silo is a relational database that provides tables of typed, named records. Its clients issue one-shot requests: all parameters are available when a request begins, and the request does not interact with its caller until it completes. One-shot requests are powerful; each consists of one or more serializable database transactions that may include arbitrary application logic. We write one-shot requests in C++, with statements to read and manipulate the Silo database directly embedded. Of course a oneshot request could also be written in SQL (although we have not implemented that). Supporting only one-shot requests allows us to avoid the potential for stalls that is present when requests involve client interaction.</p><p>Silo tables are implemented as collections of index trees, including one primary tree and zero or more secondary trees per table (see Figure <ref type="figure" target="#fig_0">1</ref>). Each record in a table is stored in a separately-allocated chunk of memory pointed to by the table's primary tree. To access a record by primary key, Silo walks the primary tree using that key. Primary keys must be unique, so if a table has no natural unique primary key, Silo will invent one. In secondary indexes, the index key maps to a secondary record that contains the relevant record's primary key(s). Thus, looking up a record by a secondary index requires two tree accesses. All keys are treated as strings. This organization is typical of databases.</p><p>Each index tree is stored in an ordered key-value structure based on Masstree <ref type="bibr" target="#b22">[23]</ref>. Masstree read operations never write to shared memory; instead, readers coordinate with writers using version numbers and fencebased synchronization. Compared to other concurrent B-trees <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b30">31]</ref>, Masstree adopts some aspects of tries, which optimizes key comparisons. Each Masstree leaf contains information about a range of keys, but for keys in that range, the leaf may point either directly to a record or to a lower-level tree where the search can be continued. Although our implementation uses tree structures, our commit protocol is easily adaptable to other index structures such as hash tables.</p><p>Each one-shot request is dispatched to a single database worker thread, which carries out the request to completion (commit or abort) without blocking. We run one worker thread per physical core of the server machine, and have designed Silo to scale well on modern multicore machines with tens of cores. Because trees are stored in (shared) main memory, in Silo any worker can access the entire database.</p><p>Although the primary copy of data in Silo is in main memory, transactions are made durable via logging to stable storage. Results are not returned to users until they are durable.</p><p>Read-only transactions may, at the client's discretion, run on a recent consistent snapshot of the database instead of its current state. These snapshot transactions return slightly stale results, but never abort due to concurrent modification.  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Design</head><p>This section describes how we execute transactions in Silo. Our key organizing principle is to eliminate unnecessary contention by reducing writes to shared memory. Our variant of OCC achieves serializability, even after recovery, using periodically-updated epochs; epoch boundaries form natural serialization points. Epochs also help make garbage collection efficient and enable snapshot transactions. Several design choices, such as transaction ID design, record overwriting, and range query support, simplify and speed up transaction execution further, and the decentralized durability subsystem also avoids contention. In the rest of this section we describe the fundamentals of our design (epochs, transaction IDs, and record layout), then present the commit protocol and explain how database operations are implemented. Later subsections describe garbage collection, snapshot transaction execution, and durability support.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Epochs</head><p>Silo is based on time periods called epochs, which are used to ensure serializable recovery, to remove garbage (e.g., due to deletes), and to provide read-only snapshots.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Each epoch has an epoch number.</head><p>A global epoch number E is visible to all threads. A designated thread periodically advances E; other threads access E while committing transactions. E should advance frequently, since the epoch period affects transaction latency, but epoch change should be rare compared to transaction duration so that the value of E is generally cached. Our implementation updates E once every 40 ms; shorter epochs would also work. No locking is required to handle E.</p><p>Each worker w also maintains a local epoch number e w . This can lag behind E while the worker computes, and is used to determine when it is safe to collect garbage. Silo requires that E and e w never diverge too far: E − e w ≤ 1 for all w. This is not usually a problem since transactions are short, but if a worker does fall behind, the epoch-advancing thread delays its epoch update. Workers running very long transactions should periodically refresh their e w values to ensure the system makes progress.</p><p>Snapshot transactions use additional epoch variables described below.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Transaction IDs</head><p>Silo concurrency control centers on transaction IDs, or TIDs, which identify transactions and record versions, serve as locks, and detect conflicts. Each record contains the TID of the transaction that most recently modified it.</p><p>TIDs are 64-bit integers. The high bits of each TID contain an epoch number, which equals the global epoch at the corresponding transaction's commit time. The middle bits distinguish transactions within the same epoch. The lower three bits are the status bits described below. We ignore wraparound, which is rare.</p><p>Unlike many systems, Silo assigns TIDs in a decentralized fashion. A worker chooses a transaction's TID only after verifying that the transaction can commit. At that point, it calculates the smallest number that is (a) larger than the TID of any record read or written by the transaction, (b) larger than the worker's most recently chosen TID, and (c) in the current global epoch. The result is written into each record modified by the transaction.</p><p>The TID order often reflects the serial order, but not always. Consider transactions t 1 and t 2 where t 1 happened first in the serial order. If t 1 wrote a tuple that t 2 observed (by reading it or overwriting it), then t 2 's TID must be greater than t 1 's, thanks to (a) above. However, TIDs do not reflect anti-dependencies (write-after-read conflicts). If t 1 merely observed a tuple that t 2 later overwrote, t 1 's TID might be either less than or greater than t 2 's! Nevertheless, the TIDs chosen by a worker increase monotonically and agree with the serial order, the TIDs assigned to a particular record increase monotonically and agree with the serial order, and the ordering of TIDs with different epochs agrees with the serial order.</p><p>The lower three bits of each TID word are status bits that are logically separate from the TID itself. Including these bits with the TIDs simplifies concurrency control; for example, Silo can update a record's version and unlock the record in one atomic step. The bits are a lock bit, a latest-version bit, and an absent bit. The lock bit protects record memory from concurrent updates; in database terms it is a latch, a short-term lock that protects memory structures. The latest-version bit is 1 when a record holds the latest data for the corresponding key. When a record is superseded (for instance, when an obsolete record is saved temporarily for snapshot transactions), the bit is turned off. Finally, the absent bit marks the record as equivalent to a nonexistent key; such records are created in our implementations of insert and remove.</p><p>We use "TID" to refer to a pure transaction ID and "TID word" for a TID plus status bits, including the lock.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Data layout</head><p>A record in Silo contains the following information:</p><p>• A TID word as above.</p><p>• A previous-version pointer. The pointer is null if there is no previous version. The previous version is used to support snapshot transactions ( §4.9).</p><p>• The record data. When possible, the actual record data is stored in the same cache line as the record header, avoiding an additional memory fetch to access field values.</p><p>Committed transactions usually modify record data in place. This speeds up performance for short writes, mainly by reducing the memory allocation overhead for record objects. However, readers must then use a version validation protocol to ensure that they have read a consistent version of each record's data ( §4.5).</p><p>Excluding data, records are 32 bytes on our system.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Commit protocol</head><p>We now describe how we run transactions. We first discuss transactions that only read and update existing keys. We describe how to handle inserts and deletes in §4.5 and range queries in §4.6. As a worker runs a transaction, it maintains a read-set that identifies all records that were read, along with the TID of each record at the time it was accessed. For modified records, it maintains a write-set that stores the new state of the record (but not the previous TID). Records that were both read and modified occur in both the readset and the write-set. In normal operation, all records in the write-set also occur in the read-set.</p><p>On transaction completion, a worker attempts to commit using the following protocol (see Figure <ref type="figure" target="#fig_1">2</ref>).</p><p>In Phase 1, the worker examines all records in the transaction's write-set and locks each record by acquiring the record's lock bit. To avoid deadlocks, workers lock records in a global order. Any deterministic global order is fine; Silo uses the pointer addresses of records.</p><p>After all write locks are acquired, the worker takes a snapshot of the global epoch number using a single memory access. Fences are required to ensure that this read goes to main memory (rather than an out-of-date  cache), happens logically after all previous memory accesses, and happens logically before all following memory accesses. On x86 and other TSO (total store order) machines, however, these fences are compiler fences that do not affect compiled instructions; they just prevent the compiler from moving code aggressively. The snapshot of the global epoch number is the serialization point for transactions that commit.</p><p>In Phase 2, the worker examines all the records in the transaction's read-set (which may contain some records that were both read and written). If some record either has a different TID than that observed during execution, is no longer the latest version for its key, or is locked by a different transaction, the transaction releases its locks and aborts.</p><p>If the TIDs of all read records are unchanged, the transaction is allowed to commit, because we know that all its reads are consistent. The worker uses the snapshot of the global epoch number taken in Phase 1 to assign the transaction a TID as described in §4.2.</p><p>Finally, in Phase 3, the worker writes its modified records to the tree and updates their TIDs to the transaction ID computed in the previous phase. Each lock can be released immediately after its record is written. Silo must ensure that the new TID is visible as soon as the lock is released; this is simple since the TID and lock share a word and can be written atomically.</p><p>Serializability This protocol is serializable because (1) it locks all written records before validating the TIDs</p><formula xml:id="formula_0">Thread 1 Thread 2 t 1 ← read(x) t 2 ← read(y) write(y ← t 1 + 1) write(x ← t 2 + 1)</formula><p>Figure <ref type="figure">3</ref>: A read-write conflict between transactions.</p><p>of read records, (2) it treats locked records as dirty and aborts on encountering them, and (3) the fences that close Phase 1 ensure that TID validation sees all concurrent updates. We argue its serializability by reduction to strict two-phase locking (S2PL): if our OCC validation protocol commits, then so would S2PL. To simplify the explanation, assume that the write-set is a subset of the read-set. S2PL acquires read locks on all records read (which, here, includes all records written) and releases them only after commit. Consider a record in the read-set. We verify in Phase 2 that the record's TID has not changed since its original access, and that the record is not locked by any other transaction. This means that S2PL would have been able to obtain a read lock on that record and hold it up to the commit point. For updated records, S2PL can be modeled as upgrading shared read locks to exclusive write locks at commit time. Our protocol obtains exclusive locks for all written records in Phase 1, then in Phase 2 verifies that this is equivalent to a read lock that was held since the first access and then upgraded. The fences that close Phase 1 ensure that the version checks in Phase 2 access records' most recent TID words.</p><p>The protocol also ensures that epoch boundaries agree with the serial order. Specifically, committed transactions in earlier epochs never transitively depend on transactions in later epochs. This holds because the memory fences ensure that all workers load the latest version of E before read validation and after write locking. Placing the load before read validation ensures that committed transactions' readand node-sets never contain data from later epochs; placing it after write locking ensures that all transactions in later epochs would observe at least the lock bits acquired in Phase 1. Thus, epochs obey both dependencies and anti-dependencies.</p><p>For example, consider two records x and y that both start out with value zero. Given the two transactions shown in Figure <ref type="figure">3</ref>, the state x = y = 1 is not a valid serializable outcome. We illustrate why this final state is impossible in Silo. For it to occur, thread 1 must read x = 0, thread 2 must read y = 0, and both threads must commit. So assume that thread 1 reads x = 0 and commits, which means that thread 1's Phase 2 validation verified that x was unlocked and unchanged. Since thread 2 locks x as part of its Phase 1, we know then that thread 2's serialization point follows thread 1's. Thus, thread 2 will observe either thread 1's lock on y (which was acquired before thread 1's serialization point) or a new version number for y. It will either set y ← 2 or abort.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5">Database operations</head><p>This section provides more detail about how we support different database operations.</p><p>Reads and writes When a transaction commits, we overwrite modified records if possible since this improves performance. If it is not possible (e.g., because the new record is larger), we create new storage to contain the new data, mark the old record as no longer being most recent, and modify the tree to point to the new version. Modification in place means that concurrent readers might not see consistent record data. The version validation protocol described below is used to detect this problem.</p><p>To modify record data during Phase 3 of the commit protocol, a worker while holding the lock (a) updates the record, (b) performs a memory fence, and (c) stores the TID and releases the lock. The consistency requirement is that if a concurrent reader sees a released lock, it must see both the new data and the new TID. Step (b) ensures that the new data is visible first (on TSO machines this is a compiler fence); Step (c) exposes the new TID and released lock atomically since the lock is located in the TID word.</p><p>To access record data during transaction execution (outside the commit protocol), a worker (a) reads the TID word, spinning until the lock is clear, (b) checks whether the record is the latest version, (c) reads the data, (d) performs a memory fence, and (e) checks the TID word again. If the record is not the latest version in step (b) or the TID word changes between steps (a) and (e), the worker must retry or abort.</p><p>Deletes Snapshot transactions require that deleted records stay in the tree: linked versions relevant for snapshots must remain accessible. A delete operation therefore marks its record as "absent" using the absent bit and registers the record for later garbage collection. Clients treat absent records like missing keys, but internally, absent records are treated like present records that must be validated on read. Since most absent records are registered for future garbage collection, Silo writes do not overwrite absent record data.</p><p>Inserts Phase 2 handles write-write conflicts by requiring transactions to first lock records. However, when the record does not exist, there is nothing to lock. To avoid this problem, we insert a new record for the insert request before starting the commit protocol.</p><p>An insert operation on key k works as follows. If k already maps to an non-absent record, the insert fails and the transaction is aborted. Otherwise, a new record r is constructed in the absent state and with TID 0, a mapping from k → r is added to the tree (using an insertif-absent primitive), and r is added to both the read-set and the write-set as if a regular put occurred. The insertif-absent primitive ensures that there is never more than one record for a given key; Phase 2's read-set validation ensures that no other transactions have superseded the placeholder.</p><p>A transaction that does an insert commits in the usual way. If the commit succeeds, the new record is overwritten with its proper value and the transaction's TID. If the commit fails, the commit protocol registers the absent record for future garbage collection.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.6">Range queries and phantoms</head><p>Silo supports range queries that allow a transaction to access a range of the keys in a table. Range queries are complicated by the phantom problem <ref type="bibr" target="#b9">[10]</ref>: if we scanned a particular range but only kept track of the records that were present during the scan, membership in the range could change without being detected by the protocol, violating serializability.</p><p>The typical solution to this problem in database systems is next-key locking <ref type="bibr" target="#b23">[24]</ref>. Next-key locking, however, requires locking for reads, which goes against Silo's design philosophy.</p><p>Silo deals with this issue by taking advantage of the underlying B + -tree's version number on each leaf node. The underlying B + -tree guarantees that structural modifications to a tree node result in a version number change for all nodes involved. A scan on the interval [a, b) therefore works as follows: in addition to registering all records in the interval in the read-set, we also maintain an additional set, called the node-set. We add the leaf nodes that overlap with the key space [a, b) to the nodeset along with the version numbers examined during the scan. Phase 2 checks that the version numbers of all tree nodes in the node-set have not changed, which ensures that no new keys have been added or removed within the ranges examined.</p><p>Phantoms are also possible due to lookups and deletes that fail because there is no entry for the key in the tree; in either case the transaction can commit only if the key is still not in the tree at commit time. In this case the node that would contain the missing key is added to the node-set.</p><p>The careful reader will have noticed an issue with insert operations, which can trigger structural modifications, and node-set tracking. Indeed, we need to distinguish between structural modifications caused by concurrent transactions (which must cause aborts) and modifications caused by the current transaction (which should not). We fix this problem as follows. Recall that the tree modifications for an insertion actually occur be-fore commit time. For each tree node n that is affected by the insert (there can be more than one due to splits), let v old be its version number before the insert, and v new its version number afterwards. The insertion then updates the node-set: if n is in the node-set with version number v old , it is changed to v new , otherwise the transaction is aborted. This means only other concurrent modifications to n will cause an abort.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.7">Secondary indexes</head><p>To Silo's commit protocol, secondary indexes are simply additional tables that map secondary keys to records containing primary keys. When a modification affects a secondary index, the index is explicitly changed via extra accesses in the code for the transaction that did the modification. These modifications will cause aborts in the usual way: a transaction that used a secondary index will abort if the record it accessed there has changed.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.8">Garbage collection</head><p>Silo transactions generate two sources of garbage that must be reaped: B + -tree nodes and database records. Rather than reference count these objects (which would require that all accesses write to shared memory), Silo leverages its epochs into an epoch-based reclamation scheme à la read-copy update (RCU) <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b12">13]</ref>.</p><p>When a worker generates garbage-for example, by deleting a record or by removing a B + -tree node-it registers the garbage object and its reclamation epoch in a per-core list for that object type. The reclamation epoch is the epoch after which no thread could possibly access the object; once it is reached, we can free the object. This could happen either in a separate background task or in the workers themselves. We do it in the workers between requests, which reduces the number of helper threads and can avoid unnecessary data movement between cores.</p><p>Silo's snapshot transactions mean that different kinds of objects have different reclamation policies, though all are similar. The simplest policy is for B + -tree nodes. Recall that every worker w maintains a local epoch number e w that is set to E just before the start of each transaction. A tree node freed during a transaction is given reclamation epoch e w . Thanks to the way epochs advance, no thread will ever access tree nodes freed during an epoch e ≤ min e w −1. The epoch-advancing thread periodically checks all e w values and sets a global tree reclamation epoch to min e w − 1. Garbage tree nodes with smaller or equal reclamation epochs can safely be freed.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.9">Snapshot transactions</head><p>We support running read-only transactions on recentpast snapshots by retaining additional versions for records. These versions form a consistent snapshot that contains all modifications of transactions up to some point in the serial order, and none from transactions after that point. Snapshots are used for running snapshot transactions (and could also be helpful for checkpointing). Managing snapshots has two tricky parts: ensuring that the snapshot is consistent and complete, and ensuring that its memory is eventually reclaimed.</p><p>We provide consistent snapshots using snapshot epochs. Snapshot epoch boundaries align with epoch boundaries, and thus are consistent points in the serial order. However, snapshot epochs advance more slowly than epochs. (We want to avoid frequent snapshot creation because snapshots are not free.) The snapshot epoch snap(e) for epoch e equals k • e/k ; currently k = 25, so a new snapshot is taken about once a second.</p><p>The epoch-advancing thread periodically computes a global snapshot epoch SE ← snap(E − k). Every worker w also maintains a local snapshot epoch se w ; at the start of each transaction, it sets se w ← SE. Snapshot transactions use this value to find the right record versions. For record r, the relevant version is the most recent one with epoch ≤ se w . When a snapshot transaction completes it commits without checking; it never aborts, since the snapshot is consistent and is never modified.</p><p>Read/write transactions must not delete or overwrite record versions relevant for a snapshot. Consider a transaction committing in epoch E. When modifying or deleting a record r in Phase 3, the transaction compares snap(epoch(r.tid)) and snap(E). If these values are the same, then it is safe to overwrite the record; the new version would supersede the old one in any snapshot. If the values differ, the old version must be preserved for current or future snapshot transactions, so the read/write transaction installs a new record whose previous-version pointer links to the old one. Snapshot transactions will find the old version via the link. (When possible, we actually copy the old version into new memory linked from the existing record, so as to avoid dirtying treenode cache lines, but the semantics are the same.)</p><p>A record version should be freed once no snapshot transaction will access it. This is tied to snapshot epochs. When a transaction committing in epoch E allocates memory for a snapshot version, it registers that memory for reclamation with epoch snap(E). The epoch-advancing thread periodically computes a snapshot reclamation epoch as min se w − 1. Snapshot versions with equal or smaller reclamation epochs can safely be freed. The reclamation process need not adjust any previous-version pointers: the dangling pointer to the old version will never be traversed, since any future snapshot transaction will prefer the newer version.</p><p>Deletions, however, require special handling. Deleted records should be unhooked from the tree, but this cannot happen right away: snapshot transactions must be able to find the linked older versions. The commit pro-cess therefore creates an "absent" record whose status bits mark the value as deleted; the space for record data instead stores the relevant key. This absent record is registered for cleanup at reclamation epoch snap(E). When the snapshot reclamation epoch reaches this value, the cleanup procedure modifies the tree to remove the reference to the record (which requires the key), and then registers the absent record for reclamation based on the tree reclamation epoch (the record cannot be freed right away since a concurrent transaction might be accessing it). However, if the absent record was itself superseded by a later insert, the tree should not be modified. The cleanup procedure checks whether the absent record is still the latest version; if not, it simply ignores the record. No further action is required, because such a record was marked for future reclamation by the inserting transaction.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.10">Durability</head><p>Durability is a transitive property: a transaction is durable if all its modifications are recorded on durable storage and all transactions serialized before it are durable. Thus, durability requires the system to recover the effects of a set of transactions that form a prefix of the serial order. In Silo, epochs provide the key to recovering this prefix, just as they do for snapshot transactions. Since epoch boundaries are consistent with the serial order, Silo treats whole epochs as the durability commit units. The results of transactions in epoch e are not released to clients until all transactions with epochs ≤ e have been stored durably.</p><p>Durable storage could be obtained through replication, but our current implementation uses logging and local storage (disks). All transactions in epoch e are logged together. After a failure, the system examines the logs and finds the durable epoch D, which is the latest epoch whose transactions were all successfully logged. It then recovers all transactions with epochs ≤ D, and no more. Not recovering more is crucial: although epochs as a whole are serially consistent, the serial order within an epoch is not recoverable from the information we log, so replaying a subset of an epoch's transactions might produce an inconsistent state. This also means the epoch period directly affects the average case latency required for a transaction to commit.</p><p>Logging in Silo is handled by a small number of logger threads, each of which is responsible for a disjoint subset of the workers. Each logger writes to a log file on a separate disk.</p><p>When a worker commits a transaction, it creates a log record consisting of the transaction's TID and the table/key/value information for all modified records. This log record is stored in a local memory buffer in disk format. When the buffer fills or a new epoch begins, the worker publishes its buffer to its corresponding logger using a per-worker queue, and then publishes its last committed TID by writing to a global variable ctid w .</p><p>Loggers operate in a continuous loop. At the start of each iteration, the logger calculates t = min ctid w for its workers. From this TID, it computes a local durable epoch d = epoch(t) − 1. All its workers have published all their transactions with epochs ≤ d, so as far as this logger is concerned, epochs ≤ d are complete. It appends all the buffers plus a final record containing d to the end of a log file and waits for these writes to complete. (It never needs to examine the actual log buffer memory.) It then publishes d to a per-logger global variable d l and returns the buffers back to the workers for recycling.</p><p>A thread periodically computes and publishes a global durable epoch D = min d l . All transactions with epochs ≤ D are known to have been durably logged. Workers can thus respond to clients whose transactions occurred in epochs ≤ D.</p><p>Silo uses record-level redo logging exclusively, not undo logging or operation logging. Undo logging is not necessary for our system since we log after transactions commit; logging at record level simplifies recovery.</p><p>To recover, Silo would read the most recent d l for each logger, compute D = min d l , and then replay the logs, ignoring entries for transactions whose TIDs are from epochs after D. Log records for the same record must be applied in TID order to ensure that the result equals the latest version, but replaying can otherwise be performed concurrently.</p><p>A full system would recover from a combination of logs and checkpoints to support log truncation. Checkpoints could take advantage of snapshots to avoid interfering with read/write transactions. Though checkpointing would reduce worker performance somewhat, it need not happen frequently. We evaluate common-case logging, but have not yet implemented full checkpointing or recovery.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Evaluation</head><p>In this section, we evaluate the effectiveness of the techniques in Silo, confirming the following performance hypotheses:</p><p>• The cost of Silo's read/write set tracking for a simple key-value workload is low ( §5.2).</p><p>• Silo scales as more cores become available, even when transactions are made persistent ( §5.3).</p><p>• Silo's performance is more robust to workload changes compared to a partitioned data store, specficially as we increase the level of cross-partition contention and the skew of the workload ( §5.4).</p><p>• Large read-only transactions benefit substantially from Silo's snapshot transactions ( §5.5). This mech-anism incurs only a small space overhead, even for a write heavy workload ( §5.6).</p><p>We also show in §5.7 the relative importance of several of Silo's implementation techniques.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1">Experimental setup</head><p>All our experiments were run on a single machine with four 8-core Intel Xeon E7-4830 processors clocked at 2.1GHz, yielding a total of 32 physical cores. Each core has a private 32KB L1 cache and a private 256KB L2 cache. The eight cores on a single processor share a 24MB L3 cache. We disabled hyperthreading on all CPUs; we found slightly worse results with hyperthreading enabled. The machine has 256GB of DRAM with 64GB of DRAM attached to each socket, and runs 64bit Linux 3.2.0. In all graphs, each point reported is the median of three consecutive runs, with the minimum and maximum values shown as error bars. In our experiments, we follow the direction of Masstree and size both internal nodes and leaf nodes of our B + -tree to be roughly four cache lines (a cache line is 64 bytes on our machine), and use software prefetching when reading B + -tree nodes.</p><p>We pay careful attention to memory allocation and thread affinity in our experiments. We use a custom memory allocator for both B + -tree nodes and records. Our allocator advantage of 2MB "superpages" (a feature supported in recent Linux kernels) to reduce TLB pressure. We pin threads to cores so that the memory allocated by a particular thread resides on that thread's NUMA node. Before we run an experiment, we make sure to pre-fault our memory pools so that the scalability bottlenecks of Linux's virtual memory system <ref type="bibr" target="#b4">[5]</ref> are not an issue in our benchmarks.</p><p>For experiments which run with persistence enabled, we use four logger threads and assign each logger a file residing on a separate device. Three loggers are assigned different Fusion IO ioDrive2 devices, and the fourth is assigned to six 7200RPM SATA drives in a RAID-5 configuration. Collectively, these devices provide enough bandwidth that writing to disk is not a bottleneck.</p><p>Our experiments do not use networked clients. We would expect networking to reduce our throughput somewhat; in Masstree, networked clients reduced throughput by 23% <ref type="bibr" target="#b22">[23]</ref>. In our experiments, each thread combines a database worker with a workload generator. These threads run within the same process, and share Silo trees in the same address space. We run each experiment for 60 seconds. When durability is not an issue, our experiments use MemSilo, which is Silo with logging disabled. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2">Overhead of small transactions</head><p>This section shows that Silo's read/write set tracking has low overhead by comparing to the underlying key-value store, which does not perform any tracking.</p><p>We evaluate two systems. The first system, Key-Value, is simply the concurrent B + -tree underneath Silo. That is, Key-Value provides only single-key gets and puts. The second system is MemSilo. We ran a variant of YCSB workload mix A; YCSB <ref type="bibr" target="#b5">[6]</ref> is Yahoo's popular keyvalue benchmark. Our variant differs in the following ways: (a) we fix the read/write ratio to 80/20 (instead of 50/50), (b) we change write operations to read-modifywrites, which in MemSilo happen in a single transaction, and (c) we shrink the size of records to 100 bytes (instead of 1000 bytes). These modifications prevent uninteresting overheads that affect both systems from hiding overheads that affect only MemSilo. More specifically, (a) prevents the memory allocator for new records from becoming the primary bottleneck, (b) creates a transaction that actually generates read-write conflicts, which stresses MemSilo's protocol, and (c) prevents memcpy from becoming the primary bottleneck. Both transactions sample keys uniformly from the key space. We fix the tree size to contain 160M keys, and vary the number of workers performing transactions against the tree.</p><p>Figure <ref type="figure" target="#fig_2">4</ref> shows the results of running the YCSB benchmark on both systems. The overhead of MemSilo compared to Key-Value is negligible; Key-Value outperforms MemSilo by a maximum of 1.07×.</p><p>Globally generated TIDs Figure <ref type="figure" target="#fig_2">4</ref> also quantifies the benefits of designing Silo to avoid a single globally unique TID assigned at commit time. Mem-Silo+GlobalTID follows an identical commit protocol as Silo, except it generates TIDs from a single shared counter. This is similar to the critical section found in Larson et al. <ref type="bibr" target="#b18">[19]</ref> Here we see a scalability collapse after 24 workers; Key-Value outperforms Mem-Silo+GlobalTID by 1.80× at 32 workers. This demonstrates the necessity of avoiding even a single global atomic instruction during the commit phase.     </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.3">Scalability and persistence</head><p>Our next experiment shows that Silo scales effectively as we increase the number of workers. We use the popular TPC-C benchmark <ref type="bibr" target="#b32">[33]</ref>, which models a retail operation and is a common benchmark for OLTP workloads. Transactions in TPC-C involve customers assigned to a set of districts within a local warehouse, placing orders in those districts. Most orders can be fulfilled entirely from the local warehouse, but a small fraction request a product from a remote warehouse. To run TPC-C on Silo, we assign all clients with the same local warehouse to the same thread. This models client affinity, and means memory accessed by a transaction usually resides on the same NUMA node as the worker. We size the database such that the number of warehouses equals the number of workers, so the database grows as more workers are introduced (in other words, we fix the contention ratio of the workload). We do not model client "think" time, and we run the standard workload mix involving all five transactions. To show how durability affects scalability, we run both MemSilo and Silo.</p><p>Figures <ref type="figure" target="#fig_6">5 and 6</ref> show the throughput of running TPC-C as we increase the number of workers (and thus warehouses) in both MemSilo and Silo. Scaling is close to linear for MemSilo up to 32 workers. The per-core throughput of MemSilo at 32 workers is 81% of the throughput at one worker, and 98% of the per-core throughput at  8 workers. This drop happens because of several factors, including increasing database size and sharing of resources such as the L3 cache (particularly important from one to 8 threads) as well as actual contention. Silo performs slightly slower, and its scalability is degraded by logging past 28 workers, since worker threads and the four logger threads start to contend for cores.</p><p>We also ran experiments to separate the impact of Silo's logging subsystem from that of our durable storage devices. With Silo's loggers writing to an in-memory file system instead of stable storage (Silo+tmpfs), we observed at most a 1.03× gain in throughput over Silo. This argues that most of the loss in throughput when enabling durability is due to the overhead of transferring log records from worker threads to logger threads, rather than the overhead of writing to physical hardware (given sufficient hardware bandwidth).</p><p>Figure <ref type="figure" target="#fig_8">7</ref> shows transaction latency for this experiment (the latency of MemSilo is negligible and therefore not shown). For both Silo+tmpfs and Silo, we see a spike in latency around 28 workers due to worker/logger thread contention. The effect is more pronounced with Silo, illustrating the fact that latency is more sensitive to real hardware than throughput is.</p><p>Overall, we see that logging does not significantly degrade the throughput of Silo and incurs only a modest increase in latency. MemSilo outperforms Silo by only a maximum of 1.16× at 32 workers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.4">Comparison with Partitioned-Store</head><p>This section describes our evaluation of Silo versus a statically partitioned data store, which is a common configuration for running OLTP on a single shared-memory node <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b29">30,</ref><ref type="bibr" target="#b31">32]</ref>. Most of the time Silo is preferable.</p><p>Tables in TPC-C are typically partitioned on warehouse-id, such that each partition is responsible for the districts, customers, and stock levels for a particular warehouse. This is a natural partitioning, because as mentioned in §5.3, each transaction in TPC-C is centered around a single local warehouse.  The design of Partitioned-Store is motivated by H-Store/VoltDB <ref type="bibr" target="#b31">[32]</ref>. We physically partition the data by warehouse so that each partition has a separate set of B + -trees for each table, and we associate each partition with a single worker. The workers are all in the same process to avoid IPC overhead. We then associate a global partition lock with each partition. Every transaction first obtains all partition locks (in sorted order). Once all locks are obtained, the transaction can proceed as in a single-threaded data store, without the need for additional validation. We assume that we have perfect knowledge of the partition locks needed by each transaction, so once the locks are obtained the transaction is guaranteed to commit and never has to acquire new locks. We implement these partition locks using spinlocks, and take extra precaution to allocate the for the locks on separate cache lines to prevent false sharing. When single-partition transactions are common, these spinlocks are cached by their local threads and obtaining them is inexpensive. We believe this scheme performs at least as well on a multicore machine as the cross-partition locking schemes described for H-Store. Partitioned-Store does not support snapshot transactions, so it incurs no overhead for maintaining multiple record versions. Partitioned-Store uses the same B + -trees that Key-Value and Silo use, except we remove the concurrency control mechanisms in place in the B + -tree. Additionally, we remove the concurrency control for record values (which Key-Value needed to ensure atomic reads/writes to a single key). Partitioned-Store does not implement durability.</p><p>We evaluate the costs and benefits of partitioning by comparing a partitioned version of Silo (Partitioned-Store) with Silo itself (MemSilo). We run two separate experiments: the first varies the percentage of crosspartition transactions in the workload, and the second varies the number of concurrent workers executing transactions against a fixed-size database.  As in our previous experiments on TPC-C, Silo executes transactions by associating each worker with a local warehouse and issuing queries against the shared B +trees. We focus on the most frequent transaction in TPC-C, the new-order transaction. Even though the new-order transaction is bound to a local warehouse, each transaction has some probability, which we vary, of writing to records in non-local warehouses (these records are in the stock table). Our benchmark explores the tradeoffs between Partitioned-Store and various versions of Silo as we increase the probability of a cross-partition transaction from zero to over 60 percent.</p><p>Figure <ref type="figure" target="#fig_10">8</ref> shows the throughput of running all neworder transactions on various versions of Silo and Partitioned-Store as we increase the number of crosspartition transactions. Both the number of warehouses and the number of workers are fixed at 28. The parameter varied is the probability that a single item is drawn from a remote warehouse. On the x-axis we plot the probability that any given transaction will touch at least one remote warehouse (each new-order transaction includes between 5 to 15 items, inclusive) and thus require grabbing more than one partition lock in Partitioned-Store.</p><p>The curves in Figure <ref type="figure" target="#fig_10">8</ref> show that Partitioned-Store is clearly the optimal solution for perfectly partitionable workloads. The advantages are two-fold: no concurrency control mechanisms are required, and there is better cache locality due to the partitioned trees being smaller. Partitioned-Store outperforms MemSilo by 1.54× at no cross-partition transactions. However, performance suffers as soon as cross-partition transactions are introduced. At roughly 20%, the throughput of Partitioned-Store drops below MemSilo and gets worse with increasing contention, whereas MemSilo maintains relatively steady throughput for the entire experiment. At roughly 60% cross-partition transactions, MemSilo outperforms Partitioned-Store by 2.98×. The results here can be un-derstood as the tradeoff between coarse and fine-grained locking. While Silo's OCC protocol initially pays a nontrivial overhead for tracking record-level changes in low contention regimes, this work pays off as the contention increases.</p><p>To understand the overhead in more detail, we introduce MemSilo+Split, which extends MemSilo by physically splitting its tables the same way as Partitioned-Store does. This yields a 13% gain over MemSilo. The remaining difference is due to Partitioned-Store requiring no fine-grained concurrency control.</p><p>Skewed workloads This next experiment shows the impact of workload skew, or "hotspots," on performance in Partitioned-Store and Silo. We run a 100% new-order workload mix, fixing the database size to four warehouses in a single partition. We then vary the number of available workers, which simulates increased workload skew (more workers processing transactions over a fixed size database). Figure <ref type="figure" target="#fig_11">9</ref> shows the results of this experiment.</p><p>For Partitioned-Store, the throughput stays constant as we increase workers, because multiple workers cannot execute in parallel on a single partition (they serialize around the partition lock). For MemSilo, throughput increases, but not linearly, because of actual workload contention when running 100% new-order transactions. Specifically, a counter record per unique (warehouse-id, district-id) pair is used to generate new-order IDs. As we add more workers, we increase the number of readwrite conflicts over this shared counter, which increases the number of aborted transactions. Note that this is not unique to OCC; in 2PL, conflicting workers would serialize around write locks held on the shared counter. In Figure <ref type="figure" target="#fig_11">9</ref>, we see that MemSilo outperforms Partitioned-Store by a maximum of 8.20× at 24 workers.</p><p>Because the contention in this workload is a property of the workload itself and not so much the system, it is interesting to see how MemSilo responds if the contention is removed. We substantially reduce this contention in MemSilo+FastIds by generating IDs outside the new-order transaction. The new-order client request runs two transactions, where the first generates a unique ID and the second uses that ID. (This sacrifices the invariant that the new-order ID space is contiguous, since counters do not roll back on abort.) The result is throughput scaling nicely until 28 workers, when the next contention bottleneck in the workload appears. Overall MemSilo+FastIds outperforms Partitioned-Store by a maximum of 17.21× at 32 workers.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.5">Effectiveness of snapshot transactions</head><p>In this section we show that Silo's snapshot transactions are effective for certain challenging workloads. Maintaining snapshots is not free (see §5.7); for some work-  loads where the frequency of large read-only transactions is low, such as the standard TPC-C workload, the benefits of snapshots do not outweigh their overhead. However, for other workloads involving many large read-only transactions over frequently updated records, such as the one evaluated in this section, we show that snapshots provide performance gains. We again use the TPC-C benchmark, changing the setup as follows. We fix the number of warehouses to 8 and the number of workers to 16 (each warehouse is assigned to two workers). We run a transaction mix of 50% new-order and 50% stock-level; this is the largest of two read-only queries from TPC-C. On average, stock-level touches several hundred records in tables frequently updated by the new-order transaction, performing a nestedloop join between the order-line table and the stock table.</p><p>We measure the throughput of Silo under this load in two scenarios: one where we use Silo's snapshot transactions to execute the stock-level transaction at roughly one second in the past (MemSilo), and one where we execute stock-level as a regular transaction in the present (MemSilo+NoSS). In both scenarios, the new-order transaction executes as usual.</p><p>Figure <ref type="figure" target="#fig_12">10</ref> shows the results of this experiment. Mem-Silo outperforms MemSilo+NoSS by 1.19×. This is due to the larger number of aborts that occur when a large read-only transaction executes with concurrent modifications (recall that snapshot transactions never abort).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.6">Space overhead of snapshots</head><p>This section shows that the space overhead of maintaining multiple versions of records to support snapshot transactions is low, even for update heavy workloads.</p><p>We run a variant of YCSB where every transaction is a read-modify-write operation on a single record. We pick this operation because each transaction has a very high probability of generating a new version of a record (since we size the tree to contain 160M keys). This stresses our garbage collector (and memory allocator), because at every snapshot epoch boundary a large number of old records need to be garbage collected. As in §5.2, we use 100 byte records and uniformly sample from the key space. We run MemSilo with 28 workers.</p><p>In this experiment, the database records initially occupied 19.5GB of memory. Throughout the entire run, this increased by only a maximum of 672.3MB, representing a 3.4% increase in memory for snapshots. This shows that, despite having to keep old versions around, space overhead is reasonable and garbage collection is very effective at reaping old versions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.7">Factor analysis</head><p>To understand in greater detail the overheads and benefits of various aspects of Silo, we show a factor analysis in Figure <ref type="figure" target="#fig_13">11</ref> that highlights the key factors for performance. The workload here is the standard TPC-C mix running with 28 warehouses and 28 workers. We perform analysis in two groups of cumulative changes: the Regular group deals with changes that do not affect the persistence subsystem, and the Persistence group deals only with changes in the persistence layer.</p><p>In the Regular group, Simple refers to Silo running with no NUMA aware memory allocator and allocating a new record for each write. +Allocator adds the NUMA aware allocator described in §5.1. +Overwrites allows Silo to write record modifications in place when possible (and is equivalent to MemSilo as presented in Figure <ref type="figure" target="#fig_4">5</ref>). +NoSnapshots disables keeping multiple versions of records for snapshots, and does not provide any snapshot query mechanism. +NoGC disables the garbage collector described in §4.8.</p><p>The two major takeaways from Figure <ref type="figure" target="#fig_13">11</ref> are that performing in-place updates is an important optimization for Silo and that the overhead of maintaining snapshots plus garbage collection is low.</p><p>For persistence analysis, we break down the following factors: MemSilo refers to running without logging. +SmallRecs enables logging, but only writes log records that are eight bytes long (containing a TID only, omitting record modifications); this illustrates an upper bound on performance for any logging scheme. +FullRecs is Silo running with persistence enabled (and is equivalent to Silo in Figure <ref type="figure" target="#fig_4">5</ref>). +Compress uses LZ4 compression 1 to compress log records before writing to disk.</p><p>1 http://code.google.com/p/lz4/ The takeaways from Figure <ref type="figure" target="#fig_13">11</ref> are that spending extra CPU cycles to reduce the amount of bytes written to disk surprisingly does not pay off for this TPC-C workload, and that the overhead of copying record modifications into logger buffers and then into persistent storage is low.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">Conclusions</head><p>We have presented Silo, a new OCC-based serializable database storage engine designed for excellent performance at scale on large multicore machines. Silo's concurrency control protocol is optimized for multicore performance, avoiding global critical sections and non-local memory writes for read operations. Its use of epochs facilitates serializable recovery, garbage collection, and efficient read-only snapshot transactions. Our results show Silo's near-linear scalability on YCSB-A and TPC-C, very high transaction throughput on TPC-C, and low overheads relative to a non-transactional system. Together, these results show that transactional consistency and scalability can coexist at high performance levels in shared-memory databases.</p><p>Given the encouraging performance of Silo, we are investigating a number of areas for future work, designed to further improve its performance and augment its usability. These include further exploiting "soft partitioning" techniques to improve performance on highly partitionable workloads; fully implementing checkpointing, recovery, and replication; investigating how to balance load across workers most effectively, perhaps in a way that exploits core-to-data affinity; and integrating into a full-featured SQL engine.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: The architecture of Silo.</figDesc><graphic url="image-1.png" coords="4,317.85,99.20,222.51,193.91" type="bitmap" /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Commit protocol run at the end of every transaction.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 4 :</head><label>4</label><figDesc>Figure 4: Overhead of MemSilo versus Key-Value when running a variant of the YCSB benchmark.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>1</head><label>1</label><figDesc></figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Throughput of Silo when running the TPC-C benchmark, including persistence.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Per-core throughput of Silo when running the TPC-C benchmark.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 7 :</head><label>7</label><figDesc>Figure 7: Silo transaction latency for TPC-C with logging to either durable storage or an in-memory file system.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Performance of Partitioned-Store versus MemSilo as the percentage of cross-partition transactions is varied.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Performance of Partitioned-Store versus MemSilo as the number of workers processing the same size database is varied.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Evaluation of Silo's snapshot transactions on a modified TPC-C benchmark.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: A factor analysis for Silo. Changes are added left to right for each group, and are cumulative.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Primary Tree for Table A Secondary Trees for Table A</head><label></label><figDesc></figDesc><table><row><cell cols="2">Client</cell><cell></cell><cell>Client</cell><cell>Client</cell></row><row><cell cols="2">Request</cell><cell></cell><cell>Response</cell></row><row><cell>Transaction Logic:</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="2">T = FIND(A.x,&gt;10) foreach t in T: UPDATE(t.x,10)</cell><cell cols="2">Worker 1 thread 1</cell><cell>…</cell><cell>Worker n thread n</cell></row><row><cell>key1,dat1</cell><cell cols="2">key2,dat2</cell><cell>…</cell></row><row><cell cols="2">Records in leaves</cell><cell></cell><cell cols="2">key7</cell><cell>key2</cell><cell>…</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">Secondary leaves contain</cell></row><row><cell></cell><cell></cell><cell></cell><cell cols="2">primary key values</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>Data: read set R, write set W , node set N,</figDesc><table><row><cell>global epoch number E</cell><cell></cell></row><row><cell>// Phase 1</cell><cell></cell></row><row><cell cols="2">for record, new-value in sorted(W ) do</cell></row><row><cell>lock(record);</cell><cell></cell></row><row><cell>compiler-fence();</cell><cell></cell></row><row><cell>e ← E;</cell><cell>// serialization point</cell></row><row><cell>compiler-fence();</cell><cell></cell></row><row><cell>// Phase 2</cell><cell></cell></row><row><cell>for record, read-tid in R do</cell><cell></cell></row><row><cell cols="2">if record.tid = read-tid or not record.latest</cell></row><row><cell cols="2">or (record.locked and record ∈ W )</cell></row><row><cell>then abort();</cell><cell></cell></row><row><cell>for node, version in N do</cell><cell></cell></row><row><cell cols="2">if node.version = version then abort();</cell></row><row><cell cols="2">commit-tid ← generate-tid(R, W , e);</cell></row><row><cell>// Phase 3</cell><cell></cell></row><row><cell>for record, new-value in W do</cell><cell></cell></row><row><cell cols="2">write(record, new-value, commit-tid);</cell></row><row><cell>unlock(record);</cell><cell></cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Acknowledgements</head><p>We thank our shepherd Timothy Roscoe and the anonymous reviewers for their feedback. Eugene Wu provided helpful comments on an earlier draft of the paper. We are also very grateful to Yandong Mao, who generously ran benchmarking experiments on other systems. This work was supported by NSF Grants 1065219 and 0704424. Eddie Kohler's work was partially supported by a Sloan Research Fellowship and a Microsoft Research New Faculty Fellowship.</p></div>
+			</div>
+
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Distributed optimistic concurrency control with reduced rollback</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Agrawal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">J</forename><surname>Bernstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sengupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Distributed Computing</title>
+		<imprint>
+			<biblScope unit="volume">2</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="1987">1987</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">A critique of ANSI SQL isolation levels</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Berenson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bernstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Melton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>O'neil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>O'neil</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+				<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">A practical concurrent binary search tree</title>
+		<author>
+			<persName><forename type="first">N</forename><forename type="middle">G</forename><surname>Bronson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Casper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Chafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Olukotun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">PPoPP</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Cacheconscious concurrency control of main-memory indexes on shared-memory multiprocessor systems</title>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">K</forename><surname>Cha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Hwang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Kwon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">VLDB</title>
+				<imprint>
+			<date type="published" when="2001">2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">RadixVM: Scalable address spaces for multithreaded applications</title>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">T</forename><surname>Clements</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">F</forename><surname>Kaashoek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Zeldovich</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Eurosys</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Benchmarking cloud serving systems with YCSB</title>
+		<author>
+			<persName><forename type="first">B</forename><forename type="middle">F</forename><surname>Cooper</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Silberstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Tam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ramakrishnan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Sears</surname></persName>
+		</author>
+		<editor>SoCC</editor>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Spanner: Google&apos;s globallydistributed database</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">C</forename><surname>Corbett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Epstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fikes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Frost</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">J</forename><surname>Furman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gubarev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Heiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Hochschild</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Hsieh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kanthak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Kogan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lloyd</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Melnik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Mwaura</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Nagle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Quinlan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Rao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Rolig</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Saito</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Szymaniak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Taylor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Woodford</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">OSDI</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Hekaton: SQL Server&apos;s memory-optimized OLTP engine</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Diaconu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Freedman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Ismert</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P.-A</forename><surname>Larson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Mittal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Stonecipher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Verma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zwilling</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIG-MOD</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Transactional locking II</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Dice</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Shalev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shavit</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">DISC</title>
+				<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">The notions of consistency and predicate locks in a database system</title>
+		<author>
+			<persName><forename type="first">K</forename><forename type="middle">P</forename><surname>Eswaran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">N</forename><surname>Gray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">A</forename><surname>Lorie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><forename type="middle">L</forename><surname>Traiger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Commun. ACM</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<date type="published" when="1976">1976</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Practical lock freedom</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Fraser</surname></persName>
+		</author>
+		<ptr target="http://www.cl.cam.ac.uk/users/kaf24/lockfree.html" />
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+		<respStmt>
+			<orgName>Cambridge University Computer Laboratory</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">PhD thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Observations on optimistic concurrency control schemes</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Härder</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Inf. Syst</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="1984">1984</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Performance of memory reclamation for lockless synchronization</title>
+		<author>
+			<persName><forename type="first">T</forename><forename type="middle">E</forename><surname>Hart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">E</forename><surname>Mckenney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">D</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Walpole</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">J. Parallel Distrib. Comput</title>
+		<imprint>
+			<biblScope unit="volume">67</biblScope>
+			<biblScope unit="issue">12</biblScope>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Latch-free data structures for DBMS: design, implementation, and evaluation</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Horikawa</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Shore-MT: a scalable storage manager for the multicore era</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Pandis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Hardavellas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Falsafi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EDBT</title>
+				<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Low overhead concurrency control for partitioned main memory databases</title>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">P</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">J</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Madden</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+				<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">A scalable lock manager for multicores</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Jung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">D</forename><surname>Fekete</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Heiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">Y</forename><surname>Yeom</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIG-MOD</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">On optimistic methods for concurrency control</title>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">T</forename><surname>Kung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">T</forename><surname>Robinson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM TODS</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="1981">1981</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">High-performance concurrency control mechanisms for main-memory databases</title>
+		<author>
+			<persName><forename type="first">P.-Å</forename><surname>Larson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Blanas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Diaconu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Freedman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Patel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Zwilling</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="volume">5</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Efficient locking for concurrent operations on B-trees</title>
+		<author>
+			<persName><forename type="first">P</forename><forename type="middle">L</forename><surname>Lehman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><forename type="middle">B</forename><surname>Yao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM TODS</title>
+		<imprint>
+			<biblScope unit="volume">6</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<date type="published" when="1981">1981</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">The Bw-tree: A B-tree for new hardware</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Levandoski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Lomet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sengupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICDE</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">LLAMA: A cache/storage subsystem for modern hardware</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Levandoski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Lomet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sengupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="volume">6</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Cache craftiness for fast multicore key-value storage</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Kohler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Morris</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Eurosys</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">ARIES/KVL: A key-value locking method for concurrency control of multiaction transactions operating on B-tree indexes</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Mohan</surname></persName>
+		</author>
+		<editor>VDLB</editor>
+		<imprint>
+			<date type="published" when="1990">1990</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Data-oriented transaction execution</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Pandis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Hardavellas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="volume">3</biblScope>
+			<biblScope unit="page" from="1" to="2" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">PLP: page latch-free shared-everything OLTP</title>
+		<author>
+			<persName><forename type="first">I</forename><surname>Pandis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tözün</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="volume">4</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Skew-aware automatic database partitioning in shared-nothing, parallel OLTP systems</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Pavlo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Curino</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zdonik</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SIGMOD</title>
+				<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">D</forename><surname>Porobic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Pandis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Branco</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Tözün</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ailamaki</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">OLTP on hardware islands. Proc. VLDB Endow</title>
+		<imprint>
+			<biblScope unit="volume">5</biblScope>
+			<biblScope unit="issue">11</biblScope>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Lightweight locking for main memory database systems</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Thomson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">J</forename><surname>Abadi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">6</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Database engines on multicores, why parallelize when you can distribute?</title>
+		<author>
+			<persName><forename type="first">T.-I</forename><surname>Salomie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><forename type="middle">E</forename><surname>Subasu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Giceva</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Alonso</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Eurosys</title>
+				<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">PALM: Parallel architecture-friendly latch-free modifications to B+ trees on many-core processors</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Sewall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chhugani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Satish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Dubey</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+				<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="volume">4</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">The end of an architectural era: (it&apos;s time for a complete rewrite</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Stonebraker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Madden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">J</forename><surname>Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Harizopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Hachem</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Helland</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">VLDB</title>
+				<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<ptr target="http://www.tpc.org/tpcc/" />
+		<title level="m">The Transaction Processing Council. TPC-C Benchmark</title>
+				<imprint>
+			<date type="published" when="2007-06">June 2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<title level="m" type="main">Optimistic concurrency control revisited</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Unland</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1994">1994</date>
+		</imprint>
+		<respStmt>
+			<orgName>University of Münster, Department of Information Systems</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

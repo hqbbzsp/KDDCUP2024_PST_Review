@@ -1,0 +1,1963 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Primer: Searching for Efficient Transformers for Language Modeling</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>So</surname></persName>
+							<email>davidso@google.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Wojciech</forename><surname>Ma</surname></persName>
+							<email>wojciechm@google.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Hanxiao</forename><surname>Liu</surname></persName>
+							<email>hanxiaol@google.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Zihang</forename><surname>Dai</surname></persName>
+							<email>zihangd@google.com</email>
+						</author>
+						<author>
+							<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+						</author>
+						<author>
+							<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+						</author>
+						<title level="a" type="main">Primer: Searching for Efficient Transformers for Language Modeling</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:47+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Large Transformer models have been central to recent advances in natural language processing. The training and inference costs of these models, however, have grown rapidly and become prohibitively expensive. Here we aim to reduce the costs of Transformers by searching for a more efficient variant. Compared to previous approaches, our search is performed at a lower level, over the primitives that define a Transformer TensorFlow program. We identify an architecture, named Primer, that has a smaller training cost than the original Transformer and other variants for auto-regressive language modeling. Primer's improvements can be mostly attributed to two simple modifications: squaring ReLU activations and adding a depthwise convolution layer after each Q, K, and V projection in self-attention. Experiments show Primer's gains over Transformer increase as compute scale grows and follow a power law with respect to quality at optimal model sizes. We also verify empirically that Primer can be dropped into different codebases to significantly speed up training without additional tuning. For example, at a 500M parameter size, Primer improves the original T5 architecture on C4 auto-regressive language modeling, reducing the training cost by 4X. Furthermore, the reduced training cost means Primer needs much less compute to reach a target one-shot performance. For instance, in a 1.9B parameter configuration similar to GPT-3 XL, Primer uses 1/3 of the training compute to achieve the same one-shot performance as Transformer. We open source our models and several comparisons in T5 to help with reproducibility. 1</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Transformers <ref type="bibr" target="#b0">[1]</ref> have been used extensively in many NLP advances over the past few years (e.g., <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b3">4,</ref><ref type="bibr" target="#b4">5,</ref><ref type="bibr" target="#b5">6,</ref><ref type="bibr" target="#b6">7]</ref>). With scaling, Transformers have produced increasingly better performance <ref type="bibr" target="#b2">[3,</ref><ref type="bibr" target="#b6">7,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b8">9]</ref>, but the costs of training larger models have become prohibitively expensive.</p><p>In this paper, we aim to reduce the training costs of Transformer language models. To this end, we propose searching for more efficient alternatives to Transformer by modifying its TensorFlow computation graph <ref type="bibr" target="#b9">[10]</ref>. Given a search space of TensorFlow programs, we use evolution <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b12">13,</ref><ref type="bibr" target="#b13">14,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b15">16,</ref><ref type="bibr" target="#b16">17]</ref> to search for models that achieve as low of a validation loss as possible given a fixed amount of training compute. An advantage of using TensorFlow programs as the search space is that it is easier to find simple low-level improvements to optimize Transformers. We focus on decoder-only auto-regressive language modeling (LM), because of its generality and success <ref type="bibr" target="#b17">[18,</ref><ref type="bibr" target="#b6">7,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b20">21]</ref>. <ref type="foot" target="#foot_1">2</ref>The discovered model, named Primer (PRIMitives searched transformER), exhibits strong performance improvements over common Transformer variants on auto-regressive language modeling. Our experiments show that Primer has the benefits of (1) achieving a target quality using a smaller training cost, (2) achieving higher quality given a fixed training cost, and (3) achieving a target quality using a smaller inference cost. These benefits are robust and hold across model sizes (20M to 1.9B parameters), across compute scales (10 to 10 5 accelerator hours), across datasets (LM1B, C4, PG19 <ref type="bibr" target="#b21">[22]</ref>), across hardware platforms (TPUv2, TPUv3, TPUv4 and V100), across multiple Transformer codebases using default configurations (Tensor2Tensor, Lingvo, and T5) and across multiple model families (dense Transformers <ref type="bibr" target="#b0">[1]</ref>, sparse mixture-of-experts Switch Transformers <ref type="bibr" target="#b7">[8]</ref>, and Synthesizers <ref type="bibr" target="#b22">[23]</ref>). We open source these comparisons to help with the reproducibility of our results. 1   Our main finding is that the compute savings of Primer over Transformers increase as training cost grows, when controlling for model size and quality. These savings follow a power law with respect to quality when using optimally sized models. To demonstrate Primer's savings in an established training setup, we compare 500M parameter Primer to the original T5 architecture, using the exact configuration used by Raffel et al. <ref type="bibr" target="#b4">[5]</ref> applied to auto-regressive language modeling. In this setting, Primer achieves an improvement of 0.9 perplexity given the same training cost, and reaches quality parity with the T5 baseline model using 4.2X less compute. We further demonstrate that Primer's savings transfer to one-shot evaluations by comparing Primer to Transformer at 1.9B parameters in a setup similar to GPT-3 XL <ref type="bibr" target="#b6">[7]</ref>. There, using 3X less training compute, Primer achieves similar performance to Transformer on both pretraining perplexity and downstream one-shot tasks.</p><p>Our analysis shows that the improvements of Primer over Transformer can be mostly attributed to two main modifications: squaring ReLU activations and adding a depthwise convolution layer after each Q, K, and V projection in self-attention. These two modifications are simple and can be dropped into existing Transformer codebases to obtain significant gains for auto-regressive language modeling.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">Search Space and Search Method</head><p>Searching Over TensorFlow Programs: To construct a search space for Transformer alternatives, we use operations from TensorFlow (TF). In this search space, each program defines the stackable decoder block of an auto-regressive language model. Given input tensors X ? R n?d that represent sequences of length n with embedding length d, our programs return tensors of the same shape. When stacked, their outputs represent next-token prediction embeddings at each sequence position. Our programs only specify model architectures and nothing else. In other words, the input and output embedding matrices themselves, as well as input preprocessing and weight optimization are not within the scope of our programs.  Figure <ref type="figure" target="#fig_1">1</ref> shows how programs are constructed in our search space. Each program is built from an evolutionary search DNA, which is an indexed collection of subprograms. SUBPROGRAM 0 is the MAIN() function that is the execution entry point, and the other subprograms are part of the DNA's subprogram bank. Each subprogram is an indexed array of instructions with no length constraints. An instruction is an operation with a set of input arguments. The operation denotes the function that the instruction executes. Each operation maps to either a TF function from the primitives vocabulary or another subprogram in the DNA subprogram bank. The primitives vocabulary is comprised of simple primitive TF functions, such as ADD, LOG, and MATMUL (see Appendix A.1 for details). It is worth emphasizing that high-level building blocks such as self-attention are not operations in the search space, but can be constructed from our low-level operations. The DNA's subprogram bank is comprised of additional programs that can be executed as functions by instructions. Each subprogram can only call subprograms with a higher index in the subprogram bank, which removes the possibility of cycles.</p><p>Each instruction's argument set contains a list of potential argument values for each instruction operation. The set of argument fields represents the union of fields that all the operation primitives use:</p><p>? Input 1: The index of the hidden state that will be used as the first tensor input. The index of each hidden state is the index of the instruction that produced it, with the subprogram's input states at indexes 0 and 1. An example of an operation that uses this is SIN.</p><p>? Input 2: The index of the second tensor input. This is only used by operations that are binary with respect to tensor inputs. An example of an operation that uses this is ADD.</p><p>? Constant: A real valued constant. An example of an operation that uses this is MAX; tf.math.maximum(x, C) for C = 0 is how we express the Transformer's ReLU activation.</p><p>? Dimension Size: An integer representing the output dimension size for transformations that utilize weight matrices. An example of an operation that uses this is CONV 1X1, the dense projection used by the Transformer's attention projections and feed forward portions. See Appendix A.2 for how we employ relative dimensions <ref type="bibr" target="#b12">[13]</ref> to resize our models.</p><p>Our search subprograms are converted to TF programs by converting each subprogram instruction to a corresponding line of TF code, one at a time in indexing order. To create the TF line, the instruction operation is mapped to the corresponding TF primitive function or DNA subprogram, and any relevant arguments are plugged in (see Appendix A.1 for the full TF primitives vocabulary, including argument mappings); the other arguments are ignored. The TF tensor that is generated by the final instruction is taken as the subprogram output. We do not use TF Eager and so a useful property of the constructed programs is that irrelevant nodes that do not contribute to the programs' outputs are ignored as per TF's original deferred execution design <ref type="bibr" target="#b9">[10]</ref>. See Figure <ref type="figure" target="#fig_2">2</ref>   Evolutionary Search: The goal of our evolutionary search is to find the most training efficient architecture in the search space. To do this, we give each model a fixed training budget (24 TPUv2 hours) and define its fitness as its perplexity on the One Billion Words Benchmark (LM1B) <ref type="bibr" target="#b23">[24]</ref> in Tensor2Tensor <ref type="bibr" target="#b24">[25]</ref>. This approach, which we call an implicit efficiency objective by fixed training budget, contrasts previous architecture search works that explicitly aim to reduce training or inference step time when optimizing for efficiency <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b28">29]</ref>. Our objective is different in that the trade-off between step time and sample efficiency is implicit. For instance, a modification that doubles step time, but triples sample efficiency is a good modification in our search, as it ultimately makes the architecture more compute efficient. Indeed, the modifications we find to be most beneficial, squaring ReLUs and adding depthwise convolutions to attention, increase training step time. However, they improve the sample efficiency of the model so much that they decrease the total compute needed to reach a target quality, by drastically reducing the number of training steps needed to get there.</p><p>The search algorithm we use is Regularized Evolution <ref type="bibr" target="#b29">[30]</ref> with hurdles <ref type="bibr" target="#b12">[13]</ref>. We configure our hurdles using a 50 th percentile passing bar and space them such that equal compute is invested in each hurdle band; this reduces the search cost by a factor of 6.25X compared to the same experiment with full model evaluations (see Appendix A.3 for more details). Additionally, we use 7 training hours as a proxy for a full day's training because a vanilla Transformer comes within 90% of its 24 hour training perplexity with just 7 hours of training. This reduces the search cost further by a factor of 3.43X, for a total compute reduction factor of 21.43X. So, although our target is to improve 24 hour performance, it only takes about 1.1 hours to evaluate an individual on average (see Appendix A.4 for more search specifics, including mutation details and hyperparameters). We run our search for ?25K individuals and retrain the top 100 individuals on the search task to select the best one. Our search space is different from previous search spaces (see architecture search survey by <ref type="bibr" target="#b30">[31]</ref>), which are often heavily biased such that random search performs well (see analysis by <ref type="bibr" target="#b31">[32,</ref><ref type="bibr" target="#b32">33,</ref><ref type="bibr" target="#b33">34]</ref>). As our search space does not have this bias, 78% of random programs in our space with length equal to a Transformer program cannot train more than five minutes, due to numerical instability. Because of this open-endedness and abundance of degenerate programs, it is necessary to initialize the search population with copies of the Transformer <ref type="bibr" target="#b12">[13]</ref> (input embedding size d model = 512, feed forward upwards projection size d f f = 2048, and number of layers L = 6) (Figure <ref type="figure" target="#fig_3">3</ref>). To apply this initialization to our search space, we must determine how to divide the Transformer program into subprograms. To do this, we divide along the lines of the machine learning concepts that constitute it. For instance, we create one subprogram each for self-attention, ReLU and layer norm, using commonly used implementations (see Appendix A.5 for the complete list). We call this method conceptual initialization because it introduces a bias to the search through initialization, while leaving the search space for evolution and the action space for mutations open-ended. This contrasts the large amount of previous works that introduce bias through the search space. Although some works have also explored searching spaces that are open-ended like ours on miniature tasks <ref type="bibr" target="#b34">[35]</ref>, we demonstrate that our techniques can scale to full sized deep learning regimes (see Section 4).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Primer</head><p>Primer: We name the discovered model Primer, which stands for PRIMitives searched transformER (See Appendix Figure <ref type="figure" target="#fig_3">23</ref> for the full program). Primer shows significant improvement when retrained on the search task, requiring less than half the compute of Transformer to reach the same quality (Figure <ref type="figure" target="#fig_8">6</ref>). In Section 4, we additionally show that Primer makes equally large gains when transferred to other codebases, training regimes, datasets, and downstream one-shot tasks.</p><p>Primer-EZ: A core motivation of this work is to develop simple techniques that can be easily adopted by language modeling practitioners. To accomplish this, we perform ablation tests across two codebases (T5 <ref type="bibr" target="#b4">[5]</ref> and Tensor2Tensor <ref type="bibr" target="#b24">[25]</ref>) and determine which Primer modifications are generally useful (Appendix Figure <ref type="figure" target="#fig_8">26</ref>). The two that produce the most robust improvements are squaring feed forward ReLUs and adding depthwise convolution to attention multi-head projections (Figure <ref type="figure">4</ref>). We refer to a Transformer with just these two easy modifications as Primer-EZ; this is our recommended starting point for language modeling practitioners interested in using Primer. We now explain these modifications and then measure their empirical effectiveness.  Figure <ref type="figure">4</ref>: The two main modifications that give Primer most of its gains: depthwise convolution added to attention multi-head projections and squared ReLU activations. These modifications are easy to implement and transfer well across codebases. We call the model with just these two modifications Primer-EZ. Blue indicates portions of the original Transformer and red signifies one of our proposed modifications.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Squared ReLU:</head><p>The most effective modification is the improvement from a ReLU activation to a squared ReLU activation in the Transformer's feed forward block. Rectified polynomials of varying degrees have been studied in the context of neural network activation functions <ref type="bibr" target="#b35">[36]</ref>, but are not commonly used; to the best of our knowledge, this is the first time such rectified polynomial activations are demonstrated to be useful in Transformers. Interestingly, the effectiveness of higher order polynomials <ref type="bibr" target="#b36">[37]</ref> can also be observed in other effective Transformer nonlinearities, such as GLU <ref type="bibr" target="#b37">[38]</ref> variants like ReGLU <ref type="bibr" target="#b38">[39]</ref> (y = U x max(V x, 0) where is an element-wise product) and point-wise activations like approximate GELU <ref type="bibr" target="#b39">[40]</ref> (y = 0.5x(1 + tanh( 2/?(x + 0.044715x 3 )))). However, squared ReLU has drastically different asymptotics as x -? ? compared to the most commonly used activation functions: ReLU, GELU and Swish (Figure <ref type="figure" target="#fig_6">5</ref> left side). Squared ReLU does have significant overlap with ReGLU and in fact is equivalent when ReGLU's U and V weight matrices are the same and squared ReLU is immediately preceded by a linear transformation with weight matrix U . This leads us to believe that squared ReLUs capture the benefits of these GLU variants, while being simpler, without additional parameters, and delivering better quality (Figure <ref type="figure" target="#fig_6">5</ref> right side).  Multi-DConv-Head Attention (MDHA): Another effective modification is adding 3x1 depthwise convolutions after each of the multi-head projections for query Q, key K and value V in self-attention. These depthwise convolutions are performed over the spatial dimension of each dense projection's output. Interestingly, this ordering of pointwise followed by depthwise convolution is the reverse of typical separable convolution, which we find to be less effective in Appendix A.6. We also find that wider depthwise convolution and standard convolution not only do not improve performance, but in several cases hurt it. Although depthwise convolutions have been used for Transformers before <ref type="bibr" target="#b40">[41,</ref><ref type="bibr" target="#b41">42]</ref>, using them after each dense head projection has not been done to the best of our knowledge. MDHA is similar to Convolutional Attention <ref type="bibr" target="#b42">[43]</ref>, which uses separable convolution instead of depthwise convolution and does not apply convolution operations per attention head as we do.</p><formula xml:id="formula_0">2 1 0 1 2 3 4 2 1 0 1 2 3 4 ReLU GELU Swish Squared ReLU 2 1 0 1 2 2 1 0 1 2 y 1 0 1 2 3 Ux Vx ReGLU Squared ReLU R e L U G E L U S w i s h R e G L U S w i G L U S q r R e L U</formula><p>Other Modifications: The other Primer modifications are less effective. Graphs for each modification can be found in Appendix A.5 and an ablation study can be found in Appendix A.7. We briefly describe the modifications and their usefulnesses here:</p><p>? Shared Q and K Depthwise Representation: Primer shares some weight matrices for Q and K. K is created using the previously described MDHA projection and Q = KW for learnable weight matrix W ? R d?d . We find that this generally hurts performance. ? Pre and Post Normalization: The standard practice for Transformers has become putting normalization before both the self-attention and feed forward transformations <ref type="bibr" target="#b43">[44,</ref><ref type="bibr" target="#b44">45]</ref>. Primer uses normalization before self-attention but applies the second normalization after the feed forward transformation. We find this is helpful in some but not all cases. ? Custom Normalization: Primer uses a modified version of layer normalization <ref type="bibr" target="#b45">[46]</ref> that uses x(x -?) instead of (x -?) 2 , but we find this is not always effective. ? 12X Bottleneck Projection: The discovered model uses a smaller d model size of 384 (compared to the baseline's 512) and a larger d f f size of 4608 (compared to the baseline's 2048). We find this larger projection improves results dramatically at smaller sizes (?35M parameters), but is less effective for larger models, as has been previously noted <ref type="bibr" target="#b8">[9]</ref>. For this reason we do not include this modification when referencing Primer or Primer-EZ. ? Post-Softmax Spatial Gating: The discovered model has a set of per-channel learnable scalars after the attention softmax, which improves perplexity for fixed length sequences. However, these scalars cannot be applied to variable sequence lengths and so we do not include this modification in Primer for our experiments. ? Extraneous Modifications: There are a handful of additional modifications that produce no meaningful difference in the discovered architecture. For example, hidden states being multiplied by -1.12. Verifying that these modifications neither help nor hurt quality, we exclude them from discussion in the main text and do not include them when experimenting with Primer. These extraneous modifications can still be found in Appendix A.5.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Results</head><p>In our experiments, we compare Primer against three Transformer variants:</p><p>? Vanilla Transformer: The original Transformer <ref type="bibr" target="#b0">[1]</ref> with ReLU activations and layer normalization <ref type="bibr" target="#b45">[46]</ref> outside of the residual path. ? Transformer+GELU: A commonly used variant of the vanilla Transformer that uses a GELU <ref type="bibr" target="#b39">[40]</ref> approximation activation function <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b6">7]</ref>. ? Transformer++: A Transformer with the following enhancements: RMS normalization <ref type="bibr" target="#b46">[47]</ref>,</p><p>Swish activation <ref type="bibr" target="#b47">[48]</ref> and a GLU multiplicative branch <ref type="bibr" target="#b37">[38]</ref> in the feed forward inverted bottleneck (SwiGLU) <ref type="bibr" target="#b38">[39]</ref>. These modifications were benchmarked and shown to be effective in T5 <ref type="bibr" target="#b48">[49]</ref>.</p><p>We conduct our comparisons across three different codebases: Tensor2Tensor (T2T) <ref type="bibr" target="#b24">[25]</ref>, T5 <ref type="bibr" target="#b4">[5]</ref>,</p><p>and Lingvo <ref type="bibr" target="#b49">[50]</ref>. Tensor2Tensor is the codebase we use for searching and so a majority of our side-by-sides are done in T5 and Lingvo to prove transferability. In all cases, we use the default Transformer hyperparameters for each codebase, with regularization disabled. See Appendix A.8 for more hyperparameter details.</p><p>In the following sections, we will present our results in four main experiments on auto-regressive language modeling. First, we will show that Primer outperforms the baseline models on the search task. Next, we will show that the relationship between Primer's compute savings over Transformers and model quality follow a power law at optimal model sizes. These savings also transfer across datasets and codebases. Then, we will study Primer's gains in an established training regime and show that it enables 4.2X compute savings at a 500M parameter size using full compute T5 training. Finally, we will demonstrate that these gains transfer to the pretraining and one-shot downstream task setup established by GPT-3 <ref type="bibr" target="#b6">[7]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Search Task Comparison</head><p>We first analyze Primer's performance on the search task: LM1B language modeling with sequence length 64, ?35M model parameters, batches of 4096 tokens and 24 hours of training. We compare against the baseline models in both Tensor2Tensor (T2T) <ref type="bibr" target="#b24">[25]</ref> and T5 <ref type="bibr" target="#b4">[5]</ref> and on TPUv2s and V100 GPUs. We grade each model's performance according to how much faster it reaches the vanilla Transformer's final quality, which we will refer to as its speedup factor. Figure <ref type="figure" target="#fig_8">6</ref> shows that Primer provides a speedup factor of 1.7X or more over Transformer in all cases. Figure <ref type="figure" target="#fig_8">6</ref> also shows that both Primer and Primer-EZ generalize to other hardware platforms and codebases.</p><p>T r a n s f .</p><p>T r a n s f . + G E L U T r a n s f . + + P r im   Validation Loss</p><p>Figure <ref type="figure">7</ref>: Left: When sweeping over optimal model sizes, the relationship between Transformer language model quality and training compute roughly obeys a power law <ref type="bibr" target="#b8">[9]</ref>. Right: Comparison of these power law lines for varying Transformer modifications, fit with smoothed MSE loss. That the model lines are parallel to one another implies that compute savings by using superior modeling also scales as a power law with quality. Spacings between vertical dotted lines represent 2X differences in compute. Note that the x and y-axes in both plots are in log.</p><p>Next we study the scaling laws of Primer. Here we compare Primer to our baselines over many sizes by training each model using every permutation of L ? {6, 9, 12} layers, d model ? {384, 512, 1024} initial embedding size, and p ? {4, 8, 12} feed forward upwards projection ratio, creating a parameter range from 23M to 385M. The results, shown in Figure <ref type="figure">7</ref>, corroborate previous claims that, at optimal parameters sizes, the relationship between compute and language model quality roughly follows a power law <ref type="bibr" target="#b8">[9]</ref>. That is, the relationship between validation loss, l, and training compute, c, follows the relationship l = ac -k , for empirical constants a and k. This is represented as a line in double log space (Figure <ref type="figure">7</ref>): log l = -k log c + log a. However, these lines are not the same for each architecture. The lines are roughly parallel but shifted up and down. In Appendix A.9 we show that, given a vertical spacing of log b k , parallel lines such as these indicate compute savings, s, for superior modeling also follow a power law of the form l = a 1 (1 -1/b) k s -k . The intuition behind this is that b is a constant compute reduction factor for all l and thus a power law investment of training compute with relation to l results in a power law savings with relation to l as well (see Appendix A.9). Primer also has the capacity to improve inference, despite our search focusing on training compute. Figure <ref type="figure">8</ref> shows a Pareto front comparison of quality vs. inference, when using feed forward pass timing as a proxy for inference. We use forward pass timing as a proxy for inference because there are multiple ways to decode a language model, each with varying compute costs. A more in depth study could be conducted analyzing Primer's inference performance across different decoding methods, serving platforms, datasets, etc., but that is beyond the scope of this work.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Primer Transferability to Other Codebases, Datasets, and Model Types</head><p>We now study Primer's ability to transfer to larger datasets, PG19 and C4, in another codebase, T5. We additionally scale up to a higher compute regime that has been used as a proxy for large scale training by previous studies <ref type="bibr" target="#b48">[49,</ref><ref type="bibr" target="#b4">5]</ref>; the batches are increased to 65K tokens, the sequence lengths are a longer 512, each decoder is 110M parameters (d model = 768, d f f = 3072, L = 12) and each model is trained to ?525K steps on 4 TPUv3 chips. We also continue training each model to 1M steps to study the effect of larger compute budgets on Primer savings. The results, shown in Figure <ref type="figure">9</ref>, indicate that the Primer models are as strong in larger data, higher compute regimes, as they are in the smaller LM1B regime. Compared to the vanilla baseline, Primer and Primer-EZ are at least 1.8X more efficient at the end of training on both PG19 and C4.</p><p>124 Hours 236 Hours T r a n s f .</p><p>T r a n s f . + G E L U T r a n s f . + + P r i m e r P r i m e r -E Z T r a n s f .</p><p>T r a n s f . + G E L U T r a n s f . + + P r i m e r P r i m e r -E Z S w i t c h T r a n s f . S w i t c h P r i m e r S y n . S y n . + S q r R e L U In large scale compute configurations, the Primer compute savings ratios are even higher. To demonstrate Primer's savings in an established high compute training setup, we scale up to the full T5 compute regime, copying Raffel et al. exactly <ref type="bibr" target="#b4">[5]</ref>. This is the same as the C4 configuration in the previous section, but uses batches of ?1M tokens, 64 TPUv3 chips and 537M parameters (d model = 1024, d f f = 8192, L = 24). Primer is 4.2X more compute efficient than the original T5 model and 2X more efficient than our strengthened Transformer++ baseline (Table <ref type="table">1</ref>).</p><p>The reason why savings are even better here is because, at fixed sizes, more compute invested yields higher Primer compute savings. Figure <ref type="figure" target="#fig_10">10</ref> shows how the fraction of compute Primer needs to achieve parity with the original T5 architecture shrinks as the models are trained for longer; this is due to the asymptotic nature of both the control and variable perplexity training curves. This differs from the power law savings described in Section A.6. There, we use the optimal number of parameters for each compute budget, and so the compute saving factor, b, remains constant. For fixed model sizes, the compute saving factor grows as more compute is invested, meaning that compute savings can exceed the power law estimation. Note, this means that comparisons such as the ones given here can be "gamed" by investing more compute than is necessary for baseline models. It is for this reason that we use an exact replica of Raffel et al.'s <ref type="bibr" target="#b4">[5]</ref> training regime: to demonstrate Primer's savings in an already published training configuration. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Primer Transferability to Downstream One-Shot Tasks</head><p>In our final comparison, we demonstrate Primer's improvements also hold in the pretraining and one-shot downstream task transfer regime. Recent trends in language modeling have moved towards training large models on large datasets, which is referred to as "pretraining." These models are then transferred to unseen datasets and tasks, and, without much or any additional training, demonstrate the capacity to perform well on those "downstream" tasks <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b50">51]</ref>. In the decoder-only auto-regressive language modeling configuration we study here, the most impressive results have been achieved by GPT-3 <ref type="bibr" target="#b6">[7]</ref>, which showed that large language models can exhibit strong performance on unseen tasks given only one example -referred to as "one-shot" learning. In this section, we demonstrate that Primer's training compute savings stretch beyond reaching a target pretraining perplexity and indeed transfer to downstream one-shot task performance.</p><p>To do this, we replicate the GPT-3 pretraining and one-shot evaluation setup. This replication is not exactly the same as the one used for GPT-3 because GPT-3 was not open sourced. Thus, these experiments are not meant to compare directly to GPT-3, as there are configuration differences. Instead, these experiments are used as a controlled comparison of the Transformer and Primer architectures. We conduct these experiments in the Lingvo codebase using a proprietary pretraining dataset. The downstream tasks are configured in the same one-shot way described by Brown et al. <ref type="bibr" target="#b6">[7]</ref>  training compute budgets on downstream one-shot tasks, similar to GPT-3. Primer achieves slightly better performance than Transformer when given 3X less pretraining compute and substantially better performance when given the same pretraining compute. Here we stop at 72K TPUv4 hours to roughly match the quality of GPT-3 XL, but the compute savings of Primer would be larger if we let the two models run longer (see Figure <ref type="figure" target="#fig_10">10</ref>). Note, this is a crude comparison that uses averaged scores from the 27 one-shot tasks we evaluate. See Appendix A.11 (Table <ref type="table">6</ref> and Figure <ref type="figure" target="#fig_2">27</ref>) for exact task scores.</p><p>Figure <ref type="figure" target="#fig_11">11</ref> shows that Primer achieves the same pretraining perplexity and one-shot downstream performance as Transformer+GELU while using 3X less compute. Table <ref type="table">6</ref> in the Appendix gives the exact performance numbers for each of the 27 evaluated downstream tasks. Primer, despite using 3X less compute, outperforms Transfomer+GELU on 5 tasks, does worse on 1 task, and performs equivalently on the remaining 21 tasks. The same table shows that when given equivalent compute, Primer outperforms Transformer+GELU on 15 tasks, does worse on 2 tasks, and performs equivalently on the remaining 10 tasks. This result shows that not only can Primer improve language modeling perplexity, but the improvements also transfer to downstream NLP tasks.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Conclusion</head><p>Limitations: There are limitations to this study. First, although our comparisons are at substantial sizes, they are still orders of magnitude smaller than state-of-the-art models such as the full-scale GPT-3 <ref type="bibr" target="#b6">[7]</ref>. Second, we focus primarily on decoder-only models, while encoder-based sequence models are still widely used <ref type="bibr" target="#b0">[1,</ref><ref type="bibr" target="#b1">2,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b3">4,</ref><ref type="bibr" target="#b5">6,</ref><ref type="bibr" target="#b51">52]</ref>. In Appendix A.12, we perform encoder-decoder masked language modeling comparisons in T5, but do not study the results in significant depth. The main finding there is that, although Primer modifications improve upon vanilla Transformer, they perform only as well as Transformer++. This result suggests that architectural modifications that work well for decoder-only auto-regressive language models may not necessarily be as effective for encoder-based masked language models. Developing better encoders is a topic of our future research.</p><p>Recommendations and Future Directions: We recommend the adoption of Primer and Primer-EZ for auto-regressive language modeling because of their strong performance, simplicity, and robustness to hyperparameter and codebase changes. To prove their potential, we simply dropped them into established codebases and, without any changes, showed that they can give significant performance boosts. Furthermore, in practice, additional tuning could further improve their performance.</p><p>We also hope our work encourages more research into the development of efficient Transformers. For example, an important finding of this study is that small changes to activation functions can yield more efficient training. In the effort to reduce the cost of Transformers, more investment in the development of such simple changes could be a promising area for future exploration.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head></head><label></label><figDesc>tf.layers.dense MAX: tf.math.maximum SIN: tf.math.sin tf.layers.dense(inputs=hidden_state_0, units=512)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Overview of DNAs that define a decoder model program (i.e., an auto-regressive language model). Each DNA has a collection of subprograms, where SUBPROGRAM 0 is the MAIN() function entry point. Each subprogram is comprised of instructions, which are converted to lines of TensorFlow code. Instruction operations map to either basic TensorFlow library functions from the primitives vocabulary or one of the parent DNA's subprograms. The operation's arguments are filled using the parent instruction's argument set, which contains values for all potential operation arguments; arguments that are not used by a particular operation are simply ignored.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Example of a program converted into its corresponding TensorFlow graph. Nodes that do not contribute to the program output are not executed thanks to TensorFlow's deferred execution design.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Small scale searches (10 hours on 10 TPUv2 chips) comparing conceptual initialization to random initialization. Our search space is open-ended enough that it is infeasible to search without strong initialization.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head></head><label></label><figDesc>-Head Attention (MDHA)</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Left: Squared ReLU has starkly different asymptotics compared to other common activation functions. Center: Squared ReLU has significant overlap with GLU variants [39] that use activations with ReLU-like asymptotics, such as ReGLU and SwiGLU. Our experiments indicate that squared ReLU is better than these GLU variants in Transformer language models. Right: Comparison of different nonlinearities in Transformers trained on C4 auto-regressive LM for 525K steps.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Comparison on the LM1B search task using 35M parameter models. "Speedup Factor" refers to the fraction of compute each model needs to reach quality parity with the vanilla Transformer trained for 24 hours. Primer and Primer-EZ both achieve over 1.7X speedup in all cases. Note that results transfer across codebases and different hardware.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Compute savings of Primer vs. the original T5 architecture on C4 LM over time. The more compute invested in training, the higher the savings due to the asymptotic nature of both perplexity curves. Primer achieves the same performance as the original T5 architecture with 4.2X less compute.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Comparison between Transformer+GELU and Primer at 1.9B parameters and varying training compute budgets on downstream one-shot tasks, similar to GPT-3. Primer achieves slightly better performance than Transformer when given 3X less pretraining compute and substantially better performance when given the same pretraining compute. Here we stop at 72K TPUv4 hours to roughly match the quality of GPT-3 XL, but the compute savings of Primer would be larger if we let the two models run longer (see Figure10). Note, this is a crude comparison that uses averaged scores from the 27 one-shot tasks we evaluate. See Appendix A.11 (Table6and Figure27) for exact task scores.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head></head><label></label><figDesc>Switch Transformer and Synthesizer) in a different codebase (T5) with an order of magnitude more compute than the search task. Compared to the vanilla baseline, Primer and Primer-EZ are at least 1.8X more efficient at the end of training on both PG19 and C4. In all cases, the fraction of Primer compute savings increases as more compute is invested. Primer-EZ modifications also improve Switch Transformer (550M params) and Synthesizer (145M params), showing that it is compatible with other efficient methods. Compute budgets are selected according to how long it takes each baseline to train for 525K and 1M steps. See Appendix A.10 for exact numbers.Figure9also shows that the Primer modifications are compatible with other efficient model families, such as large sparse mixture-of-experts like Switch Transformer<ref type="bibr" target="#b7">[8]</ref> and efficient Transformer approximations like Synthesizer<ref type="bibr" target="#b22">[23]</ref>. For these experiments, we use the T5 implementations provided by Narang et al.<ref type="bibr" target="#b48">[49]</ref>. The Primer-EZ techniques of added depthwise convolutions and squared ReLUs reduce Switch Transformer's compute cost by a factor of 1.5X; this translates to a 0.6 perplexity improvement when controlling for compute (see Appendix A.10). Adding squared ReLUs to Synthesizer reduces training costs by a factor of 2.0X and improves perplexity by 0.7 when fully trained.</figDesc><table><row><cell>0.8 1.0 1.2 1.4 1.6 1.8 2.0 2.2 2.4 Figure 9: Comparison transferring Primer to larger datasets (C4 and PG19) and different model Speedup Factor C4 PG19 C4 C4 127 Hours 242 Hours 127 Hours 242 Hours 142 Hours 270 Hours Model Steps TPUv3 Hours PPLX Original T5 1M 15.7K 13.25 T5++ 251K 4.6K 13.25 Primer 207K 3.8K 13.25 T5++ 1M 16.5K 12.69 Primer 480K 8.3K 12.69 Primer 1M 17.3K 12.35 Table 1: Comparison in compute usage to reach target qualities on C4 LM at 537M pa-rameters using the full T5 compute scale. Tar-get qualities are selected according to the final performances of the baseline models. Primer achieves the same quality as the original T5 families (4.3 Large Scale T5 Auto-Regressive Language Model Training architecture using 4.2X less compute.</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head></head><label></label><figDesc>, with single prefix examples fed into each model with each task's inputs. We compare (1) a baseline 1.9B parameter Transformer (d model = 2048, d f f = 12288, L = 24) with GELU activations, meant to approximate the GPT-3 XL architecture, and (2) a full Primer without shared QK representations, which only hurt performance according to Appendix A.7. Each model is trained using batches of ?2M tokens using 512 TPUv4 chips for ?140 hours (?71.8K total accelerator hours or ?1M train steps). We once again use the T5 training hyperparemeters without any additional tuning.</figDesc><table><row><cell>Negative PPLX</cell><cell>19 16 13</cell><cell>0</cell><cell>36000 TPUv4 Hours One-Shot Pretraining 72000 Transformer Primer</cell><cell>Neg PPLX</cell><cell>-16 -13 Pretraining</cell><cell>Average Score</cell><cell>29 37</cell><cell>One-Shot QA Tasks</cell><cell>52 Multi-Choice Tasks One-Shot 57 Average Score</cell><cell>Transf. 24K Hrs Transf. 72K Hrs Primer 24K Hrs Primer 72K Hrs</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>https://github.com/google-research/google-research/tree/master/primer</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>We provide details of our primitives search in TensorFlow, but the same approach can also be applied to other deep learning libraries.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>Acknowledgements</head><p>We thank <rs type="person">Zhen Xu</rs> for his help with infrastructure. We also thank <rs type="person">Gabriel Bender</rs>, <rs type="person">Hallie Cramer</rs>, <rs type="person">Andrew Dai</rs>, <rs type="person">Nan Du</rs>, <rs type="person">Yanping Huang</rs>, <rs type="person">Daphne Ippolito</rs>, <rs type="person">Norm Jouppi</rs>, <rs type="person">Lluis-Miquel Munguia</rs>, <rs type="person">Sharan Narang</rs>, <rs type="person">Ruoming Pang</rs>, <rs type="person">David Patterson</rs>, <rs type="person">Yanqi Zhou</rs>, and the <rs type="institution">Google Brain Team</rs> for their help and feedback.</p></div>
+			</div>			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><forename type="middle">M</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aidan</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukasz</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Illia</forename><surname>Polosukhin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Bert: Pre-training of deep bidirectional transformers for language understanding</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Devlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Chang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenton</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kristina</forename><surname>Toutanova</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NAACL</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Xlnet: Generalized autoregressive pretraining for language understanding</title>
+		<author>
+			<persName><forename type="first">Zhilin</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zihang</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiming</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaime</forename><surname>Carbonell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruslan</forename><surname>Salakhutdinov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<author>
+			<persName><forename type="first">Yinhan</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Myle</forename><surname>Ott</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naman</forename><surname>Goyal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jingfei</forename><surname>Du</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mandar</forename><surname>Joshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Danqi</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Omer</forename><surname>Levy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Lewis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Zettlemoyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Veselin</forename><surname>Stoyanov</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Roberta</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1907.11692</idno>
+		<title level="m">A robustly optimized bert pretraining approach</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Exploring the limits of transfer learning with a unified text-to-text transformer</title>
+		<author>
+			<persName><forename type="first">Colin</forename><surname>Raffel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Roberts</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katherine</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sharan</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Matena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanqi</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peter</forename><forename type="middle">J</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Machine Learning Research</title>
+		<imprint>
+			<biblScope unit="volume">21</biblScope>
+			<biblScope unit="issue">140</biblScope>
+			<biblScope unit="page" from="1" to="67" />
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Adiwardana</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Minh-Thang</forename><surname>Luong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>So</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Hall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noah</forename><surname>Fiedel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Thoppilan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Apoorv</forename><surname>Kulshreshtha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gaurav</forename><surname>Nemade</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yifeng</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2001.09977</idno>
+		<title level="m">Towards a human-like open-domain chatbot</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Language models are few-shot learners</title>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Tom B Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nick</forename><surname>Mann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Melanie</forename><surname>Ryder</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Subbiah</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prafulla</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arvind</forename><surname>Dhariwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pranav</forename><surname>Neelakantan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Girish</forename><surname>Shyam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amanda</forename><surname>Sastry</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Askell</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title level="m" type="main">Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity</title>
+		<author>
+			<persName><forename type="first">William</forename><surname>Fedus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><forename type="middle">M</forename><surname>Shazeer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2101.03961</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Kaplan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Mccandlish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tom</forename><surname>Henighan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tom</forename><forename type="middle">B</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benjamin</forename><surname>Chess</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rewon</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Gray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alec</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dario</forename><surname>Amodei</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2001.08361</idno>
+		<title level="m">Scaling laws for neural language models</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Tensorflow: A system for large-scale machine learning</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Mart?n Abadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Barham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andy</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanjay</forename><surname>Devin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Irving</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Isard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josh</forename><surname>Kudlur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajat</forename><surname>Levenberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sherry</forename><surname>Monga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Murray</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Steiner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Tucker</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pete</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Warden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wicke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoqiang</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">OSDI</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Large-scale evolution of image classifiers</title>
+		<author>
+			<persName><forename type="first">Esteban</forename><surname>Real</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sherry</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Selle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saurabh</forename><surname>Saxena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yutaka</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Leon</forename><surname>Suematsu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Kurakin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Hierarchical representations for efficient architecture search</title>
+		<author>
+			<persName><forename type="first">Hanxiao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Oriol</forename><surname>Vinyals</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chrisantha</forename><surname>Fernando</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Koray</forename><surname>Kavukcuoglu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">The evolved transformer</title>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>So</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Evolving normalizationactivation layers</title>
+		<author>
+			<persName><forename type="first">Hanxiao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andrew</forename><surname>Brock</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karen</forename><surname>Simonyan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Evolving artificial neural networks</title>
+		<author>
+			<persName><forename type="first">Xin</forename><surname>Yao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE</title>
+		<meeting>the IEEE</meeting>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="volume">87</biblScope>
+			<biblScope unit="page" from="1423" to="1447" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Evolutionary principles in self-referential learning. (on learning how to learn: The meta-meta</title>
+		<author>
+			<persName><forename type="first">Jurgen</forename><surname>Schmidhuber</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1987">1987</date>
+			<pubPlace>Germany</pubPlace>
+		</imprint>
+		<respStmt>
+			<orgName>Technische Universitat Munchen</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Diploma thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Designing neural networks through neuroevolution</title>
+		<author>
+			<persName><forename type="first">Kenneth</forename><surname>Stanley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeff</forename><surname>Clune</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joel</forename><surname>Lehman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Risto</forename><surname>Miikkulainen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Nature Machine Intelligence</title>
+		<imprint>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="24" to="35" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Language models are unsupervised multitask learners</title>
+		<author>
+			<persName><forename type="first">Alec</forename><surname>Radford</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Child</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Luan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dario</forename><surname>Amodei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+		<respStmt>
+			<orgName>OpenAI</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">It&apos;s not just size that matters: Small language models are also few-shot learners</title>
+		<author>
+			<persName><forename type="first">Timo</forename><surname>Schick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hinrich</forename><surname>Sch?tze</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2009.07118</idno>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<author>
+			<persName><forename type="first">Sinong</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Fang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Madian</forename><surname>Khabsa</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hanzi</forename><surname>Mao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Ma</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2104.14690</idno>
+		<title level="m">Entailment as few-shot learner</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<title level="m" type="main">Making pre-trained language models better few-shot learners</title>
+		<author>
+			<persName><forename type="first">Tianyu</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Fisch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Danqi</forename><surname>Chen</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2012.15723</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<monogr>
+		<title level="m" type="main">Compressive transformers for long-range sequence modelling</title>
+		<author>
+			<persName><forename type="first">Jack</forename><forename type="middle">W</forename><surname>Rae</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anna</forename><surname>Potapenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Siddhant</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Jayakumar</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Lillicrap</surname></persName>
+		</author>
+		<idno>ArXiv, abs/1911.05507</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<title level="m" type="main">Synthesizer: Rethinking self-attention in transformer models</title>
+		<author>
+			<persName><forename type="first">Yi</forename><surname>Tay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dara</forename><surname>Bahri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Metzler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Da-Cheng</forename><surname>Juan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhe</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Che</forename><surname>Zheng</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2005.00743</idno>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<title level="m" type="main">One billion word benchmark for measuring progress in statistical language modeling</title>
+		<author>
+			<persName><forename type="first">Ciprian</forename><surname>Chelba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tomas</forename><surname>Mikolov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Schuster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qi</forename><surname>Ge</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thorsten</forename><surname>Brants</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phillipp</forename><surname>Koehn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tony</forename><surname>Robinson</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note>Interspeech</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">Tensor2tensor for neural machine translation</title>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Samy</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eugene</forename><surname>Brevdo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Francois</forename><surname>Chollet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aidan</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephan</forename><surname>Gouws</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">?ukasz</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nal</forename><surname>Kalchbrenner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ryan</forename><surname>Sepassi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1803.07416</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Efficientnet: Rethinking model scaling for convolutional neural networks</title>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Platformaware neural architecture search for mobile</title>
+		<author>
+			<persName><forename type="first">Mingxing</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruoming</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijay</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Mnasnet</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)</title>
+		<imprint>
+			<date type="published" when="2019">2019. 2019</date>
+			<biblScope unit="page" from="2815" to="2823" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<author>
+			<persName><forename type="first">Han</forename><surname>Cai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ligeng</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Song</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Proxylessnas</surname></persName>
+		</author>
+		<idno>arXiv preprint:1812.00332</idno>
+		<title level="m">Direct neural architecture search on target task and hardware</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Efficient multi-objective neural architecture search via lamarckian evolution</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Elsken</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>Hendrik Metzen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Hutter</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Regularized evolution for image classifier architecture search</title>
+		<author>
+			<persName><forename type="first">Esteban</forename><surname>Real</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alok</forename><surname>Aggarwal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanping</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">AAAI</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Neural architecture search: A survey</title>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Elsken</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>Hendrik Metzen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Hutter</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Machine Learning Research</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<biblScope unit="issue">55</biblScope>
+			<biblScope unit="page" from="1" to="21" />
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Random search and reproducibility for neural architecture search</title>
+		<author>
+			<persName><forename type="first">Liam</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ameet</forename><forename type="middle">S</forename><surname>Talwalkar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">UAI</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Evaluating the search phase of neural architecture search</title>
+		<author>
+			<persName><forename type="first">Kaicheng</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christian</forename><surname>Sciuto</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Jaggi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Claudiu</forename><surname>Musat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mathieu</forename><surname>Salzmann</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Can weight sharing outperform random architecture search? An investigation with tunas</title>
+		<author>
+			<persName><forename type="first">Gabriel</forename><surname>Bender</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hanxiao</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Grace</forename><surname>Chu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuyang</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pieter-Jan</forename><surname>Kindermans</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">CVPR</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Automl-zero: Evolving machine learning algorithms from scratch</title>
+		<author>
+			<persName><forename type="first">Esteban</forename><surname>Real</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>So</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Dense associative memory for pattern recognition</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Krotov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">J</forename><surname>Hopfield</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Multiplicative interactions and where to find them</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Siddhant</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Jayakumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wojciech</forename><forename type="middle">M</forename><surname>Menick</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Czarnecki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jack</forename><forename type="middle">W</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Simon</forename><surname>Rae</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Osindero</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tim</forename><surname>Teh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Razvan</forename><surname>Harley</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Pascanu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Language modeling with gated convolutional networks</title>
+		<author>
+			<persName><forename type="first">Angela</forename><surname>Yann N Dauphin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Auli</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Grangier</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICML</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2002.05202</idno>
+		<title level="m">Glu variants improve transformer</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Bridging nonlinearities and stochastic regularizers with gaussian error linear units</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Hendrycks</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Gimpel</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1606.08415</idno>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">QANet: Combining local convolution with global self-attention for reading comprehension</title>
+		<author>
+			<persName><forename type="first">Adams</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yu</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Dohan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Minh-Thang</forename><surname>Luong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rui</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Norouzi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICLR</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<monogr>
+		<title level="m" type="main">Conformer: Convolutionaugmented transformer for speech recognition</title>
+		<author>
+			<persName><forename type="first">Anmol</forename><surname>Gulati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><surname>Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chung-Cheng</forename><surname>Chiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niki</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yu</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiahui</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Han</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shibo</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhengdong</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yonghui</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruoming</forename><surname>Pang</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note>Interspeech</note>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<monogr>
+		<author>
+			<persName><forename type="first">Haiping</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bin</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noel</forename><surname>Codella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mengchen</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiyang</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lu</forename><surname>Yuan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lei</forename><surname>Zhang</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2103.15808</idno>
+		<title level="m">CvT: Introducing convolutions to vision transformers</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<monogr>
+		<title level="m" type="main">Adaptive input representations for neural language modeling</title>
+		<author>
+			<persName><forename type="first">Alexei</forename><surname>Baevski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Auli</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1809.10853</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">In arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<monogr>
+		<author>
+			<persName><forename type="first">Ruibin</forename><surname>Xiong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunchang</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Di</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Xing</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Huishuai</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanyan</forename><surname>Lan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Liu</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2002.04745</idno>
+		<title level="m">On layer normalization in the transformer architecture</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<monogr>
+		<author>
+			<persName><forename type="first">Jimmy</forename><surname>Ba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jamie</forename><surname>Kiros</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Geoffrey</forename><forename type="middle">E</forename><surname>Hinton</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1607.06450</idno>
+		<title level="m">Layer normalization</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Root mean square layer normalization</title>
+		<author>
+			<persName><forename type="first">Biao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rico</forename><surname>Sennrich</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NeurIPS</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<monogr>
+		<author>
+			<persName><forename type="first">Prajit</forename><surname>Ramachandran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Barret</forename><surname>Zoph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1710.05941</idno>
+		<title level="m">Searching for activation functions</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<monogr>
+		<author>
+			<persName><forename type="first">Sharan</forename><surname>Narang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyung</forename><forename type="middle">Won</forename><surname>Chung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yi</forename><surname>Tay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">William</forename><surname>Fedus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thibault</forename><surname>F?vry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Matena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karishma</forename><surname>Malkan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noah</forename><surname>Fiedel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Noam</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhenzhong</forename><surname>Lan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanqi</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nan</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jake</forename><surname>Marcus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Roberts</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Colin</forename><surname>Raffel</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2102.11972</idno>
+		<title level="m">Do transformer modifications transfer across implementations and applications? arXiv preprint</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<monogr>
+		<title level="m" type="main">Lingvo: a modular and scalable framework for sequence-to-sequence modeling</title>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yonghui</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ye</forename><surname>Jia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Anjuli Kannan</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Sainath</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Yuan Cao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yanzhang</forename><surname>Chiu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Chorowski</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Smit Hinsu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><surname>Laurenzo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Orhan</forename><surname>Qin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wolfgang</forename><surname>Firat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Suyog</forename><surname>Macherey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankur</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shuyuan</forename><surname>Bapna</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ruoming</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ron</forename><forename type="middle">J</forename><surname>Pang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rohit</forename><surname>Weiss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Qiao</forename><surname>Prabhavalkar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Benoit</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bowen</forename><surname>Jacob</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyoukjoong</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ciprian</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S?bastien</forename><surname>Chelba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bo</forename><surname>Jean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rohan</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajat</forename><surname>Anil</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaobing</forename><surname>Tibrewal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akiko</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Navdeep</forename><surname>Eriguchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naveen</forename><surname>Jaitly</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Colin</forename><surname>Ari</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parisa</forename><surname>Cherry</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Otavio</forename><surname>Haghani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youlong</forename><surname>Good</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Isaac</forename><surname>?lvarez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei-Ning</forename><surname>Caswell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zongheng</forename><surname>Hsu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kuan-Chieh</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ekaterina</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katrin</forename><surname>Gonina</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ben</forename><surname>Tomanek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zelin</forename><surname>Vanik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llion</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Schuster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dehao</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kazuki</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">George</forename><forename type="middle">F</forename><surname>Irie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Foster</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Uri</forename><surname>Richardson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Alon</surname></persName>
+		</author>
+		<idno>ArXiv, abs/1902.08295</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Semi-supervised sequence learning</title>
+		<author>
+			<persName><forename type="first">Andrew</forename><forename type="middle">M</forename><surname>Dai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Quoc</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Sequence to sequence learning with neural networks</title>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Oriol</forename><surname>Vinyals</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc V</forename><surname>Le</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Almost optimal exploration in multi-armed bandits</title>
+		<author>
+			<persName><forename type="first">Zohar</forename><surname>Karnin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tomer</forename><surname>Koren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Oren</forename><surname>Somekh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 30th International Conference on Machine Learning</title>
+		<meeting>the 30th International Conference on Machine Learning</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Hyperband: A novel bandit-based approach to hyperparameter optimization</title>
+		<author>
+			<persName><forename type="first">Lisha</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Jamieson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Giulia</forename><surname>Desalvo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Afshin</forename><surname>Rostamizadeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ameet</forename><surname>Talwalkar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Machine Learning Research</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">185</biblScope>
+			<biblScope unit="page" from="1" to="52" />
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">Program synthesis using uniform mutation by addition and deletion</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Thomas Helmuth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Mcphee</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Spector</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Genetic and Evolutionary Computation Conference</title>
+		<meeting>the Genetic and Evolutionary Computation Conference</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<monogr>
+		<title level="m" type="main">Adafactor: Adaptive learning rates with sublinear memory cost</title>
+		<author>
+			<persName><forename type="first">Noam</forename><forename type="middle">M</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mitchell</forename><surname>Stern</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1804.04235</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">Self-attention with relative position representations</title>
+		<author>
+			<persName><forename type="first">Peter</forename><surname>Shaw</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jakob</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Vaswani</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">NAACL-HLT</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">Sentencepiece: A simple and language independent subword tokenizer and detokenizer for neural text processing</title>
+		<author>
+			<persName><forename type="first">Taku</forename><surname>Kudo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Richardson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">EMNLP</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<author>
+			<persName><forename type="first">David</forename><surname>Patterson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Gonzalez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Quoc</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chen</forename><surname>Liang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Llu?s-Miquel</forename><surname>Mungu?a</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Rothchild</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">R</forename><surname>So</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maud</forename><surname>Texier</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2104.10350</idno>
+		<title level="m">Carbon emissions and large neural network training</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<monogr>
+		<ptr target="https://www.gstatic.com/gumdrop/sustainability/24x7-carbon-free-energy-methodologies-metrics.pdf.Ac-cessed" />
+		<title level="m">Methodologies and metrics</title>
+		<imprint>
+			<biblScope unit="page" from="2021" to="2029" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

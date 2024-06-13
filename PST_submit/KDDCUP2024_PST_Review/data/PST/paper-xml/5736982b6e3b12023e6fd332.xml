@@ -1,0 +1,1721 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">A Scalable Architecture for Ordered Parallelism</title>
+				<funder>
+					<orgName type="full">C-FAR</orgName>
+				</funder>
+				<funder ref="#_5UQDWQS">
+					<orgName type="full">NSERC</orgName>
+				</funder>
+				<funder>
+					<orgName type="full">DARPA</orgName>
+				</funder>
+				<funder ref="#_Gr3AEa6">
+					<orgName type="full">National Science Foundation</orgName>
+					<orgName type="abbreviated">NSF</orgName>
+				</funder>
+				<funder>
+					<orgName type="full">MARCO</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Mark</forename><forename type="middle">C</forename><surname>Jeffrey</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="department">NVIDIA / MIT CSAIL</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Suvinay</forename><surname>Subramanian</surname></persName>
+							<email>suvinay@csail.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="department">NVIDIA / MIT CSAIL</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Cong</forename><surname>Yan</surname></persName>
+							<email>congy@csail.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="department">NVIDIA / MIT CSAIL</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Joel</forename><surname>Emer</surname></persName>
+							<email>emer@csail.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="department">NVIDIA / MIT CSAIL</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Daniel</forename><surname>Sanchez</surname></persName>
+							<email>sanchez@csail.mit.edu</email>
+							<affiliation key="aff0">
+								<orgName type="department">NVIDIA / MIT CSAIL</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Mit</forename><surname>Csail</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="department">NVIDIA / MIT CSAIL</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">A Scalable Architecture for Ordered Parallelism</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/2830772.2830777</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:22+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>Multicore</term>
+					<term>ordered parallelism</term>
+					<term>irregular parallelism</term>
+					<term>finegrain parallelism</term>
+					<term>synchronization</term>
+					<term>speculative execution</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>We present Swarm, a novel architecture that exploits ordered irregular parallelism, which is abundant but hard to mine with current software and hardware techniques. In this architecture, programs consist of short tasks with programmer-specified timestamps. Swarm executes tasks speculatively and out of order, and efficiently speculates thousands of tasks ahead of the earliest active task to uncover ordered parallelism. Swarm builds on prior TLS and HTM schemes, and contributes several new techniques that allow it to scale to large core counts and speculation windows, including a new execution model, speculation-aware hardware task management, selective aborts, and scalable ordered commits.</p><p>We evaluate Swarm on graph analytics, simulation, and database benchmarks. At 64 cores, Swarm achieves 51-122? speedups over a single-core system, and outperforms software-only parallel algorithms by 3-18?.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">INTRODUCTION</head><p>Parallel architectures are now pervasive, but threadlevel parallelism in applications is often scarce <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b34">35]</ref>. Thus, it is crucial that we explore new architectural mechanisms to efficiently exploit as many types of parallelism as possible. Doing so makes parallel systems more versatile, easier to program, and, for many applications, it is the only way to improve performance.</p><p>We focus on ordered irregular parallelism <ref type="bibr" target="#b54">[55]</ref>, which is often abundant but hard to exploit. Programs with ordered irregular parallelism have three key features.</p><p>First, they consist of tasks that must follow a total or partial order. Second, tasks may have data dependences that are not known a priori. Third, tasks are not known in advance. Instead, tasks dynamically create children tasks and schedule them to run at a future time.</p><p>Ordered irregular parallelism is abundant in many domains, such as simulation, graph analytics, and databases. For example, consider a timing simulator for a parallel computer. Each task is an event (e.g., executing an instruction in a simulated core). Each task must run at a specific simulated time (introducing order constraints among tasks), and modifies a specific component (possibly introducing data dependences among tasks). Tasks dynamically create other tasks (e.g., a simulated memory access), possibly for other components (e.g., a simulated cache), and schedule them for a future simulated time.</p><p>Prior work has tried to exploit ordered parallelism in software <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b33">34]</ref>, but has found that, in current multicores, runtime overheads negate the benefits of parallelism. This motivates the need for architectural support.</p><p>To guide our design, we first characterize several applications with ordered irregular parallelism (Sec. 2). We find that tasks in these applications are as small as a few tens of instructions. Moreover, many of these algorithms rarely have true data dependences among tasks, and their maximum achievable parallelism exceeds 100?. It may seem that thread-level speculation (TLS) <ref type="bibr" target="#b27">[28,</ref><ref type="bibr" target="#b59">60,</ref><ref type="bibr" target="#b65">66,</ref><ref type="bibr" target="#b67">68]</ref>, which speculatively parallelizes sequential programs, could exploit this parallelism. However, this is not the case due to two reasons (Sec. 3):</p><p>? Ordered irregular algorithms have little parallelism when written as sequential programs. To enforce order constraints, sequential implementations introduce false data dependences among otherwise independent tasks. For example, sequential implementations of timing simulators use a priority queue to store future tasks. Priority queue accesses introduce false data dependences that limit the effectiveness of TLS. ? To scale, ordered irregular algorithms need very large speculation windows, of thousands of tasks (hundreds of thousands of instructions). Prior TLS schemes use techniques that scale poorly beyond few cores and cannot support large speculation windows. We present Swarm, an architecture that tackles these challenges. Swarm consists of (i) a task-based execution model where order constraints do not introduce false data dependences, and (ii) a microarchitecture that leverages this execution model to scale efficiently (Sec. 4). Swarm is a tiled multicore with distributed task queues, speculative out-of-order task execution, and ordered task commits. Swarm adapts prior eager version management and conflict detection schemes <ref type="bibr" target="#b47">[48,</ref><ref type="bibr" target="#b78">79]</ref>, and features several new techniques that allow it to scale. Specifically, we make the following novel contributions:</p><note type="other">1</note><p>? An execution model based on tasks with programmerspecified timestamps that conveys order constraints to hardware without undue false data dependences. ? A hardware task management scheme that features speculative task creation and dispatch, drastically reducing task management overheads, and implements a very large speculation window. ? A scalable conflict detection scheme that leverages eager versioning to, upon mispeculation, selectively abort the mispeculated task and its dependents (unlike prior TLS schemes that forward speculative data, which abort all later tasks). ? A distributed commit protocol that allows ordered commits without serialization, supporting multiple commits per cycle with modest communication (unlike prior schemes that rely on successor lists, tokenpassing, and serialized commits). We evaluate Swarm in simulation (Sec. 5 and Sec. 6) using six challenging workloads: four graph analytics algorithms, a discrete-event simulator, and an in-memory database. At 64 cores, Swarm achieves speedups of 51-122? over a single-core Swarm system, and outperforms state-of-the-art parallel implementations of these algorithms by 2.7-18.2?. In summary, by making ordered execution scalable, Swarm speeds up challenging algorithms that are currently limited by stagnant single-core performance. Moreover, Swarm simplifies parallel programming, as it frees developers from using error-prone explicit synchronization.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">MOTIVATION 2.1 Ordered Irregular Parallelism</head><p>Applications with ordered irregular parallelism have three main characteristics <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b54">55]</ref>. First, they consist of tasks that must follow a total or partial order. Second, tasks are not known in advance. Instead, tasks dynamically create children tasks, and schedule them to run at a future time. Task execution order is different from task creation order. Third, tasks may have data dependences that are not known a priori. Ordered irregular algorithms are common in many domains. First, they are common in graph analytics, especially in search problems <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b54">55]</ref>. Second, they are important in simulating systems whose state evolves over time, such as circuits <ref type="bibr" target="#b46">[47]</ref>, computers <ref type="bibr" target="#b11">[12,</ref><ref type="bibr" target="#b58">59]</ref>, networks <ref type="bibr" target="#b36">[37,</ref><ref type="bibr" target="#b71">72]</ref>, healthcare systems <ref type="bibr" target="#b38">[39]</ref>, and systems of partial differential equations <ref type="bibr" target="#b31">[32,</ref><ref type="bibr" target="#b43">44]</ref>. Third, they are needed in systems that must maintain externally-imposed order constraints, such as geo-replicated databases where transactions must appear to execute in timestamp order <ref type="bibr" target="#b13">[14]</ref>, or deterministic architectures <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b44">45]</ref> and record-andreplay systems <ref type="bibr" target="#b35">[36,</ref><ref type="bibr" target="#b76">77]</ref> that constrain the schedule of parallel programs to ensure deterministic execution.</p><p>To illustrate the challenges in parallelizing these applications, consider Dijkstra's single-source shortest paths (sssp) algorithm <ref type="bibr" target="#b14">[15,</ref><ref type="bibr" target="#b21">22]</ref>. sssp finds the shortest distance between some source node and all other nodes in a graph with weighted edges. Fig. <ref type="figure" target="#fig_0">1</ref>(a) shows the sequential code for sssp, which uses a priority queue to store tasks. Each task operates on a single node, and is ordered by its tentative distance to the source node. sssp relies on task order to guarantee that the first task to visit each node comes from a shortest path. This task sets the node's distance and enqueues all its children. Fig. <ref type="figure" target="#fig_0">1</ref>(b) shows an example graph, and Fig. <ref type="figure" target="#fig_0">1(c)</ref> shows the tasks that sssp executes to process this graph. Fig. <ref type="figure" target="#fig_0">1</ref>(c) shows the order of each task (its distance to the source node) in the x -axis, and outlines both parentchild relationships and data dependences. For example, task A at distance 0, denoted (A, 0), creates children tasks (C, 2) and (B, 3); and tasks (B, 3) and (B, 4) both access node B, so they have a data dependence.</p><p>A distinctive feature of irregular parallel programs is that task creation and execution order are different: children tasks are not immediately runnable, but are subject to a global order influenced by all other tasks in the program. For example, in Fig. <ref type="figure" target="#fig_0">1(c),</ref><ref type="figure">(C,</ref><ref type="figure" target="#fig_1">2</ref>) creates (B, 4), but running (B, 4) immediately would produce the wrong result, as (B, 3), created by a different parent, must run first. Sequential implementations of these programs use scheduling data structures, such as priority or FIFO queues, to process tasks in the right order. These scheduling structures introduce false data dependences that restrict parallelism and hinder TLS (Sec. 3).</p><p>Order constraints limit non-speculative parallelism. For example, in Fig. <ref type="figure" target="#fig_0">1</ref>(c), only (B, 4) and (D, 4) can run in parallel without violating correctness. A more attractive option is to use speculation to elide order constraints. For example, Fig. <ref type="figure" target="#fig_0">1</ref>(d) shows a speculative schedule for sssp tasks. Tasks in the same x -axis position are executed simultaneously. This schedule achieves 2? parallelism in this small graph; larger graphs allow more parallelism (Sec. 2.2). This schedule produces the correct result because, although it elides order constraints, it happens to respect data dependences. Unfortunately, data dependences are not known in advance, so speculative execution must detect dependence violations and abort offending tasks to preserve correctness.</p><p>Recent work has tried to exploit ordered parallelism using speculative software runtimes <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b33">34]</ref>, but has found that the overheads of ordered, speculative execution negate the benefits of parallelism. This motivates the need for hardware support.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Analysis of Ordered Irregular Algorithms</head><p>To quantify the potential for hardware support and guide our design, we first analyze the parallelism and task structure of several ordered irregular algorithms. Benchmarks: We analyze six benchmarks from the domains of graph analytics, simulation, and databases:</p><p>? bfs finds the breadth-first tree of an arbitrary graph.</p><p>? sssp is Dijkstra's algorithm (Sec. 2.1).</p><p>? astar uses the A * pathfinding algorithm <ref type="bibr" target="#b30">[31]</ref> to find the shortest route between two points in a road map. ? msf is Kruskal's minimum spanning forest algorithm <ref type="bibr" target="#b14">[15]</ref>.</p><p>? des is a discrete-event simulator for digital circuits.</p><p>Each task represents a signal toggle at a gate input. ? silo is an in-memory OLTP database <ref type="bibr" target="#b70">[71]</ref>. Sec. 5 describes their input sets and methodology details. Analysis tool: We developed a pintool <ref type="bibr" target="#b45">[46]</ref> to analyze these programs in x86-64. We focus on the instruction length, data read and written, and intrinsic data dependences of tasks, excluding the overheads and serialization introduced by the specific runtime used.</p><p>The tool uses a simple runtime that executes tasks sequentially. The tool profiles the number of instructions executed and addresses read and written (i.e., the read and write sets) of each task. It filters out reads and writes to the stack, the priority queue used to schedule tasks, and other runtime data structures such as the memory allocator. With this information, the tool finds the critical path length of the algorithm: the sequence of data-dependent tasks with the largest number of instructions. The tool then finds the maximum achievable speedup by dividing the sum of instructions of all tasks by the critical path length <ref type="bibr" target="#b77">[78]</ref> (assuming unbounded cores and constant cycles per instruction). Note that this analysis constrains parallelism only by true data dependences: task order dictates the direction of data flow in a dependence, but is otherwise superfluous given perfect knowledge of data dependences.</p><p>Table <ref type="table" target="#tab_1">1</ref> summarizes the results of this analysis. We derive three key insights that guide the design of Swarm: Insight 1: Parallelism is plentiful. These applications have at least 158? maximum parallelism (msf), and up to 3440? (bfs). Thus, most order constraints are superfluous, making speculative execution attractive. Insight 2: Tasks are small. Tasks are very short,  ranging from a few tens of instructions (bfs, sssp, msf), to a few thousand (silo). Tasks are also relatively uniform: 90th-percentile instructions per task are close to the mean. Tasks have small read-and write-sets. For example, sssp tasks read 5.8 64-bit words on average, and write 0.4 words. Small tasks incur large overheads in software runtimes. Moreover, order constraints prevent runtimes from grouping tasks into coarser-grain units to amortize overheads. Hardware support for task management can drastically reduce these overheads. Insight 3: Need a large speculation window. Table 1 also shows the achievable parallelism within a limited task window. With a T -task window, the tool does not schedule an independent task until all work more than T tasks behind has finished. Small windows severely limit parallelism. For example, parallelism in sssp drops from 793? with an infinite window, to 178? with a 1024-task window, to 26? with a 64-task window. Thus, for speculation to be effective, the architecture must support many more speculative tasks than cores. These insights guide the design of Swarm. Our goal is to approach the maximum achievable parallelism while incurring only moderate overheads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">BACKGROUND ON HW SUPPORT FOR SPECULATIVE PARALLELISM</head><p>Much prior work has investigated thread-level speculation (TLS) schemes to parallelize sequential programs <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b59">60,</ref><ref type="bibr" target="#b60">61,</ref><ref type="bibr" target="#b65">66,</ref><ref type="bibr" target="#b68">69]</ref>. TLS schemes ship tasks from function calls or loop iterations to different cores, run them speculatively, and commit them in program order. Although TLS schemes support ordered speculative execution, we find that two key problems prevent them from exploiting ordered irregular parallelism: 1. False data dependences limit parallelism: To run under TLS, ordered algorithms must be expressed as sequential programs, but their sequential implementations have limited parallelism. Consider the code in Fig. <ref type="figure" target="#fig_0">1(a)</ref>, where each iteration dequeues a task from the priority queue and runs it, potentially enqueuing more tasks. Frequent data dependences in the priority queue, not among tasks themselves, cause frequent conflicts and aborts. For example, iterations that enqueue high-priority tasks often abort all future iterations.</p><p>Table <ref type="table" target="#tab_1">1</ref> shows the maximum speedups that an ideal TLS scheme achieves on sequential implementations of these algorithms. These results use perfect speculation, an infinite task window, word-level conflict detection, immediate forwarding of speculative data, and no communication delays. Yet parallelism is meager in most cases. For example, sssp has 1.1? parallelism. Only msf and silo show notable speedups, because they need no queues: their task orders match loop iteration order.</p><p>The root problem is that loops and method calls, the control-flow constructs supported by TLS schemes, are insufficient to express the order constraints among these tasks. By contrast, Swarm implements a more general execution model with timestamp-ordered tasks to avoid software queues, and implements hardware priority queues integrated with speculation mechanisms, avoiding spurious aborts due to queue-related references. 2. Scalability bottlenecks: Although prior TLS schemes have developed scalable versioning and conflict detection schemes, two challenges limit their performance with large speculation windows and small tasks: Forwarding vs selective aborts: Most TLS schemes find it is desirable to forward data written by an earlier, stillspeculative task to later reader tasks. This prevents later tasks from reading stale data, reducing mispeculations on tight data dependences. However, it creates complex chains of dependences among speculative tasks. Thus, upon detecting mispeculation, most TLS schemes abort the task that caused the violation and all later speculative tasks <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b60">61,</ref><ref type="bibr" target="#b65">66,</ref><ref type="bibr" target="#b67">68]</ref>. TCC <ref type="bibr" target="#b28">[29]</ref> and Bulk <ref type="bibr" target="#b10">[11]</ref> are the exception: they do not forward data and only abort later readers when the earlier writer commits.</p><p>We find that forwarding speculative data is crucial for Swarm. However, while aborting all later tasks is reasonable with small speculative windows (2-16 tasks are typical in prior work), Swarm has a 1024-task window, and unselective aborts are impractical. To address this, we contribute a novel conflict detection scheme based on eager version management that allows both forwarding speculative data and selective aborts of dependent tasks. Commit serialization: Prior TLS schemes enforce inorder commits by passing a token among ready-to-commit tasks <ref type="bibr" target="#b27">[28,</ref><ref type="bibr" target="#b60">61,</ref><ref type="bibr" target="#b65">66,</ref><ref type="bibr" target="#b67">68]</ref>. Each task can only commit when it has the token, and passes the token to its immediate successor when it finishes committing. This approach cannot scale to the commit throughput that Swarm needs. For example, with 100-cycle tasks, a 64-core system should commit 0.64 tasks/cycle on average. Even if commits were instantaneous, the latency incurred by passing the token makes this throughput unachievable.</p><p>To tackle this problem, we show that, by adapting techniques from distributed systems, we can achieve inorder commits without serialization, token-passing, or building successor lists. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">SWARM: AN ARCHITECTURE FOR OR-DERED PARALLELISM</head><p>Fig. <ref type="figure" target="#fig_1">2</ref> shows Swarm's high-level organization. Swarm is a tiled, cache-coherent chip multiprocessor (CMP). Each tile has a group of simple cores. Each core has small, private, write-through L1 caches. All cores in a tile share a per-tile L2 cache, and each tile has a slice of a shared NUCA L3 cache. Each tile features a task unit that queues, dispatches, and commits tasks. Tiles communicate through a mesh NoC. Key features: Swarm is optimized to execute short tasks with programmer-specified order constraints. Programmers define the execution order by assigning timestamps to tasks. Tasks can create children tasks with equal or later timestamps than their own. Tasks appear to execute in global timestamp order, but Swarm uses speculation to elide order constraints.</p><p>Swarm is coherently designed to support a large speculative task window efficiently. Swarm has no centralized structures: each tile's task unit queues runnable tasks and maintains the speculative state of finished tasks that cannot yet commit. Task units only communicate when they send new tasks to each other to maintain load balance, and, infrequently, to determine which finished tasks can be committed.</p><p>Swarm speculates far ahead of the earliest active task, and runs tasks even if their parent is still speculative. Fig. <ref type="figure" target="#fig_2">3</ref>(a) shows this process: a task with timestamp 0 is still running, but tasks with later timestamps and several speculative ancestors are running or have finished execution. For example, the task with timestamp 51, currently running, has three still-speculative ancestors, two of which have finished and are waiting to commit (8 and 20) and one that is still running <ref type="bibr" target="#b39">(40)</ref>.</p><p>Allowing tasks with speculative ancestors to execute uncovers significant parallelism, but may induce aborts that span multiple tasks. For example, in Fig. <ref type="figure" target="#fig_2">3(b</ref>) a new task with timestamp 35 conflicts with task 40, so 40 is aborted and child task 51 is both aborted and discarded. These aborts are selective, and only affect tasks whose speculative ancestors are aborted, or tasks that have read data written by an aborted task.</p><p>We describe Swarm in a layered fashion. First, we present Swarm's ISA extensions. Second, we describe Swarm hardware assuming that all queues are unbounded. Third, we discuss how Swarm handles bounded queue sizes. Fourth, we present Swarm's hardware costs. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">ISA Extensions and Programming Model</head><p>Swarm manages and dispatches tasks using hardware task queues. A task is represented by a descriptor with the following architectural state: the task's function pointer, a 64-bit timestamp, and the task's arguments.</p><p>Tasks appear to run in timestamp order. Tasks with the same timestamp may execute in any order, but run atomically-the system lazily selects an order for them.</p><p>A task can create one or more children tasks with an equal or later timestamp than its own. A child is ordered after its parent, but children with the same timestamp may execute in any order. Because hardware must track parent-child relations, tasks may create a limited number of children (8 in our implementation). Tasks that need more children enqueue a single task that creates them.</p><p>Swarm adds instructions to enqueue and dequeue tasks. The enqueue_task instruction accepts a task descriptor (held in registers) as its input and queues the task for execution. A thread uses the dequeue_task instruction to start executing a previously-enqueued task. dequeue_task initiates speculative execution at the task's function pointer and makes the task's timestamp and arguments available (in registers). Task execution ends with a finish_task instruction.</p><p>dequeue_task stalls the core if an executable task is not immediately available, avoiding busy-waiting. When no tasks are left in any task unit and all threads are stalled on dequeue_task, the algorithm has terminated, and dequeue_task jumps to a configurable pointer to handle termination. API: We design a low-level C++ API that uses these mechanisms. Tasks are simply functions with signature: void taskFn (timestamp , args ...)</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Code can enqueue other tasks by calling:</head><p>enqueueTask (taskFn , timestamp , args ...)</p><p>If a task needs more than the maximum number of task descriptor arguments, three 64-bit words in our implementation, the runtime allocates them in memory.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Task Queuing and Prioritization</head><p>The task unit has two main structures: 1. The task queue holds task descriptors (function pointer, timestamp, and arguments). 2. The commit queue holds the speculative state of tasks that have finished execution but cannot yet commit.  Fig. <ref type="figure">4</ref> shows how these queues are used throughout the task's lifetime. Each new task allocates a task queue entry, and holds it until commit time. Each task allocates a commit queue entry when it finishes execution, and also deallocates it at commit time. For now, assume these queues always have free entries. Sec. 4.7 discusses what happens when they fill up.</p><p>Together, the task queue and commit queue are similar to a reorder buffer, but at task-level rather than instruction-level. They are separate structures because commit queue entries are larger than task queue entries, and typically fewer tasks are waiting to commit than to execute. However, unlike in a reorder buffer, tasks do not arrive in priority order. Both structures manage their free space with a freelist and allocate entries independently of task priority order, as shown in Fig. <ref type="figure">4</ref>. Task enqueues: When a core creates a new task (through enqueue_task), it sends the task to a randomlychosen target tile following the protocol in Fig. <ref type="figure" target="#fig_4">5</ref>. Parent and child track each other using task pointers. A task pointer is simply the tuple (tile, task queue position). This tuple uniquely identifies a task because it stays in the same task queue position throughout its lifetime. Task prioritization: Tasks are prioritized for execution in timestamp order. When a core calls dequeue_task, the highest-priority idle task is selected for execution. Since task queues do not hold tasks in priority order, an auxiliary order queue is used to find this task.</p><p>The order queue can be cheaply implemented with two small ternary content-addressable memories (TCAMs) with as many entries as the task queue (e.g., 256), each of which stores a 64-bit timestamp. With Panigrahy and Sharma's PIDR OPT method <ref type="bibr" target="#b53">[54]</ref>, finding the next task to dispatch requires a single lookup in both TCAMs, and each insertion (task creation) and deletion (task commit or squash) requires two lookups in both TCAMs. SRAM-based implementations are also possible, but we find the small TCAMs to have a moderate cost (Sec. 4.8).</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Speculative Execution and Versioning</head><p>The key requirements for speculative execution in Swarm are allowing fast commits and a large speculative window. To this end, we adopt eager versioning, storing speculative data in place and logging old values. Eager versioning makes commits fast, but aborts are slow. However, Swarm's execution model makes conflicts rare, so eager versioning is the right tradeoff.</p><p>Eager versioning is common in hardware transactional memories <ref type="bibr" target="#b29">[30,</ref><ref type="bibr" target="#b47">48,</ref><ref type="bibr" target="#b78">79]</ref>, which do not perform ordered execution or speculative data forwarding. By contrast, most TLS systems use lazy versioning (buffering speculative data in caches) or more expensive multiversioning <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b24">25,</ref><ref type="bibr" target="#b27">28,</ref><ref type="bibr" target="#b28">29,</ref><ref type="bibr" target="#b55">56,</ref><ref type="bibr" target="#b59">60,</ref><ref type="bibr" target="#b60">61,</ref><ref type="bibr" target="#b65">66,</ref><ref type="bibr" target="#b67">68,</ref><ref type="bibr" target="#b68">69]</ref> to limit the cost of aborts. Some early TLS schemes are eager <ref type="bibr" target="#b24">[25,</ref><ref type="bibr" target="#b79">80]</ref>, and they still suffer from the limitations discussed in Sec. 3.</p><p>Swarm's speculative execution borrows from LogTM and LogTM-SE <ref type="bibr" target="#b47">[48,</ref><ref type="bibr" target="#b62">63,</ref><ref type="bibr" target="#b78">79]</ref>. Our key contributions over these and other speculation schemes are (i) conflict detection (Sec. 4.4) and selective abort techniques (Sec. 4.5) that leverage Swarm's hierarchical memory system and Bloom filter signatures to scale to large speculative windows, and (ii) a technique that exploits Swarm's large commit queues to achieve high-throughput commits (Sec. 4.6).</p><p>Fig. <ref type="figure" target="#fig_5">6</ref> shows the per-task state needed to support speculation: read-and write-set signatures, an undo log pointer, and child pointers. Each core and commit queue entry holds this state.</p><p>A successful dequeue_task instruction jumps to the task's code pointer and initiates speculation. Since speculation happens at the task level, there are no register checkpoints, unlike in HTM and TLS. Like in LogTM-SE, as the task executes, hardware automatically performs conflict detection on every read and write (Sec. 4.4). Then, it inserts the read and written addresses into the Bloom filters, and, for every write, it saves the old memory value in a memory-resident undo log. Stack addresses are not conflict-checked or logged.</p><p>When a task finishes execution, it allocates a commit queue entry; stores the read and write set signatures, undo log pointer, and children pointers there; and frees the core for another task.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Virtual Time-Based Conflict Detection</head><p>Conflict detection is based on a priority order that respects both programmer-assigned timestamps and parent-child relationships. Conflicts are detected at cache line granularity. Unique virtual time: Tasks may have the same programmer-assigned timestamp. However, conflict detection has much simpler rules if tasks follow a total order. Therefore, tasks are assigned a unique virtual time when they are dequeued for execution. Unique virtual time is the 128-bit tuple (programmer timestamp, dequeue cycle, tile id). The (dequeue cycle, tile id) pair is unique since at most one dequeue per cycle is permitted at a tile. Conflicts are resolved using this unique virtual time, which tasks preserve until they commit. Unique virtual times incorporate the ordering needs of programmer-assigned timestamps and parent-child relations: children always start execution after their parents, so a parent always has a smaller dequeue cycle than its child, and thus a smaller unique virtual time, even when parent and child have the same timestamp. Conflicts and forwarding: Conflicts arise when a task accesses a line that was previously accessed by a later-virtual time task. Suppose two tasks, t 1 and t 2 , are running or finished, and t 2 has a later virtual time. A read of t 1 to a line written by t 2 or a write to a line read or written by t 2 causes t 2 to abort. However, t 2 can access data written by t 1 even if t 1 is still speculative. Thanks to eager versioning, t 2 automatically uses the latest copy of the data-there is no need for speculative data forwarding logic <ref type="bibr" target="#b24">[25]</ref>. Hierarchical conflict detection: Swarm exploits the cache hierarchy to reduce conflict checks. Fig. <ref type="figure">7</ref> shows the different types of checks performed in an access: 1. The L1 is managed as described below to ensure L1 hits are conflict-free. 2. L1 misses are checked against other tasks in the tile (both in other cores and in the commit queue). 3. L2 misses, or L2 hits where a virtual time check (described below) fails, are checked against tasks in other tiles. As in LogTM <ref type="bibr" target="#b47">[48]</ref>, the L3 directory uses memory-backed sticky bits to only check tiles whose tasks may have accessed the line. Sticky bits are managed exactly as in LogTM. Any of these conflicts trigger task aborts. Using caches to filter checks: The key invariant that allows caches to filter checks is that, when a task with virtual time T installs a line in the (L1 or L2) cache, that line has no conflicts with tasks of virtual time &gt; T . As long as the line stays cached with the right coherence permissions, it stays conflict-free. Because conflicts happen when tasks access lines out of virtual time order, if another task with virtual time U &gt; T accesses the line, it is also guaranteed to have no conflicts.</p><p>However, accesses from a task with virtual time U &lt; T must trigger conflict checks, as another task with intermediate virtual time X, U &lt; X &lt; T , may have accessed the line. U 's access does not conflict with T 's, but may conflict with X's. For example, suppose a task with virtual time X = 2 writes line A. Then, task T = 3 in another core reads A. This is not a conflict with X's Tiles commit all finished tasks with virtual time &lt; GVT write, so A is installed in T 's L1. The core then finishes T and dequeues a task U = 1 that reads A. Although A is in the L1, U has a conflict with X's write.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Core</head><p>We handle this issue with two changes. First, when a core dequeues a task with a smaller virtual time than the one it just finished, it flushes the L1. Because L1s are small and write-through, this is fast, simply requiring to flash-clear the valid bits. Second, each L2 line has an associated canary virtual time, which stores the lowest task virtual time that need not perform a global check. For efficiency, lines in the same L2 set share the same canary virtual time. For simplicity, this is the maximum virtual time of the tasks that installed each of the lines in the set, and is updated every time a line is installed. Efficient commit queue checks: Although caches reduce the frequency of conflict checks, all tasks in the tile must be checked on every L2 access and on some global checks. To allow large commit queues (e.g., 64 tasks/queue), commit queue checks must be efficient. To this end, we leverage that checking a K-way Bloom filter only requires reading one bit from each way. As shown in Fig. <ref type="figure">8</ref>, Bloom filter ways are stored in columns, so a single 64-bit access per way reads all the necessary bits. Reading and ANDing all ways yields a word that indicates potential conflicts. For each queue entry whose position in this word is set, its virtual time is checked; those with virtual time higher than the issuing task's must be aborted.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.5">Selective Aborts</head><p>Upon a conflict, Swarm aborts the later task and all its dependents: its children and other tasks that have accessed data written by the aborting task. Hardware aborts each task t in three steps: 1. Notify t's children to abort and be removed from their task queues. 2. Walk t's undo log in LIFO order, restoring old values.</p><p>If one of these writes conflicts with a later-virtual time task, wait for it to abort and continue t's rollback. 3. Clear t's signatures and free its commit queue entry.</p><p>Applied recursively, this procedure selectively aborts all dependent tasks, as shown in Fig. <ref type="figure" target="#fig_9">10</ref>. This scheme has two key benefits. First, it reuses the conflict-detection logic used in normal operation. Undo-log writes (e.g., A's second wr 0x10 in Fig. <ref type="figure" target="#fig_9">10</ref>) are normal conflict-checked  writes, issued with the task's timestamp to detect all later readers and writers. Second, this scheme does not explicitly track data dependences among tasks. Instead, it uses the conflict-detection protocol to recover them as needed. This is important, because any task may have served speculative data to many other tasks, which would make explicit tracking expensive. For example, tracking all possible dependences on a 1024-task window using bit-vectors, as proposed in prior work <ref type="bibr" target="#b12">[13,</ref><ref type="bibr" target="#b57">58]</ref>, would require 1024 ? 1023 ?1 Mbit of state.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.6">Scalable Ordered Commits</head><p>To achieve high-throughput commits, Swarm adapts the virtual time algorithm <ref type="bibr" target="#b37">[38]</ref>, common in parallel discrete event simulation <ref type="bibr" target="#b20">[21]</ref>. Fig. <ref type="figure" target="#fig_7">9</ref> shows this protocol. Tiles periodically send the smallest unique virtual time of any unfinished (running or idle) task to an arbiter. Idle tasks do not yet have a unique virtual time and use (timestamp, current cycle, tile id) for the purposes of this algorithm. The arbiter computes the minimum virtual time of all unfinished tasks, called the global virtual time (GVT), and broadcasts it to all tiles. To preserve ordering, only tasks with virtual time &lt; GVT can commit.</p><p>The key insight is that, by combining the virtual time algorithm with Swarm's large commit queues, commit costs are amortized over many tasks. A single GVT update often causes many finished tasks to commit. For example, if in Fig. <ref type="figure" target="#fig_7">9</ref> the GVT jumps from (80,100,2) to (98,550,1), all tasks with virtual time (80,100,2)&lt; t &lt;(98,550,1) can commit. GVT updates happen sparingly (e.g., every 200 cycles) to limit bandwidth. Less frequent updates reduce bandwidth but increase commit queue occupancy.</p><p>In addition, eager versioning makes commits fast: a task commits by freeing its task and commit queue entries, a single-cycle operation. Thus, if a long-running task holds the GVT for some time, once it finishes, commit queues quickly drain and catch up to execution.</p><p>Compared with prior TLS schemes that use successor lists and token passing to reconcile order (Sec. 3), this scheme does not even require finding the successor and predecessor of each task, and does not serialize commits.</p><p>For the system sizes we evaluate, a single GVT arbiter suffices. Larger systems may need a hierarchy of arbiters.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.7">Handling Limited Queue Sizes</head><p>The per-tile task and commit queues may fill up, requiring a few simple actions to ensure correct operation. Task queue virtualization: Applications may create an unbounded number of tasks and schedule them for a future time. Swarm uses an overflow/underflow mechanism to give the illusion of unbounded hardware task queues <ref type="bibr" target="#b26">[27,</ref><ref type="bibr" target="#b40">41,</ref><ref type="bibr" target="#b63">64]</ref>. When the per-tile task queue is nearly full, the task unit dispatches a special, non-speculative coalescer task to one of the cores. This coalescer task removes several non-speculative, idle task descriptors with high programmer-assigned timestamps from the task queue, stores them in memory, and enqueues a splitter task that will re-enqueue the overflowed tasks.</p><p>Note that only non-speculative task queue entries can be moved to software. These (i) are idle, and (ii) have no parent (i.e., their parent has already committed). When all entries are speculative, we need another approach. Virtual time-based allocation: The task and commit queues may also fill up with speculative tasks. The general rule to avoid deadlock due to resource exhaustion is to always prioritize earlier-virtual time tasks, aborting other tasks with later virtual times if needed. For example, if a tile speculates far ahead, fills up its commit queue, and then receives a task that precedes all other speculative tasks, the tile must let the preceding task execute to avoid deadlock. This results in three specific policies for the commit queue, cores, and task queue. Commit queue: If task t finishes execution, the commit queue is full, and t precedes any of the tasks in the commit queue, it aborts the highest-virtual time finished task and takes its commit queue entry. Otherwise, t stalls its core, waiting for an entry. Cores: If task t arrives at the task queue, the commit queue is full, and t precedes all tasks in cores, t aborts the highest-virtual time task and takes its core. Task queue: Suppose task t arrives at a task unit but the task queue is full. If some tasks are non-speculative, then a coalescer is running, so the task waits for a free entry. If all tasks in the task queue are speculative, the enqueued request is NACK'd (instead of ACK'd as in Fig. <ref type="figure" target="#fig_4">5</ref>) and the parent task stalls, and retries the enqueue using linear backoff. To avoid deadlock, we leverage that when a task's unique virtual time matches the GVT, it is the smallest-virtual time task in the system, and cannot be aborted. This task need not keep track of its children (no child pointers), and when those children are sent to another tile, they can be overflowed to memory if the task queue is full. This ensures that the GVT task makes progress, avoiding deadlock.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.8">Analysis of Hardware Costs</head><p>We now describe Swarm's overheads. Swarm adds task units, a GVT arbiter, and modifies cores and L2s.</p><p>Table <ref type="table" target="#tab_2">2</ref> shows the per-entry sizes, total queue sizes, and area estimates for the main task unit structures: task queue, commit queue, and order queue. All numbers are for one per-tile task unit. We assume a 16-tile, 64-core system as in Fig. <ref type="figure" target="#fig_1">2</ref>, with 256 task queue entries (64 per core) and 64 commit queue entries (16 per core). We use CACTI <ref type="bibr" target="#b69">[70]</ref> for the task and commit queue SRAM areas (using 32 nm ITRS-HP logic) and scaled numbers from a commercial 28 nm TCAM <ref type="bibr" target="#b2">[3]</ref> for the order queue area. Task queues use single-port SRAMs. Commit queues use several dual-port SRAMs for the Bloom filters (Fig. <ref type="figure">8</ref>), which are 2048-bit, 8-way in our implementation, and a single-port SRAM for all other state (unique virtual time, undo log pointer, and child pointers).</p><p>Overall, these structures consume 0.55 mm 2 per 4-core tile, or 8.8 mm 2 per chip, a minor cost. Enqueues and dequeues access the order queue TCAM, which consumes ?70pJ per access <ref type="bibr" target="#b49">[50]</ref>. Moreover, queue operations happen sparingly (e.g. with 100-cycle tasks, one enqueue and dequeue every 25 cycles), so energy costs are small.</p><p>The GVT arbiter is simple. It buffers a virtual time per tile, and periodically broadcasts the minimum one.</p><p>Cores are augmented with enqueue/dequeue/finish_task instructions (Sec. 4.1), the speculative state in Fig. <ref type="figure" target="#fig_5">6</ref> (530 bytes), a 128-bit unique virtual time, and logic to insert addresses into Bloom filters and to, on each store, write the old value to an undo log. Finally, the L2 uses a 128-bit canary virtual time per set. For an 8-way cache with 64 B lines, this adds 2.6% extra state.</p><p>In summary, Swarm's costs are moderate, and, in return, confer significant speedups.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">EXPERIMENTAL METHODOLOGY</head><p>Modeled system: We use an in-house microarchitectural, event-driven, sequential simulator based on Pin <ref type="bibr" target="#b45">[46]</ref> to model a 64-core CMP with a 3-level cache hierarchy. We use simple IPC-1 cores with detailed timing models for caches, on-chip network, and main memory (adapted from zsim <ref type="bibr" target="#b61">[62]</ref>), and also model Swarm   features (e.g., conflict checks, aborts, etc.) in detail. Table <ref type="table" target="#tab_4">3</ref> details the modeled configuration.</p><p>Benchmarks: We use the six benchmarks mentioned in Sec. 2.2: bfs, sssp, astar, msf, des, and silo. Table <ref type="table" target="#tab_5">4</ref> details their provenance and input sets.</p><p>For most benchmarks, we use tuned serial and stateof-the-art parallel versions from existing suites (Table <ref type="table" target="#tab_5">4</ref>). We then port each serial implementation to Swarm. Swarm versions use fine-grain tasks, but use the same data structures and perform the same work as the serial version, so differences between serial and Swarm versions stem from parallelism, not other optimizations.</p><p>We wrote our own tuned serial and Swarm astar implementations. astar is notoriously difficult to parallelize-to scale, prior work in parallel pathfinding sacrifices solution quality for speed <ref type="bibr" target="#b7">[8]</ref>. Thus, we do not have a software-only parallel implementation.</p><p>We port silo to show that Swarm can extract ordered parallelism from applications that are typically considered unordered. Database transactions are unordered in silo. We decompose each transaction into many small ordered tasks to exploit intra-transaction parallelism. Tasks from different transactions use disjoint timestamp ranges to preserve atomicity. This exposes significant fine-grain parallelism within and across transactions. Input sets: We use a varied set of inputs, often from standard collections such as DIMACS (Table <ref type="table" target="#tab_5">4</ref>). bfs operates on an unstructured mesh; sssp and astar use large road maps; msf uses a Kronecker graph; des simulates an array of carry-select adders; and silo runs the TPC-C benchmark on 4 warehouses.</p><p>All benchmarks have serial run-times of over two billion cycles (Table <ref type="table" target="#tab_5">4</ref>). We have evaluated other inputs (e.g., random and scale-free graphs), and qualitative dif- ferences are not affected. Note that some inputs can offer plentiful trivial parallelism to a software algorithm. For example, on large, shallow graphs (e.g., 10 M nodes and 10 levels), a simple bulk-synchronous bfs that operates on one level at a time scales well <ref type="bibr" target="#b42">[43]</ref>. But we use a graph with 7.1 M nodes and 2799 levels, so bfs must speculate across levels to uncover enough parallelism.</p><p>For each benchmark, we fast-forward to the start of the parallel region (skipping initialization), and report results for the full parallel region. Idealized memory allocation: Dynamic memory allocation is not simulated in detail, and a scalable solution is left to future work. Only des and silo tasks allocate memory frequently, and data dependences in the system's memory allocator serialize them. In principle, we could build a task-aware allocator with per-core memory pools to avoid serialization. However, building high-performance allocators is complex <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b64">65]</ref>. Instead, the simulator allocates and frees memory in a task-aware way. Freed memory is not reused until the freeing task commits to avoid spurious dependences. Each allocator operation incurs a 30-cycle cost. For fairness, serial and software-parallel implementations also use this allocator. We believe this simplification will not significantly affect des and silo results when simulated in detail.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">EVALUATION</head><p>We first compare Swarm with alternative implementations, then analyze its behavior in depth.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Swarm Scalability</head><p>Fig. <ref type="figure" target="#fig_10">11</ref> shows Swarm's performance on 1-to 64-core systems. In this experiment, per-core queue and L2/L3 capacities are kept constant as the system grows, so systems with more cores have higher queue and cache capacities. This captures performance per unit area.</p><p>Each line in Fig. <ref type="figure" target="#fig_10">11</ref> shows the speedup of a single application over a 1-core system (i.e., its self-relative speedup). At 64 cores, speedups range from 51? (msf) to 122? (sssp), demonstrating high scalability. In addition to parallelism, the larger queues and L3 of larger systems also affect performance, causing super-linear speedups in some benchmarks (sssp, bfs, and astar). We tease apart the contribution of these factors in Sec. 6.3. cores, relative to a tuned serial implementation running on a system of the same size.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Swarm vs Software Implementations</head><p>Fig. <ref type="figure" target="#fig_11">12</ref> compares the performance of the Swarm and software-only versions of each benchmark. Each graph shows the speedup of the Swarm and software-parallel versions over the tuned serial version running on a system of the same size, from 1 to 64 cores. As in Fig. <ref type="figure" target="#fig_10">11</ref>, queue and L2/L3 capacities scale with the number of cores.</p><p>Swarm outperforms the serial versions by 43-117?, and the software-parallel versions by 2.7-18.2?. We analyze the reasons for these speedups for each application. bfs: Serial bfs does not need a priority queue. It uses an efficient FIFO queue to store the set of nodes to visit. At 1 core, Swarm is 33% slower than serial bfs; however, Swarm scales to 43? at 64 cores. By contrast, the software-parallel version, PBFS <ref type="bibr" target="#b42">[43]</ref>, scales to 6.0?, then slows down beyond 24 cores. PBFS only works on a single level of the graph at a time, while Swarm speculates across multiple levels. sssp: Serial sssp uses a priority queue. Swarm is 32% faster at one core, and 117? faster at 64 cores. The software-parallel version uses the Bellman-Ford algorithm <ref type="bibr" target="#b14">[15]</ref>. Bellman-Ford visits nodes out of order to increase parallelism, but wastes work in doing so. Threads in Bellman-Ford communicate infrequently to limit overheads <ref type="bibr" target="#b32">[33]</ref>, wasting much more work than Swarm's speculative execution. As a result, Bellman-Ford sssp scales to 14? at 64 cores, 8.1? slower than Swarm. astar: Our tuned serial astar uses a priority queue to store tasks <ref type="bibr" target="#b14">[15]</ref>. Swarm outperforms it by 2% at one core, and by 66? at 64 cores. msf: The serial and software-parallel msf versions sort edges by weight to process them in order. Our Swarm implementation instead does this sort implicitly through the task queues, enqueuing one task per edge and using its weight as the timestamp. This allows Swarm to overlap the sort and edge-processing phases. Swarm outperforms the serial version by 70% at one core and 61? at 64 cores. The software-parallel msf uses software speculation via deterministic reservations <ref type="bibr" target="#b6">[7]</ref>, and scales to 19? at 64 cores, 3.1? slower than Swarm. des: Serial des uses a priority queue to simulate events in time order. Swarm outperforms the serial version by 23% at one core, and by 57? at 64 cores. The software-parallel version uses the Chandy-Misra-Bryant (CMB) algorithm <ref type="bibr" target="#b46">[47,</ref><ref type="bibr" target="#b66">67]</ref>. CMB exploits the simulated communication latencies among components to safely execute some events out of order (e.g., if two nodes have a 10-cycle simulated latency, they can be simulated up to 9 cycles away). CMB scales to 21? at 64 cores, 2.7? The software-parallel version uses a carefully optimized protocol to achieve high transaction rates <ref type="bibr" target="#b70">[71]</ref>. Softwareparallel silo scales to 8.8? at 64 threads, 6.4? slower than Swarm. The reason is fine-grain parallelism: in Swarm, each task reads or writes at most one tuple. This exposes parallelism within and across database transactions, and reduces the penalty of conflicts, as only small, dependent tasks are aborted instead of full transactions. Swarm's benefits on silo heavily depend on the amount of coarse-grain parallelism, which is mainly determined by the number of TPC-C warehouses. To quantify this effect, Fig. <ref type="figure" target="#fig_2">13</ref> shows the speedups of Swarm and softwareparallel silo with 64, 16, 4, and 1 warehouses. With 64 warehouses, software-parallel silo scales linearly up to 64 cores and is 4% faster than Swarm. With fewer warehouses, database transactions abort frequently, limiting scalability. With a single warehouse, software-parallel silo scales to only 2.7?. By contrast, Swarm exploits fine-grain parallelism within each transaction, and scales well even with a single warehouse, by 49? at 64 cores, 18.2? faster than software-parallel silo.</p><p>Overall, these results show that Swarm outperforms a wide range of parallel algorithms, even when they use application-specific optimizations. Moreover, Swarm implementations use no explicit synchronization and are simpler, which is itself valuable.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Swarm Analysis</head><p>We now analyze the behavior of different benchmarks in more detail to gain insights about Swarm. Table <ref type="table">5</ref>: gmean speedups with progressive idealizations: unbounded queues and a zero-cycle memory system (1c-base = 1-core Swarm baseline without idealizations).</p><p>Cycle breakdowns: Fig. <ref type="figure" target="#fig_0">14</ref> shows the breakdown of aggregate core cycles. Each set of bars shows results for a single application as the system scales from 1 to 64 cores. The height of each bar is the sum of cycles spent by all cores, normalized by the cycles of the 1-core system (lower is better). With linear scaling, all bars would have a height of 1.0; higher and lower bars indicate sub-and super-linear scaling, respectively. Each bar shows the breakdown of cycles spent executing tasks that are ultimately committed, tasks that are later aborted, spilling tasks from the hardware task queue (using coalescer and splitter tasks, Sec. 4.7), and stalled. Swarm spends most of the cycles executing tasks that later commit. At 64 cores, aborted work ranges from 1% (bfs) to 27% (des) of cycles. All graph benchmarks spend significant time spilling tasks to memory, especially with few cores (e.g., 47% of cycles for single-core astar). In all benchmarks but msf, spill overheads shrink as the system grows and task queue capacity increases; msf enqueues millions of edges consecutively, so larger task queues do not reduce spills. Finally, cores rarely stall due to full or empty queues. Only astar and msf spend more than 5% of cycles stalled at 64 cores: 27% and 8%, respectively. Fig. <ref type="figure" target="#fig_0">14</ref> also shows the factors that contribute to superlinear scaling in Fig. <ref type="figure" target="#fig_10">11</ref>. First, larger task queues can capture a higher fraction of runnable tasks, reducing spills. Second, larger caches can better fit the working set, reducing the cycles spent executing committed tasks (e.g., silo). However, beyond 4-8 cores, the longer hit latency of the larger NUCA L3 counters its higher hit rate in most cases, increasing execution cycles. Speedups with idealizations: To factor out the impact of queues and memory system on scalability, we consider systems with two idealizations: unbounded queues, which factor out task spills, and an ideal memory system with 0-cycle delays for all accesses and messages. Table 5 shows the gmean speedups when these idealizations    are progressively applied. The left and middle columns show 1-and 64-core speedups, respectively, over the 1-core baseline (without idealizations). While idealizations help both cases, they have a larger impact on the 1-core system. Therefore, the 64-core speedups relative to the 1-core system with the same idealizations (right column) are lower. With all idealizations, this speedup is purely due to exploiting parallelism; 64-core Swarm is able to mine 54? parallelism on average (46?-63?). Queue occupancies: Fig. <ref type="figure" target="#fig_4">15</ref> shows the average number of task queue and commit queue entries used across the 64-core system. Both queues are often highly utilized. Commit queues can hold up to 1024 finished tasks (64 per tile). On average, they hold from 216 in des to 821 in astar. This shows that cores often execute tasks out of order, and these tasks wait a significant time until they commit-a large speculative window is crucial, as the analysis in Sec. 2.2 showed. The 4096-entry task queues are also well utilized, with average occupancies between 1157 (silo) and 2712 (msf) entries. Network traffic breakdown: Fig. <ref type="figure" target="#fig_13">16</ref> shows the NoC traffic breakdown at 64 cores (16 tiles). The cumulative injection rate per tile remains well below the saturation injection rate (32 GB/s). Each bar shows the contributions of memory accesses (between the L2s and L3) issued during normal execution, tasks enqueues to other tiles, abort traffic (including child abort messages and rollback memory accesses), and GVT updates. Task enqueues, aborts, and GVT updates increase network traffic by 15% on average. Thus, Swarm imposes small overheads on traffic and communication energy. Conflict detection energy: Conflict detection requires Bloom filter checks-performed in parallel over commit queue entries (Fig. <ref type="figure">7</ref>)-and for those entries where the Bloom filter reports a match, a virtual time check to see whether the task needs to be aborted. Both events happen relatively rarely. Each tile performs one Bloom filter check every 8.0 cycles on average (from 2.5 cycles in msf to 13 cycles in bfs). Each tile performs one timestamp check every 49 cycles on average (from 6 cycles in msf to 143 cycles in astar). Hence, Swarm's conflict detection imposes acceptable energy overheads. Canary virtual times: To lower overheads, all lines in the same L2 set share a common canary virtual time. This causes some unnecessary global conflict checks, but we find the falsely unfiltered checks are infrequent. At 64 cores, using precise per-line canary virtual times reduces global conflict checks by 10.3% on average, and improves application performance by less than 1%.</p><note type="other">GVT Enqueues Aborts Mem accs</note></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4">Sensitivity Studies</head><p>We explore Swarm's sensitivity to several design parameters at 64 cores: Commit queue size: Fig. <ref type="figure" target="#fig_15">17(a)</ref> shows the speedups of different applications as we sweep aggregate commit queue entries from 128 (8 tasks per tile) to unbounded; the default is 1024 entries. Commit queues are fundamental to performance: fewer than 512 entries degrade performance considerably. More than 1024 entries confer moderate performance boosts to some applications. We conclude that 1024 entries strikes a good balance between performance and implementation cost for the benchmarks we study. Bloom filter configuration: Fig. <ref type="figure" target="#fig_15">17(b)</ref> shows the relative performance of different Bloom filter configurations. The default 2048-bit 8-way Bloom filters achieve performance within 10% of perfect conflict detection. Smaller Bloom filters cause frequent false positives and aborts in silo and des, which have the tasks with the largest footprint. However, bfs, sssp, and msf tasks access little data, so they are insensitive to Bloom filter size. Frequency of GVT updates: Swarm is barely sensitive to the frequency of GVT updates. As we vary the period between GVT updates from 50 cycles to 800 cycles (the default is 200 cycles), performance at 64 cores drops from 0.1% in sssp to 3.0% in msf.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.5">Swarm Case Study: astar</head><p>Finally, we present a case study of astar running on a 16-core, 4-tile system to analyze Swarm's timevarying behavior. Fig. <ref type="figure" target="#fig_16">18</ref> depicts several per-tile metrics, sampled every 500 cycles, over a 100 Kcycle interval: the breakdown of core cycles (top row), commit and task queue lengths (middle row), and tasks commit and abort events (bottom row). Each column shows these metrics for a single tile.</p><p>Fig. <ref type="figure" target="#fig_16">18</ref> shows that task queues are highly utilized throughout the interval. As task queues approach their capacity, coalescer tasks kick in, spilling tasks to memory. Commit queues, however, show varied occupancy. As tasks are executed out of order, they use a commit queue entry until they are safe to commit (or are aborted). Most of the time, commit queues are large enough to decouple execution and commit orders, and tiles spend the vast majority of time executing worker tasks.</p><p>Occasionally, however, commit queues fill up and cause the cores to stall. For example, tiles stall around the 40 Kcycle mark as they wait for a few straggler tasks to finish. The last of those stragglers finishes at 43 Kcycles, and the subsequent GVT update commits a large number of erstwhile speculative tasks, freeing up substantial commit queue space. These events explain astar's sensitivity to commit queue size as seen in Fig. <ref type="figure" target="#fig_15">17(a)</ref>.</p><p>Finally, note that although queues fill up rarely, commits tend to happen in bursts throughout the run. This shows that fast commits are important, as they enable Swarm to quickly turn around commit queue entries.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.">ADDITIONAL RELATED WORK</head><p>Prior work has studied the limits of instruction-level parallelism under several idealizations, including a large or infinite instruction window, perfect branch prediction and memory disambiguation, and simple program transformations to remove unnecessary data dependences <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b8">9,</ref><ref type="bibr" target="#b17">18,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b23">24,</ref><ref type="bibr" target="#b41">42,</ref><ref type="bibr" target="#b48">49,</ref><ref type="bibr" target="#b56">57,</ref><ref type="bibr" target="#b73">74]</ref>. Similar to our limit study, these analyses find that parallelism is often plentiful (&gt;1000?), but very large instruction windows are needed to exploit it (&gt;100K instructions <ref type="bibr" target="#b41">[42,</ref><ref type="bibr" target="#b56">57]</ref>). Our oracle tool focuses on task-level parallelism, so it misses intratask parallelism, which is necessarily limited with short tasks. Instead, we focus on removing superfluous dependences in scheduling data structures, uncovering large amounts of parallelism for irregular applications.</p><p>Several TLS schemes expose timestamps to software for different purposes, such as letting the compiler schedule loop iterations in Stampede <ref type="bibr" target="#b67">[68]</ref>, speculating across barriers in TCC <ref type="bibr" target="#b28">[29]</ref>, and supporting out-of-order spawn of speculative function calls in Renau et al. <ref type="bibr" target="#b60">[61]</ref>. These schemes work well for their intended purposes, but cannot queue or buffer tasks with arbitrary timestampsthey can only spawn new work if there is a free hardware context. Software scheduling would be required to sidestep this limitation, which, as we have seen, would introduce false data dependences and limit parallelism.</p><p>Prior work in fine-grain parallelism has developed a range of techniques to reduce task management overheads. Active messages lower the cost of sending tasks among cores <ref type="bibr" target="#b51">[52,</ref><ref type="bibr" target="#b72">73]</ref>. Hardware task schedulers such as Carbon <ref type="bibr" target="#b40">[41]</ref> lower overheads further for specific problem domains. GPUs <ref type="bibr" target="#b75">[76]</ref> and Anton 2 <ref type="bibr" target="#b26">[27]</ref> feature custom schedulers for non-speculative tasks. By contrast, Swarm implements speculative hardware task management for a different problem domain, ordered parallelism.</p><p>Prior work has developed shared-memory priority queues that scale with the number of cores <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b74">75]</ref>, but they do so by relaxing priority order. This restricts them to benchmarks that admit order violations, and loss of order means threads often execute useless work far from the critical path <ref type="bibr" target="#b32">[33,</ref><ref type="bibr" target="#b33">34]</ref>. Nikas et al. <ref type="bibr" target="#b50">[51]</ref> use hardware transactional memory to partially parallelize priority queue operations, accelerating sssp by 1.8? on 14 cores. Instead, we dispense with shared-memory priority queues: Swarm uses distributed priority queues, load-balanced through random enqueues, and uses speculation to maintain order.</p><p>Our execution model has similarities to parallel discrete-event simulation (PDES) <ref type="bibr" target="#b20">[21]</ref>. PDES events run at a specific virtual time and can create other events, but cannot access arbitrary data, making them less general than Swarm tasks. Moreover, state-of-the-art PDES engines have overheads of tens of thousands of cycles per event <ref type="bibr" target="#b5">[6]</ref>, making them impractical for fine-grain tasks. Fujimoto proposed the Virtual Time Machine (VTM), tailored to the needs of PDES <ref type="bibr" target="#b22">[23]</ref>, which could reduce these overheads. However, VTM relied on an impractical memory system that could be indexed by address and time.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8.">CONCLUSIONS</head><p>We have presented Swarm, a novel architecture that unlocks abundant but hard-to-exploit irregular ordered parallelism. Swarm relies on a novel execution model based on timestamped tasks that decouples task creation and execution order, and a microarchitecture that performs speculative, out-of-order task execution and implements a large speculation window efficiently. Programs leverage Swarm's execution model to convey new work to hardware as soon as it is discovered rather than in the order it needs to run, exposing a large amount of parallelism. As a result, Swarm achieves order-of-magnitude speedups on ordered irregular programs, which are key in emerging domains such as graph analytics, data mining, and in-memory databases <ref type="bibr" target="#b33">[34,</ref><ref type="bibr" target="#b54">55,</ref><ref type="bibr" target="#b70">71]</ref>. Swarm hardware could also support thread-level speculation and transactional execution with minimal changes.</p><p>Swarm also opens several research avenues. First, Swarm's techniques may benefit a broader class of applications. For instance, Swarm could be applied to automatically parallelize general-purpose programs more effectively than prior TLS systems. Second, we have shown that co-designing the execution model and microarchitecture is a promising approach to uncover parallelism. Investigating new or more general execution models may expose additional parallelism in other domains. Third, Swarm shows that globally sequenced execution can be scalable even with fine-grained tasks. With additional work, Swarm's techniques could be scaled to multi-chip and multi-machine systems. These topics are the subject of our ongoing and future work.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Dijkstra's single-source shortest paths algorithm (sssp) has plentiful ordered irregular parallelism.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Swarm CMP and tile configuration.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Example execution of sssp. By executing tasks even if their parents are speculative, Swarm uncovers ordered parallelism, but may trigger selective aborts.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 4 : 3 14</head><label>43</label><figDesc>Figure 4: Task queue and commit queue utilization through a task's lifetime.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Task creation protocol. Cores send new tasks to other tiles for execution. To track parent-child relations, parent and child keep a pointer to each other.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Speculative state for each task. Each core and commit queue entry maintains this state. Read and write sets are implemented with space-efficient Bloom filters.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>5 Figure 7 :Figure 8 : 1 ?</head><label>5781</label><figDesc>Figure 7: Local, tile, and global conflict detection for an access that misses in the L1 and L2.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Global virtual time commit protocol.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Selective abort protocol. Suppose (A, 1) must abort after it writes 0x10. (A, 1)'s abort squashes child (D, 4) and grandchild (E, 5). During rollback, A also aborts (C, 3), which read A's speculative write to 0x10. (B, 2) is independent and thus not aborted.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Swarm self-relative speedups on 1-64 cores. Larger systems have larger queues and caches, which affect speedups and sometimes cause superlinear scaling.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 12 :</head><label>12</label><figDesc>Figure12: Speedup of Swarm and state-of-the-art software-parallel implementations from 1 to 64 cores, relative to a tuned serial implementation running on a system of the same size.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head></head><label></label><figDesc>Figure 15: Average task and commit queue occupancies for 64-core Swarm.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>Figure 16 :</head><label>16</label><figDesc>Figure 16: Breakdown of NoC traffic per tile for 64core, 16-tile Swarm.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>Figure 17 :</head><label>17</label><figDesc>Figure 17: Sensitivity of 64-core Swarm to commit queue and Bloom filter sizes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_16"><head>Figure 18 :</head><label>18</label><figDesc>Figure 18: Execution trace of astar on 16-core (4-tile) Swarm over a 100 Kcycle interval: breakdown of core cycles (top), queue lengths (middle), and task commits and aborts (bottom) for each tile.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1</head><label>1</label><figDesc></figDesc><table><row><cell>: Maximum achievable parallelism and</cell></row><row><cell>task characteristics (instructions and 64-bit</cell></row><row><cell>words read and written) of representative or-</cell></row><row><cell>dered irregular applications.</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 2 :</head><label>2</label><figDesc>Sizes and estimated areas of main task unit structures.</figDesc><table><row><cell></cell><cell cols="2">Entries Entry size</cell><cell>Size</cell><cell>Est. area</cell></row><row><cell>Task queue</cell><cell>256</cell><cell>51 B</cell><cell>12.75 KB</cell><cell>0.056 mm 2</cell></row><row><cell>Commit filters</cell><cell>64</cell><cell>16?32 B</cell><cell cols="2">32 KB (2-port) 0.304 mm 2</cell></row><row><cell>queue other</cell><cell>64</cell><cell>36 B</cell><cell>2.25 KB</cell><cell>0.012 mm 2</cell></row><row><cell>Order queue</cell><cell>256</cell><cell>2?8 B</cell><cell cols="2">4 KB (TCAM) 0.175 mm 2</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head></head><label></label><figDesc>Cores 64 cores in 16 tiles (4 cores/tile), 2 GHz, x86-64 ISA, IPC-1 except misses and Swarm instructions L1 caches 16 KB, per-core, split D/I, 8-way, 2-cycle latency L2 caches 256 KB, per-tile, 8-way, inclusive, 7-cycle latency L3 cache 16 MB, shared, static NUCA [40] (1 MB bank/tile), 16-way, inclusive, 9-cycle bank latency Coherence MESI, 64 B lines, in-cache directories, no silent drops NoC 4?4 mesh, 256-bit links, X-Y routing, 3 cycles/hop Main mem 4 controllers at chip edges, 120-cycle latency</figDesc><table><row><cell>Queues</cell><cell>64 task queue entries/core (4096 total), 16 commit queue entries/core (1024 total)</cell></row><row><cell>Swarm instrs</cell><cell>5 cycles per enqueue/dequeue/finish_task</cell></row><row><cell></cell><cell>2048-bit 8-way Bloom filters, H3 hash functions [10]</cell></row><row><cell>Conflicts</cell><cell>Tile checks take 5 cycles (Bloom filters) + 1 cycle for every timestamp compared in the commit queue</cell></row><row><cell cols="2">Commits Tiles and GVT arbiter send updates every 200 cycles</cell></row><row><cell cols="2">Spills Coalescers fire when a task queue is 75% full Coalescers spill up to 15 tasks each</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 3 :</head><label>3</label><figDesc>Configuration of the 64-core CMP.</figDesc><table><row><cell></cell><cell>Software baselines</cell><cell>Input</cell><cell>Seq run-time</cell></row><row><cell>bfs</cell><cell>PBFS [43]</cell><cell>hugetric-00020 [5, 16]</cell><cell>3.68 Bcycles</cell></row><row><cell cols="2">sssp Bellman-Ford [33, 55]</cell><cell>East USA roads [1]</cell><cell>4.42 Bcycles</cell></row><row><cell>astar</cell><cell>Own</cell><cell>Germany roads [53]</cell><cell>2.08 Bcycles</cell></row><row><cell>msf</cell><cell>PBBS [7]</cell><cell>kronecker logn16 [5, 16]</cell><cell>2.16 Bcycles</cell></row><row><cell cols="2">des Chandy-Misra [33, 55]</cell><cell>csaArray32 [55]</cell><cell>3.05 Bcycles</cell></row><row><cell>silo</cell><cell>Silo [71]</cell><cell>TPC-C, 4 whs, 32 Ktxns</cell><cell>2.93 Bcycles</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 4 :</head><label>4</label><figDesc>Benchmark information: source of baseline implementations, inputs, and run-time of the serial version.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head></head><label></label><figDesc>Serial silo runs database transactions sequentially without synchronization. Swarm outperforms serial silo by 10% at one core, and by 57? at 64 cores.</figDesc><table><row><cell></cell><cell>64</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>Speedup</cell><cell>16 32 48</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>64wh 16wh 4wh 1wh 64wh 16wh 4wh</cell><cell>Swarm SW-only</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell>1wh</cell></row><row><cell></cell><cell>1</cell><cell>1</cell><cell>16</cell><cell>32</cell><cell>48</cell><cell>64</cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>Cores</cell><cell></cell></row><row><cell cols="7">Figure 13: Speedup of Swarm and software silo</cell></row><row><cell cols="7">with 64, 16, 4, and 1 TPC-C warehouses.</cell></row><row><cell cols="7">slower than Swarm. Half of Swarm's speedup comes</cell></row><row><cell cols="7">from exploiting speculative parallelism, and the other</cell></row><row><cell cols="6">half from reducing overheads.</cell></row><row><cell>silo:</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head n="9.">ACKNOWLEDGMENTS</head><p>We sincerely thank <rs type="person">Nathan Beckmann</rs>, <rs type="person">Harshad Kasture</rs>, <rs type="person">Anurag Mukkara</rs>, <rs type="person">Li-Shiuan Peh</rs>, <rs type="person">Po-An Tsai</rs>, <rs type="person">Guowei Zhang</rs>, and the anonymous reviewers for their helpful feedback. <rs type="person">M. Amber Hassaan</rs> and <rs type="person">Donald Nguyen</rs> graciously assisted with Galois benchmarks. This work was supported in part by <rs type="funder">C-FAR</rs>, one of six SRC STARnet centers by <rs type="funder">MARCO</rs> and <rs type="funder">DARPA</rs>, and by <rs type="funder">NSF</rs> grant <rs type="grantNumber">CAREER-1452994</rs>. <rs type="person">Mark Jeffrey</rs> was partially supported by a <rs type="grantName">MIT EECS Jacobs Presidential Fellowship</rs> and an <rs type="funder">NSERC</rs> <rs type="grantName">Postgraduate Scholarship</rs>.</p></div>
+			</div>
+			<listOrg type="funding">
+				<org type="funding" xml:id="_Gr3AEa6">
+					<idno type="grant-number">CAREER-1452994</idno>
+					<orgName type="grant-name">MIT EECS Jacobs Presidential Fellowship</orgName>
+				</org>
+				<org type="funding" xml:id="_5UQDWQS">
+					<orgName type="grant-name">Postgraduate Scholarship</orgName>
+				</org>
+			</listOrg>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">9th DIMACS Implementation Challenge: Shortest Paths</title>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">The SprayList: A scalable relaxed priority queue</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Alistarh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kopinsky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PPoPP</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<title level="m" type="main">4096x128 ternary CAM datasheet (28nm)</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<publisher>Analog Bits</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Dynamic dependency analysis of ordinary programs</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Austin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sohi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-19</title>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<author>
+			<persName><forename type="first">D</forename><surname>Bader</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Meyerhenke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sanders</surname></persName>
+		</author>
+		<title level="m">10th DI-MACS Implementation Challenge Workshop</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Warp speed: executing time warp on 1,966,080 cores</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Barnes</surname><genName>Jr</genName></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Carothers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Jefferson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PADS</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Internally deterministic parallel algorithms can be fast</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Blelloch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fineman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Gibbons</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PPoPP</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Multi-core scalable and efficient pathfinding with Parallel Ripple Search</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Brand</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bidarra</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Computer Animation and Virtual Worlds</title>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="volume">23</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Single instruction stream parallelism is greater than two</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Butler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T.-Y</forename><surname>Yeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-18</title>
+		<imprint>
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Universal classes of hash functions (extended abstract)</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Carter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wegman</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">STOC-9</title>
+		<imprint>
+			<date type="published" when="1977">1977</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Bulk disambiguation of speculative threads in multiprocessors</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tuck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Torrellas</surname></persName>
+		</author>
+		<idno>ISCA-33</idno>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Optimistic simulation of parallel architectures using program executables</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Chandrasekaran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hill</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PADS</title>
+		<imprint>
+			<date type="published" when="1996">1996</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Toward efficient and robust software speculative parallelization on multiprocessors</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Cintra</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Llanos</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">PPoPP</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Spanner: Google&apos;s globally distributed database</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Corbett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Epstein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM TOCS</title>
+		<imprint>
+			<biblScope unit="volume">31</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Cormen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Leiserson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Rivest</surname></persName>
+		</author>
+		<title level="m">Introduction to Algorithms</title>
+		<imprint>
+			<publisher>MIT Press</publisher>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="volume">3</biblScope>
+		</imprint>
+	</monogr>
+	<note>rd ed.</note>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">The University of Florida sparse matrix collection</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Davis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Hu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM TOMS</title>
+		<imprint>
+			<biblScope unit="volume">38</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<title level="m" type="main">DMP: deterministic shared memory multiprocessing</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Devietti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Lucia</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+			<publisher>ASPLOS-XIV</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<monogr>
+		<title level="m" type="main">Optimizations and oracle parallelism with dynamic translation</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Ebcioglu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Altman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Gschwind</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+	<note>in MICRO-32</note>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Dark silicon and the end of multicore scaling</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Esmaeilzadeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Blem</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>St Amant</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-38</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">ILP and TLP in shared memory applications: a limit study</title>
+		<author>
+			<persName><forename type="first">E</forename><surname>Fatehi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Gratz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">PACT-23</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Parallel and distributed simulation of discrete event systems</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Ferscha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Tripathi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">U. Maryland, Tech. Rep</title>
+		<imprint>
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Fibonacci heaps and their uses in improved network optimization algorithms</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Fredman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Tarjan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">FOCS</title>
+		<imprint>
+			<date type="published" when="1984">1984</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">The virtual time machine</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Fujimoto</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SPAA</title>
+		<imprint>
+			<date type="published" when="1989">1989</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Detection and parallel execution of independent instructions</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Garold</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Trans. Comput</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">10</biblScope>
+			<date type="published" when="1970">1970</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Tradeoffs in buffering speculative memory state for thread-level speculation in multiprocessors</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">J</forename><surname>Garzar?n</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Prvulovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">M</forename><surname>Llaber?a</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-9</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Ghemawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Menage</surname></persName>
+		</author>
+		<ptr target="http://goog-perftools.sourceforge.net/doc/tcmalloc.html" />
+		<title level="m">TCMalloc: Thread-caching malloc</title>
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Hardware support for fine-grained event-driven computation in Anton 2</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Grossman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Kuskin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bank</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-XVIII</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Data speculation support for a chip multiprocessor</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Hammond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Willey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Olukotun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-VIII</title>
+		<imprint>
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Transactional memory coherence and consistency</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Hammond</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">V</forename><surname>Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-31</title>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Transactional memory</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Harris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Larus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Rajwar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Synthesis Lectures on Computer Architecture</title>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">A formal basis for the heuristic determination of minimum cost paths</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Hart</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Nilsson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Raphael</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Trans. on Systems Science and Cybernetics</title>
+		<imprint>
+			<biblScope unit="volume">4</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="1968">1968</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Brief announcement: Parallelization of asynchronous variational integrators for shared memory architectures</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Hassaan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Pingali</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SPAA</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">Ordered vs. unordered: a comparison of parallelism and work-efficiency in irregular algorithms</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Hassaan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Burtscher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Pingali</surname></persName>
+		</author>
+		<editor>PPoPP</editor>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Kinetic Dependence Graphs</title>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">A</forename><surname>Hassaan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Pingali</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-XX</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Amdahl&apos;s Law in the Multicore Era</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Marty</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computer</title>
+		<imprint>
+			<biblScope unit="volume">41</biblScope>
+			<biblScope unit="issue">7</biblScope>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Two hardware-based approaches for deterministic multiprocessor replay</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Hower</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Montesinos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Comm. ACM</title>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">Introduction to network simulator NS2</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Issariyakul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Hossain</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<publisher>Springer</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Virtual time</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Jefferson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM TOPLAS</title>
+		<imprint>
+			<biblScope unit="volume">7</biblScope>
+			<biblScope unit="issue">3</biblScope>
+			<date type="published" when="1985">1985</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Application of discreteevent simulation in health care clinics: A survey</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Jun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jacobson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Swisher</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of the operational research society</title>
+		<imprint>
+			<biblScope unit="volume">50</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">An adaptive, non-uniform cache structure for wire-delay dominated on-chip caches</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Burger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Keckler</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2002">2002</date>
+			<publisher>ASPLOS-X</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<monogr>
+		<title level="m" type="main">Carbon: architectural support for fine-grained parallelism on chip multiprocessors</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Hughes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Nguyen</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+	<note>in ISCA-34</note>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Limits of control flow on parallelism</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Lam</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Wilson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-19</title>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">A work-efficient parallel breadth-first search algorithm</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Leiserson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Schardl</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SPAA</title>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Asynchronous variational integrators</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Lew</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Marsden</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Ortiz</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Arch. Rational Mech. Anal</title>
+		<imprint>
+			<biblScope unit="volume">167</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Dthreads: efficient deterministic multithreading</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Curtsinger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">D</forename><surname>Berger</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SOSP-23</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Pin: building customized program analysis tools with dynamic instrumentation</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Luk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Cohn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Muth</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PLDI</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Distributed discrete-event simulation</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Misra</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Computing Surveys (CSUR)</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="1986">1986</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">LogTM: Log-based transactional memory</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bobba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Moravan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-12</title>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<monogr>
+		<title level="m" type="main">Using an oracle to measure potential parallelism in single instruction stream programs</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Nicolau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Fisher</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1981">1981</date>
+		</imprint>
+	</monogr>
+	<note>in MICRO-14</note>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<monogr>
+		<title level="m" type="main">A 28nm 400MHz 4-Parallel 1.6Gsearch/s 80Mb Ternary CAM</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Nii</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Amano</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Watanabe</surname></persName>
+		</author>
+		<editor>ISSCC</editor>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Employing transactional memory and helper threads to speedup Dijkstra&apos;s algorithm</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Nikas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Anastopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Goumas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ICPP</title>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">The J-Machine multicomputer: an architectural evaluation</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Noakes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wallach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Dally</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-20</title>
+		<imprint>
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Openstreetmap</surname></persName>
+		</author>
+		<ptr target="http://www.openstreetmap.org" />
+		<imprint/>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Sorting and searching using ternary CAMs</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Panigrahy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Sharma</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">23</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">The tao of parallelism in algorithms</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Pingali</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Kulkarni</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PLDI</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<monogr>
+		<title level="m" type="main">Mapping out a path from hardware transactional memory to speculative multithreading</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Porter</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Tullsen</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="volume">18</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">The limits of instruction level parallelism in SPEC95 applications</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Postiff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Greene</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Tyson</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Comp. Arch. News</title>
+		<imprint>
+			<biblScope unit="volume">27</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">OmniOrder: Directory-based conflict serialization of transactions</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Sahelices</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Torrellas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-41</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<title level="m" type="main">The Wisconsin Wind Tunnel: virtual prototyping of parallel computers</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hill</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Larus</surname></persName>
+		</author>
+		<editor>SIG-METRICS</editor>
+		<imprint>
+			<date type="published" when="1993">1993</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">Thread-level speculation on a CMP can be energy efficient</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Renau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Strauss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Ceze</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICS&apos;05</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Tasking with out-of-order spawn in TLS chip multiprocessors: microarchitecture and compilation</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Renau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tuck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICS&apos;05</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<analytic>
+		<title level="a" type="main">ZSim: Fast and Accurate Microarchitectural Simulation of Thousand-Core Systems</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-40</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<monogr>
+		<title level="m" type="main">Implementing signatures for transactional memory</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hill</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+	<note>in MICRO-40</note>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<analytic>
+		<title level="a" type="main">Flexible architectural support for fine-grain scheduling</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Yoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Kozyrakis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-XV</title>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<monogr>
+		<title level="m" type="main">Scalable locality-conscious multithreaded memory allocation</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Schneider</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Antonopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Nikolopoulos</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+	<note>in ISMM-5</note>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">Multiscalar processors</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Sohi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Breach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Vijaykumar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-22</title>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<analytic>
+		<title level="a" type="main">An evaluation of the Chandy-Misra-Bryant algorithm for digital logic simulation</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Soule</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Gupta</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM TOMACS</title>
+		<imprint>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<analytic>
+		<title level="a" type="main">A scalable approach to thread-level speculation</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">G</forename><surname>Steffan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Colohan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Zhai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-27</title>
+		<imprint>
+			<date type="published" when="2000">2000</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b68">
+	<monogr>
+		<title level="m" type="main">The potential for using threadlevel data speculation to facilitate automatic parallelization</title>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">G</forename><surname>Steffan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Mowry</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1998">1998</date>
+		</imprint>
+	</monogr>
+	<note>in HPCA-4</note>
+</biblStruct>
+
+<biblStruct xml:id="b69">
+	<analytic>
+		<title/>
+		<author>
+			<persName><forename type="first">S</forename><surname>Thoziyoor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Muralimanohar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">H</forename><surname>Ahn</surname></persName>
+		</author>
+		<idno>HPL-2008-20</idno>
+	</analytic>
+	<monogr>
+		<title level="j">HP Labs</title>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">Tech. Rep.</note>
+</biblStruct>
+
+<biblStruct xml:id="b70">
+	<analytic>
+		<title level="a" type="main">Speedy transactions in multicore in-memory databases</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Tu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Zheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Kohler</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">SOSP-24</title>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b71">
+	<monogr>
+		<title level="m" type="main">Parallel simulation made easy with OMNeT++</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Varga</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>?ekercioglu</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b72">
+	<analytic>
+		<title level="a" type="main">Active messages: a mechanism for integrated communication and computation</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Von Eicken</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Culler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Goldstein</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-19</title>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b73">
+	<analytic>
+		<title level="a" type="main">Limits of instruction-level parallelism</title>
+		<author>
+			<persName><forename type="first">D</forename><surname>Wall</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ASPLOS-IV</title>
+		<imprint>
+			<date type="published" when="1991">1991</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b74">
+	<analytic>
+		<title level="a" type="main">Data structures for task-based priority scheduling</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wimmer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Versaci</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Tr?ff</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">PPoPP</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b75">
+	<analytic>
+		<title level="a" type="main">Fermi GF100 GPU architecture</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wittenbrink</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Kilgariff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Prabhu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">31</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b76">
+	<analytic>
+		<title level="a" type="main">A flight data recorder for enabling full-system multiprocessor deterministic replay</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Bodik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Hill</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ISCA-30</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b77">
+	<analytic>
+		<title level="a" type="main">Critical path analysis for the execution of parallel and distributed programs</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Miller</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">ICDCS</title>
+		<imprint>
+			<date type="published" when="1988">1988</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b78">
+	<analytic>
+		<title level="a" type="main">LogTM-SE: Decoupling hardware transactional memory from caches</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bobba</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Marty</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-13</title>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b79">
+	<analytic>
+		<title level="a" type="main">Hardware for speculative parallelization of partially-parallel loops in DSM multiprocessors</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Rauchwerger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Torrellas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">HPCA-5</title>
+		<imprint>
+			<date type="published" when="1999">1999</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

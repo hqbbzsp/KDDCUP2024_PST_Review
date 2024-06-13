@@ -1,0 +1,2669 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Half&amp;Half: Demystifying Intel&apos;s Directional Branch Predictors for Fast, Secure Partitioned Execution</title>
+				<funder ref="#_xxBjRKe">
+					<orgName type="full">National Science Foundation</orgName>
+					<orgName type="abbreviated">NSF</orgName>
+				</funder>
+				<funder>
+					<orgName type="full">Intel</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Hosein</forename><surname>Yavarzadeh</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California San Diego</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Mohammadkazem</forename><surname>Taram</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">Purdue University</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Shravan</forename><surname>Narayan</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California San Diego</orgName>
+							</affiliation>
+							<affiliation key="aff2">
+								<orgName type="institution">University of Texas at Austin</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Deian</forename><surname>Stefan</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California San Diego</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Dean</forename><surname>Tullsen</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">University of California San Diego</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Half&amp;Half: Demystifying Intel&apos;s Directional Branch Predictors for Fast, Secure Partitioned Execution</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:33+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>This paper presents Half&amp;Half, a novel software defense against branch-based side-channel attacks. Half&amp;Half isolates the effects of different protection domains on the conditional branch predictors (CBPs) in modern Intel processors. This work presents the first exhaustive analysis of modern conditional branch prediction structures, and reveals for the first time an unknown opportunity to physically partition all CBP structures and completely prevent leakage between two domains using the shared predictor. Half&amp;Half is a software-only solution to branch predictor isolation that requires no changes to the hardware or ISA, and only requires minor modifications to be supported in existing compilers. We implement Half&amp;Half in the LLVM and WebAssembly compilers and show that it incurs an order of magnitude lower overhead compared to the current state-of-the-art branch-based sidechannel defenses.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1.">Introduction</head><p>Isolation is a fundamental goal of any secure multi-user system, providing assurance that one domain is in no way influenced by the actions of another. We want the user to be isolated from the kernel, co-running processes (including on a simultaneous multithreaded processor) to be isolated from each other, VMs to be isolated, sandboxed code to be isolated from the host program that runs this sandboxed code, etc. While significant advances have been made in software and language based isolation, recent disclosures have illustrated that it is not possible to fully provide isolation without isolating microarchitectural structures <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b53">[54]</ref>.</p><p>The primary forms of isolation we want to guarantee are memory isolation and control flow isolation, i.e., memory accesses and control flow paths in one domain should not leak information to, or be maliciously influenced by, another domain. Memory isolation has been well studied and supported at both the software and hardware level; for example, operating systems ensure memory isolation between different processes using virtual memory and page table entries that are either flushed between processes or tagged with process IDs, and processors even have hardware support to isolate cache lines <ref type="bibr" target="#b62">[64]</ref>.</p><p>In contrast, control flow isolation has only very limited support, and as a consequence has been the target of many attacks. For example, the branch prediction based information leakage has been exploited to recover the encryption key from the RSA algorithm <ref type="bibr" target="#b9">[10]</ref>, <ref type="bibr" target="#b10">[11]</ref>, <ref type="bibr" target="#b11">[12]</ref> and to break Address Space Layout Randomization (ASLR) <ref type="bibr" target="#b25">[26]</ref>. More recently, Spectre attacks <ref type="bibr" target="#b20">[21]</ref>, <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b16">[17]</ref> have demonstrated how an attacker process can infer or manipulate a victim process' control flow during speculative execution in order to disclose memory of this victim process. Preventing such attacks requires robust control flow isolation at the hardware level.</p><p>Control flow isolation on modern CPUs typically involves isolating two structures: the Branch Target Buffer (BTB) and the Conditional Branch Predictor (CBP), however, much of the existing practical defenses have been geared towards the BTB. The BTB for instance can be directly flushed by software, which allows partitioning of the BTB in time (rather than in space). Alternately, the BTB can be bypassed altogether for security sensitive programs <ref type="bibr" target="#b87">[89]</ref>. Unfortunately, similar mechanisms to partition the CBP do not exist. One of the reasons for this is the sheer complexity of the CBP predictors used in real CPUs. As a consequence, existing software control flow isolation defenses opt to forego the use of the CBP altogether, either eliminating branches <ref type="bibr" target="#b14">[15]</ref>, <ref type="bibr" target="#b19">[20]</ref> or forcing all control flow to go through indirect branches, at high performance cost <ref type="bibr" target="#b50">[51]</ref>, <ref type="bibr" target="#b60">[62]</ref>.</p><p>At its core, CBP isolation has been challenging for two reasons. First, commercial CPU vendors are notoriously secretive about their predictors, therefore, reverse engineering those structures is difficult; indeed, no prior work has successfully identified all the key predictor structures in recent advanced CPUs. Second, the indexing functions used in the internals of this complex predictor involves hundreds of bits of information folded together; this makes it nearly impossible to track and control all the ways these bits affect predictions from the CBP.</p><p>Despite these challenges, we demonstrate that it is in fact possible to automatically partition the CBP in today's CPUs, completely in software, with minimal performance impact. Our approach incurs more than an order of magnitude lesser overhead than other state-of-the-art defenses. This result is enabled by a comprehensive reverse engineering of the branch predictors on three high-end Intel processor families, revealing for the first time the structures and index functions of all tables in the predictor. Our analysis reveals the unexpected result that despite hundreds of bits used to index the branch prediction tables in these processors, a single bit of the branch address is used without modification as an independent bit of the index function of every table in the predictor. Thus, two branches that differ in this single bit can never influence each other. By partitioning the branch predictor on this bit, we can prevent side channel attacks on the CBP <ref type="bibr" target="#b24">[25]</ref>, <ref type="bibr" target="#b26">[27]</ref>, <ref type="bibr" target="#b27">[28]</ref>, <ref type="bibr" target="#b35">[36]</ref> and prevent malicious mistraining of the CBP required by transient execution attacks <ref type="bibr" target="#b45">[46]</ref>, <ref type="bibr" target="#b46">[47]</ref>.</p><p>One limitation of our approach is that while we can partition the CBP into two isolated domains, further partitioning becomes prohibitively expensive. Nevertheless, we believe this two-domain partitioning is still useful in many scenarios. We can, for example, partition the CBP between userspace code and kernel code, partition two threads running on simultaneous multithreaded (SMT) cores, or even partition the CBP between code from untrusted application components and the remainder of the application.</p><p>We implement our CBP partitioning defense mechanism on top of a general purpose compiler (LLVM) as well as Swivel <ref type="bibr" target="#b60">[62]</ref> -a WebAssembly compiler that sandboxes untrusted code in applications so that it cannot be coerced to corrupt or leak the memory contents from the trusted code in these applications through memory safety attacks or Spectre attacks.</p><p>Contributions. The contributions of this work are: ? We reveal, for the first time, a comprehensive picture of the branch predictors in three of the most recent families of Intel processors, including the size, structure, and exact indexing function of each table. ? We propose Half&amp;Half, a novel software-based defense against CBP poisoning/aliasing attacks and against CBP side channels. ? We implement our defense mechanism on top of a general purpose compiler (LLVM) and show execution overhead of 1.3%-6.8%. ? We implement Half&amp;Half in a recent Spectre-hardened WebAssembly compiler, Swivel, replacing their CBP isolation mechanism with ours, and show an order of magnitude reduction in overhead.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.">Background and Related Work</head><p>This section discusses relevant background information and prior work. It first provides an overview of the known state-of-the-art branch prediction structures used in modern processors. It then discusses the most relevant research on branch predictor-based attacks and mitigations.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1.">Branch Prediction</head><p>All modern high-performance processors employ dynamic branch prediction <ref type="bibr" target="#b81">[83]</ref>, <ref type="bibr" target="#b99">[101]</ref>, <ref type="bibr" target="#b43">[44]</ref>, <ref type="bibr" target="#b78">[80]</ref>, <ref type="bibr" target="#b75">[77]</ref>, <ref type="bibr" target="#b54">[55]</ref>, a crucial performance optimization which allows them to maintain high pipeline utilization. To continuously fetch and execute instructions after the branch, the processor needs three different predictions from the Branch Prediction Unit (BPU):</p><p>(1) whether or not the current instruction is a branch, (2) whether the branch is taken or not, and (3) where the target of the branch is. A BPU, therefore, typically features different structures for these different predictions. The Branch Target Buffer (BTB) identifies branches at fetch time and predicts the target, while the Conditional Branch Predictor (CBP) provides predictions for the direction of branches (taken or not-taken). It should be noted that predicting the targets of computed (or indirect) branches is much more difficult than predicting static targets, therefore that part of the BTB that predicts those target addresses is often called the Indirect Branch Predictor (IBP). Previous research has extensively studied the structure of the BTB and the IBP and exposed BTB-based vulnerabilities for various high performance processors from different vendors including Intel <ref type="bibr" target="#b57">[59]</ref>, <ref type="bibr" target="#b89">[91]</ref>, <ref type="bibr" target="#b25">[26]</ref>, <ref type="bibr" target="#b34">[35]</ref> and AMD <ref type="bibr" target="#b8">[9]</ref>, <ref type="bibr" target="#b88">[90]</ref>, <ref type="bibr" target="#b104">[106]</ref>, <ref type="bibr" target="#b4">[5]</ref>. However, the structure of the conditional branch predictor in most modern processor designs is still largely unknown.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2.">Conditional Branch Prediction</head><p>Conditional branch predictors proposed in the literature are mostly history-based predictors, i.e., they predict the direction of branches based on previous outcomes <ref type="bibr" target="#b81">[83]</ref>, <ref type="bibr" target="#b99">[101]</ref>, <ref type="bibr" target="#b43">[44]</ref>, <ref type="bibr" target="#b78">[80]</ref>, <ref type="bibr" target="#b75">[77]</ref>, <ref type="bibr" target="#b54">[55]</ref>. The type of history that these predictors use for each branch can be categorized as local or global. The local history captures previous outcomes of the same branch while the global history tracks the outcome of any branch that the processor executes. A simple local predictor is the bimodal, a table indexed by low bits of the branch address and composed of two-bit saturating counters <ref type="bibr" target="#b49">[50]</ref>, <ref type="bibr" target="#b54">[55]</ref>. A high counter value predicts the branch (at the address) to be taken, while a low value predicts the converse; when the branch is actually resolved as taken or not, the counter is incremented or decremented respectively. A local predictor (including those that capture patterns rather than just tendencies <ref type="bibr" target="#b99">[101]</ref>) lacks sufficient context to accurately predict many branches whose behavior is influenced by the path the code took to reach the branch (global history). These are called correlated branches, and previous research <ref type="bibr" target="#b100">[102]</ref>, <ref type="bibr" target="#b65">[67]</ref> shows they constitute a significant portion of branches in many programs.</p><p>In practice, state-of-the-art predictors <ref type="bibr" target="#b78">[80]</ref>, <ref type="bibr" target="#b73">[75]</ref>, <ref type="bibr" target="#b75">[77]</ref> use a combination of both local and global histories. Global predictors traditionally maintain a global history of past (dynamic) branches in a shift-register called the Global History Register (GHR). When the processor executes a branch, it inserts the outcome of the branch into the GHR, e.g., '0' if it was non-taken and '1' otherwise. This GHR is used in various ways to index into the branch predictor tables. The length of the GHR is a sensitive parameter, as a small GHR fails to capture correlations between branches more separated in the program flow, while a large GHR creates a great deal of noise (for uncorrelated branches) that obscures the few correlations that typically matter. To address this problem, researchers have proposed using multiple tables each indexed by different history lengths <ref type="bibr" target="#b72">[74]</ref>, <ref type="bibr" target="#b77">[79]</ref>, <ref type="bibr" target="#b41">[42]</ref>, <ref type="bibr" target="#b42">[43]</ref>. The O-GEHL predictor <ref type="bibr" target="#b71">[73]</ref> proposed using multiple tables indexed by history lengths that form a geometric series, e.g., the first table uses the history of the past 5 branches, the second table uses the history of the past 10 branches, the third table uses the history of the past 20 branches and so on. <ref type="bibr" target="#b78">[80]</ref> proposed a predictor called Tagged Geometric History Length Predictor, or TAGE. Similar to the O-GEHL predictor, TAGE uses geometric history lengths. TAGE, however, relies on a hash of the global history bits, combined with tags on table entries, to associate counters with their global histories. Since its introduction, variants of TAGE <ref type="bibr" target="#b78">[80]</ref>, <ref type="bibr" target="#b74">[76]</ref>, <ref type="bibr" target="#b75">[77]</ref>, <ref type="bibr" target="#b76">[78]</ref> have won each branch predictor championship <ref type="bibr" target="#b0">[1]</ref>, <ref type="bibr" target="#b1">[2]</ref>, <ref type="bibr" target="#b2">[3]</ref>, <ref type="bibr" target="#b3">[4]</ref>. It is known that the TAGE predictor has been implemented in many commercial high-performance processors, e.g., IBM POWER9 <ref type="bibr" target="#b36">[37]</ref> and Phytium Mars <ref type="bibr" target="#b103">[105]</ref>, and due to its accuracy, it is likely employed by other recent commercial high-performance processors. Therefore, this section delves deeper into details of the TAGE predictor. TAGE (see Figure <ref type="figure">1</ref>) features a base predictor (Table <ref type="table">0</ref> ) alongside a set of tagged predictor components (Table <ref type="table" target="#tab_5">1</ref> to Table <ref type="table" target="#tab_2">n</ref> ). The base predictor is a table of 2-bit saturating counters and is simply indexed with the branch address, i.e., the value of the Program Counter (PC) when the processor fetches the branch. The tagged tables are indexed using different hash functions of the branch address and the history lengths. An entry in a tagged component consists of a saturating counter which provides the prediction, but it also has some metadata: (1) a tag value that indicates the history to which this entry belongs, and (2) a usefulness counter that is used for replacement decisions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>TAGE In 2006, Seznec</head><p>At prediction time, the TAGE predictor simultaneously queries the base predictor and the tagged components. The tagged components provide a prediction only on a tag match, in other words, only if we observe a repeated history for a branch. The overall prediction is provided by the tagged predictor component that uses the longest history, or in case of no matching tagged predictor component, TAGE uses the prediction provided by the base predictor.</p><p>On a correct prediction, TAGE updates the prediction counter. If the prediction was from a tagged component, TAGE also updates the usefulness counter, indicating that the entry has been useful, making it less likely to be replaced. In case of a misprediction where the prediction was provided by the base predictor, TAGE updates the counters and allocates a new entry in the first tagged component (Table <ref type="table" target="#tab_5">1</ref> ). In the more general case, TAGE tries to allocate a new entry in  </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3.">Branch-based Side-Channel Attacks</head><p>We broadly categorize branch based attacks into two categories-attacks that can learn the control flow of an isolated (victim) process, and transient execution attacks that disclose the memory contents of a victim process by leveraging branch mispredictions and speculative execution.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Control flow extraction attacks</head><p>Prior work has demonstrated a number of attacks on the branch prediction unit by reverse engineering the internal BPU structures. For instance, the first BPU attacks by Ac?i?mez et al. <ref type="bibr" target="#b9">[10]</ref>, <ref type="bibr" target="#b10">[11]</ref>, <ref type="bibr" target="#b11">[12]</ref> targeted the BTB-the component that stores branch targets for a limited number of indirect branches in executing code. These attacks showed that a malicious process could fill the limited BTB target entries with dummy values to cause measurable timing differences in a victim  </p><formula xml:id="formula_0">? Table 1 Base Predictor ( Table 0 ) PC GHR [0:L 1 ] Prediction PC GHR [0:L n ]</formula><formula xml:id="formula_1">(GHR) lengths (L 1 &lt; L 2 &lt; ? ? ? &lt; L n ).</formula><p>processes. This, in turn, allows the attacker process to infer the control flow and secret data of the victim process. Evtyushkin et al. <ref type="bibr" target="#b25">[26]</ref> similarly used BTB collisions between an unprivileged user space process and privileged kernel space code to break the kernel's ASLR. Lee et al. <ref type="bibr" target="#b50">[51]</ref> used BTB collisions to infer the control flow of programs running in Intel SGX-a hardware extension that allows secure isolated execution of programs.</p><p>BranchScope <ref type="bibr" target="#b27">[28]</ref> expanded BPU attacks to target the conditional branch predictor (CBP) by reverse engineering a part of the CBP structure. They observed that the CBP in modern Intel processors was a combination of a local predictor that provides predictions based on the local history, alongside a more complicated predictor that uses global history. BranchScope works by executing many random branches to force the CBP to use the local predictor, and then induces collisions in the CBP entries (similar to the BTB attacks). BranchScope, however, stopped short of a full analysis of the CBP structure, especially the global predictor, and how this may be used in real attacks as well as practical defenses-we cover this in detail in Section 3.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Spectre v1</head><p>Recently, Spectre attacks <ref type="bibr" target="#b46">[47]</ref> have shown that leveraging CBP or BTB mispredictions in combination with speculative execution can be used for attacks. At their core, Spectre attacks work by leveraging branch mispredictions to execute code that would leak sensitive data. Specifically, they reverse engineer some structures of the indirect branch predictor (target predictor) for Haswell architecture and used this information to do drive spectre-btb attacks. In this paper, we target the CBP which is a completely different structure than the indirect branch predictor.</p><p>Listing 1 demonstrates how the out-of-place Spectre-PHT attack <ref type="bibr" target="#b16">[17]</ref> can be used to learn the memory contents of a victim process. The attack starts with the attacker process training the branch predictor to predict "Taken" on a branch located at address 0x1234 in the attacker process. When the victim process runs next, the branch predictor will predict "Taken" on the branch in victim code (as the victim branch has the the same address as the attacker process' Listing 1: Spectre-PHT gadget. A read from array2 loads data into the cache at an address dependent on array1[input], using the attacker-controlled input. branch), and speculatively execute the branch body even if "i" is very large. This results in a speculative read gadget which can read data from any memory location into the variable data. This data can then be leaked either through the data cache <ref type="bibr" target="#b85">[87]</ref>, <ref type="bibr" target="#b85">[87]</ref>, <ref type="bibr" target="#b96">[98]</ref>, <ref type="bibr" target="#b29">[30]</ref> by leveraging a double index gadget as shown, or via other covert channels <ref type="bibr" target="#b21">[22]</ref>, <ref type="bibr" target="#b70">[72]</ref>, <ref type="bibr" target="#b15">[16]</ref>, <ref type="bibr" target="#b67">[69]</ref>. Similar attacks are also possible across the userspace and kernel boundary <ref type="bibr" target="#b82">[84]</ref>, and even across different components of a single process <ref type="bibr" target="#b60">[62]</ref>.</p><p>Spectre attacks also have in-place variants <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b45">[46]</ref>, <ref type="bibr" target="#b20">[21]</ref>, where attackers invoke victim code with chosen inputs so that the victim branch is trained in-place, i.e., without relying on any collisions in BPU entries. While we mention this for completeness, we consider these in-place attacks beyond the scope of this paper; those attacks do not exploit a contention/isolation based vulnerability.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.4.">Defenses Against Branch-based Attacks</head><p>Several defenses have been proposed to stop BPU attacks targeting the CBP or BTB. While many of these BTB defenses have proven effective, with some even being deployed in practice <ref type="bibr" target="#b82">[84]</ref>, <ref type="bibr" target="#b37">[38]</ref>, the use of a general, high performance, and backwards-compatible CBP defense has remained elusive; we discuss this in more detail next.</p><p>The most general defense against contention-based sidechannel attacks is to partition the targeted unit between different processes or domains <ref type="bibr" target="#b51">[52]</ref>, <ref type="bibr" target="#b97">[99]</ref>, <ref type="bibr" target="#b105">[107]</ref>, <ref type="bibr" target="#b83">[85]</ref>. This applies to general defenses against BPU attacks as well.</p><p>Prior work <ref type="bibr" target="#b105">[107]</ref> has proposed hardware design changes that implement this change, however, this design has not yet seen mainstream adoption in commercial CPUs. Intel has instead proposed targeted mitigations such as isolating the branch prediction of hyperthreads <ref type="bibr" target="#b37">[38]</ref>, however, in practice, this simply disables branch prediction in one of the hyperthreads resulting in large overheads <ref type="bibr" target="#b22">[23]</ref>. A related but simpler defense, available in Intel CPUs as an optional mitigation, is to simply flush the BTB state when switching contexts <ref type="bibr" target="#b82">[84]</ref>; however as we discuss in Section 4.2, employing a similar flush for the CBP in CPUs is challenging.</p><p>An alternate defense used by sensitive code such as cryptographic libraries is constant-time programming <ref type="bibr" target="#b14">[15]</ref>, <ref type="bibr" target="#b19">[20]</ref>. This approach eliminates secret-dependent branches from code by implementing algorithms as circuits. However, this approach is not typically employed in general purpose code due to the high overheads. Spectre defenses Several defenses have been proposed to specifically mitigate Spectre based attacks. These include changes to CPU design to permit safe speculation <ref type="bibr" target="#b102">[104]</ref>, <ref type="bibr" target="#b101">[103]</ref>, <ref type="bibr" target="#b93">[95]</ref>, <ref type="bibr" target="#b13">[14]</ref>, <ref type="bibr" target="#b52">[53]</ref>, limiting the effects of speculation on structures such as the cache <ref type="bibr" target="#b95">[97]</ref>, <ref type="bibr" target="#b12">[13]</ref>, <ref type="bibr" target="#b68">[70]</ref>, <ref type="bibr" target="#b94">[96]</ref>, and even limiting speculative execution when handling sensitive data <ref type="bibr" target="#b84">[86]</ref>. Additionally, many designs <ref type="bibr" target="#b31">[32]</ref>, <ref type="bibr" target="#b48">[49]</ref>, <ref type="bibr" target="#b69">[71]</ref>, <ref type="bibr" target="#b106">[108]</ref>, <ref type="bibr" target="#b28">[29]</ref>, <ref type="bibr" target="#b61">[63]</ref> have combined CPU design changes with software provided hints to speed up enforcement of safe speculative execution. These changes offer a path forward on the next generation of CPU designs to prevent Spectre attacks at the cost of some performance.</p><p>To address attacks on current hardware, CPU manufacturers and software vendors have turned to microcode patches and software solutions. The core challenge with these approaches is the security vs. performance trade-off; the more secure options like microcode patches <ref type="bibr" target="#b80">[82]</ref> or inserting fences in programs [58], <ref type="bibr" target="#b39">[40]</ref>, <ref type="bibr" target="#b92">[94]</ref>, <ref type="bibr" target="#b79">[81]</ref> significantly affect performance, while Spectre gadget finders <ref type="bibr" target="#b30">[31]</ref>, <ref type="bibr" target="#b64">[66]</ref> or targeted use of secure coding patterns (retpolines <ref type="bibr" target="#b87">[89]</ref>, speculative load hardening <ref type="bibr" target="#b18">[19]</ref>, or artificial data dependencies <ref type="bibr" target="#b63">[65]</ref> near branches) are inherently incomplete defenses.</p><p>Spectre defenses have also been developed or adapted for specific domains. For example, JavaScript engines in browsers use speculative load hardening for memory operations on JavaScript arrays <ref type="bibr" target="#b23">[24]</ref>. Swivel <ref type="bibr" target="#b60">[62]</ref> proposes a code pattern called linear blocks in combination with techniques like BTB flushing, and speculative load hardening to secure WebAssembly <ref type="bibr" target="#b32">[33]</ref> -a technology that allows sandboxed execution of untrusted code components in a process.</p><p>Our work proposes a new general-purpose, lowoverhead method of partitioning the CBP in existing CPUs. By leveraging these partitions, we can prevent branch based attacks targeting the CBP. In order to partition the CBP, we start by conducting a series of experiments to uncover the design and inner workings of the BPU in today's CPUs. We explain these experiments next.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.">In-Depth Analysis of Intel CBPs</head><p>This section details our in-depth study of Intel's conditional branch predictors and the techniques and the microbenchmarks used to uncover their internal structures. The goal is to discover if it is possible to find a set of transformations that would partition the CBP to provide secure isolation. To do that, we need to know the structure and indexing/access functions for each table in the predictor. We start with analyzing the type and the size of the global history that Intel uses to predict correlated branches, for two reasons -it's the easiest to reason about without knowing other details, and the size and structure of the global history often tells us something about the structure of the predictor itself. We then expand our study to include other undocumented and previously unknown details of the predictor, including the number and the size of the predictor tables and their indexing functions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.">Assumptions</head><p>Since the Intel CBP structure is completely undocumented, we must start with only a small set of assumptions: We assume the CBP uses some form of global history, the CBP has a TAGE-like structure, i.e., it has multiple tables to store the global predictions and the tables are indexed with global history. In sections 3.3 and 3.4 we will validate these assumptions and recover the detailed structure of the CBP.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2.">Experimental Setup</head><p>We study the conditional branch predictors (CBPs) used in three different Intel microarchitectures, described in Table <ref type="table" target="#tab_5">1</ref>.</p><p>For brevity, we focus on the Skylake microarchitecture in the text, and only mention other microarchitectures when they differ in important details. We analyze the behavior of the conditional predictor using carefully-crafted microbenchmarks. For simplicity, the microbenchmarks are presented here as a mixture of C and x86 assembly; however, in practice, these are all written directly in x86 assembly for precision. We use the performance monitor counters (PMCs) to measure the outcome of experiments. Specifically, we use performance counters relevant to branch prediction such as the number of taken (or not-taken) branches and the number of mispredicted taken (or not-taken) branches.</p><p>It should be noted that the experiments described in this paper are a small fraction of all tests run in our effort to reverse engineer this unit. What is presented here is the minimal subset of those experiments that establish the details necessary to understand the features of the CBP critical to our isolation defense.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3.">Global History</head><p>As discussed in Section 2.2, the CBPs in modern processors use global history to capture the correlation between dynamic branches. The global history is particularly important to this analysis because, of all the features used by modern predictors to access their tables, it is the hardest for the system/user/compiler to control. The fact that it is so tightly integrated into the prediction mechanisms in state-of-the-art predictors is likely, therefore, to create a challenge. Specifically, we want to know the size of the global history (in number of branches recorded), what features are recorded in the global history, and how it is updated at each branch.</p><p>Prior work has shown that these processors use global history to access the IBP <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b34">[35]</ref>; however, there is no reason to believe they use the history in similar ways, so we start with a blank slate in this study. Recovering the Size of the Global History To uncover the maximum size of the global history used in the CBP we start with two correlating branches that appear immediately after each other. We then increase the distance between the correlated branches by inserting additional branches in between. We hypothesize that after a certain distance, due to limited capacity of the global history, the branch predictor will no longer capture the correlation between the two branches (and start mispredicting). Listing 3: Microbenchmark pseudo-code for detecting the maximum size of the global history used in CBP.</p><formula xml:id="formula_2">macro dummy_branches(n, i = 0, j = 0) rep iter in (1..n) //n =</formula><p>Listing 3 shows the code snippet we use to determine the size of the history. It consists of a branch (test branch) whose outcome is directly correlated with the outcome of another branch (train branch). The train branch is conditioned on a random bit (line 2); this ensures that its direction cannot be predicted locally nor globally. The test branch, however, can be predicted if the branch predictor captures its correlation with the train branch. In between these two branches, we insert a variable number of dummy branches until we exhaust the global history.</p><p>For this experiment, we use unconditional (and thus taken) branches as dummy branches. While it is not obvious that unconditional branches would even be stored in the global history, our experiments (including this one) confirm that they are. We use unconditional branches instead of conditional always-taken branches because they are simpler and result in measurements that are less noisy.</p><p>We increase the number of dummy branches (n) from 0 to 100, and measure the mispredictions rate for the two branches. For the train branch, the predictor has a miss rate of 0.5; this is expected since branch condition is random. For the test branch, we expect to see one of two possible outcomes for each value of n: (1) the predictor captures the correlation to perfectly predict the test branch (miss rate of 0), or (2) the predictor does not capture the correlation, making it unpredictable (miss rate of 0.5). Thus, on average, when we measure the predictor accuracy for the two branches together, we expect to see a miss rate of 0.25 if the predictor captures the correlation between branches, and a miss rate of 0.5 otherwise.</p><p>Figure <ref type="figure" target="#fig_1">2a</ref> summarizes our results. We find that the CBP can capture the correlation between the train and test branches when there are up to 92 taken dummy branches between them. This implies that global history stores the footprint of the last 93 taken branches (the train branch plus 92 dummy branches).</p><p>Since the global history could also be affected by not-taken branches, we evaluate the effects of not-taken branches. Specifically, we repeat our experiment but insert not-taken dummy branches branches between the train and test branches. We find that the CBP can predict the test branch regardless of the number of not-taken branches: as Figure <ref type="figure" target="#fig_1">2b</ref> shows, even with hundreds of not-taken dummy branches between the correlated branches, the misprediction   rate remains constant (at 0.25). Finally, we repeat these experiments by randomizing both the branch addresses and their targets. We do this to ensure that the addresses of the branches (and their targets), which affect the global history (as we will see shortly), do not invalidate our observation.</p><p>Observation 1. Global history records the history footprint of the last 93 taken branches, whether they are conditional or unconditional. Not-taken branches do not affect the history. This observation indicates that our predictor already deviates from expectations. It does not have the standard global history register structure. Global history as used for conditional branch prediction is typically implemented in one of two ways: ? Global History Register (GHR): a shift register that inserts "1" when a conditional branch is taken and "0" when it is not taken <ref type="bibr" target="#b54">[55]</ref>, <ref type="bibr" target="#b78">[80]</ref>. The GHR always inserts the direction of the conditional branch regardless of whether it is taken or not taken. The GHR is by far the most common form of global path history in the literature <ref type="bibr" target="#b99">[101]</ref>, <ref type="bibr" target="#b54">[55]</ref>, <ref type="bibr" target="#b43">[44]</ref>, <ref type="bibr" target="#b56">[57]</ref>, <ref type="bibr" target="#b72">[74]</ref>, and is used in the original TAGE predictor <ref type="bibr" target="#b78">[80]</ref>. ? Path History Register (PHR): a shift register that inserts a bit (or a few bits) every time a conditional branch is taken <ref type="bibr" target="#b59">[61]</ref>, <ref type="bibr" target="#b72">[74]</ref>. The PHR in <ref type="bibr" target="#b71">[73]</ref>, for example, inserts one address bit per conditional branch. From Observation 1, it is clear that the Intel CBPs use a PHR for global history. However, this PHR also deviates from PHRs used in the literature, which are only updated for conditional taken branches and ignore unconditional branches. In the rest of this section we describe our work recovering the structure of this PHR. Recovering inputs to the PHR We start by identifying the inputs to the PHR. As mentioned above, a PHR typically inserts a set of address bits on each taken branch. These bits can be from the address of the branch instruction itself, the address of the target, or a combination of the two.</p><p>We assume that the i lower bits of the branch address and the j lower bits of the target address are used to update the k lower bits of the PHR when the branch is taken. Our goal is to experimentally validate that the PHR actually has this structure-and to recover the structure details, i.e., i and j (and later k). We do this using an experiment similar to our first (see <ref type="bibr">Listing 4)</ref>. In this experiment, though, we vary the train branch address (and the target address) to understand which bits affect the test branch prediction rate.</p><p>We start by clearing the PHR, i.e., setting the PHR to all-zeros, before the train branch. We do this using 93 taken dummy branches. From Observation 1, we know that only the last 93 branches have an impact on the PHR. But, since we do not know which bits from the addresses are used to update the PHR, we use dummy branches that have an address aligned to i 0 and a target aligned to j 0 bits, so that the lowest i 0 and j 0 bits are all zero respectively. If i 0 and j 0 are large enough, i.e., i 0 ? i and j 0 ? j, the PHR will (very likely) be zero: each branch would insert at least one zero into the shift register. We test this by aligning our train branch (and its target) similarly and measuring the test branch prediction rate: if the PHR is indeed zero, we expect the misprediction rate for the correlated test branch to be high-we effectively do not have any history from the train branch.</p><p>We vary i 0 and j 0 (from 1 to 26) and find that the i = 19 lower bits of the branch address and j = 6 lower bits of the target address are used to update the PHR. Figure <ref type="figure" target="#fig_2">3a</ref> shows our findings for the former: the misprediction rate increases from 0.25 (correlation captured) to 0.5 (both train and test branches mispredicted) when we increase the branch address alignment from 18 to 19, but keep alignment of the target address fixed (to 19). Figure <ref type="figure" target="#fig_2">3b</ref> shows our findings for the latter: the misprediction rate jumps when the target address alignment goes from 5 to 6. Therefore, in the Skylake microarchitecture, only the 19 lower bits of branch address and 6 lower bits of target address are used to update the PHR when a branch is taken.</p><p>The next step is to recover which (of the i and j) bits are used to update PHR. As shown in Listing 5, we do this by first clearing the PHR and then flipping one bit of the branch address or target address at a time. Iff a bit is used to update PHR, we expect the CBP to capture the correlation between the train and test branches. We find that only 16 (of 19) bits of the branch address are used to update the PHR-the three least significant bits are not used. All 6 lower bits of the target address are used to update the PHR. Recovering the PHR update function Our next step is to understand how the PHR is precisely updated to account for new branches. We assume the PHR is not (16 + 6) ? 93 bits deep, but rather these bits are folded into the PHR via XOR (since both AND and OR are biased) and shifted before the next branch is included, following the design of PHRs from the literature <ref type="bibr" target="#b59">[61]</ref>, <ref type="bibr" target="#b71">[73]</ref>. To understand which bits are folded in this update function, we use an experiment similar to that of Listing 5: we first clear the PHR, then we flip a pair of bits from branch address and target address (including all permutations of 2 bits out of the (16 + 6) bits) to figure out if they are combined in the PHR update function (or not). Figure <ref type="figure">4</ref> summarizes our findings -which bits of the target address are XORed with which bits of the branch address.</p><p>In the Skylake microarchitecture (Figure <ref type="figure">4a</ref>), for example, we find that bit 0 of the target address is XORed with bit 3 of the branch address: when we flip both of these bits, the branch predictor cannot capture correlation between train and test branches, i.e., they cancel each other's effect in the PHR update function.</p><p>To recover the exact PHR update function, we also need to figure out how many bits the PHR is shifted by on each update and precisely which bits of the PHR are affected on each update. We do this with several experiments. First, we repeat the history length experiment (Listing 3) more precisely: we clear the PHR, then we flip only one bit of the branch address or the target address to figure out the maximum number of dummy branches that can be inserted in between train and test branches while still capturing the correlation between them. Our insight is that the dummy branches shift the footprint of the train branch through the PHR, and thus how long a particular bit remains depends on the position where it was originally inserted.</p><p>Table <ref type="table" target="#tab_3">2</ref> summarizes our findings. We find, for example, that when B5 (bit number 5 in the branch address) is flipped, the CBP can capture correlation between train and (b) Alder Lake.</p><p>Figure <ref type="figure">4</ref>: Footprint in Alder Lake and Skylake. test branches with up to 89 dummy branches in between.</p><p>In other words, 89 dummy branches place the affected bit by B5 in the most significant bit (MSB) of the PHR, and the 90th dummy branch will toss it out. By examining the number of dummy branches that place the affected bit of the PHR in the MSB position, we recover the PHR update function. Our exhaustive experiments reveal that each taken branch clears two bits from the PHR and affects the 16 lower bits of the PHR. We call these 16 bits the branch footprint. From these findings we draw two conclusions: (1) the PHR is a shift-register that always shifts two bits per taken branch, and its size is 93 ? 2 bits, and (2) the branch address and target address footprint (given in Figure <ref type="figure">4</ref>) is XORed with the PHR after it is shifted.</p><p>Observation 3. The PHR is updated in two steps whenever a branch is taken by: 1) Shift two bits to the left: PHR = PHR &lt;&lt; 2 2) XOR the 16-bit footprint into the PHR: PHR[15:0] = PHR[15:0] ? footprint Table <ref type="table" target="#tab_10">3</ref> summarizes the fully deconstructed structure of the global history for various Intel microarchitectures, which only differ in minor ways. Previous work <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b34">[35]</ref> has employed similar approaches to find the global history used for indirect branch prediction. While CBP's PHR update function is interestingly similar to what has been found for indirect branch prediction <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b34">[35]</ref>, they differ in size and how they are used to access the structures they respectively target.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.4.">Pattern History Tables (PHTs)</head><p>In this section we use our new understanding of the PHR to recover the structure of the CBP tables. This is critical for building defenses against branch-based attacks; simply put, we cannot reason about defenses that attempt to partition these CBP tables without knowing the structure of the tables and how they are indexed.</p><p>The CBPs have a TAGE-like structure <ref type="bibr" target="#b78">[80]</ref>, <ref type="bibr" target="#b74">[76]</ref>, <ref type="bibr" target="#b75">[77]</ref>. In a TAGE-like predictor, tagged components, or PHTs, are the main data structures that store the actual predictions for correlating branches. Hence, to recover the CBP tables, we first need to know their inputs, i.e., what information the CBP uses to look up a table and retrieve a prediction. These components, as described in Section 2.2, are typically indexed using a combination of the global history (PHR) and the branch address (PC). We start by discovering which  bits of the PC are used in the PHT look-up process. We then build on this to recover the precise structure of the PHTs.</p><p>Recovering the PC Input Bits In order to determine how many bits of the PC are involved in the index and tag hash functions, we intentionally force aliasing between two branches. Aliasing occurs when the CBP provides the prediction for two (or more) branches with a single entry from the PHTs or the base predictor -more specifically, when the indexing function (and tag) for the two branches are indistinguishable from each other. Our ability (or not) to force aliasing, then, tells us which bits are used in the index or tag.</p><p>For two branches to alias, the PC bits used in the index or tag should be the same. To recover which bits are used, we use two test branches that are aligned but whose directions are mutually exclusive at each iteration, as Listing 6 shows. When the first branch is taken, the second branch is not taken, and vice versa. To ensure the PHR does not impact our measurements, for both branches we set the PHRs to be the same: all zeros except for the most significant bit, equal to k, which is the direction of the first branch.</p><p>Since these branches are correlated, the CBP should capture the correlation between them by means of the PHTs unless they alias. In other words, the misprediction rate should increase as we increase the alignment. Figure <ref type="figure" target="#fig_4">5</ref> shows our results: when both branches have an alignment of up to 11, the miss rate is low, but when it goes up to 12, the miss rate increases to 0.5 indicating aliasing between the branches. Observation 4. The 12 lower bits of the PC are used as input to the index and/or tag hash functions. Other microbenchmarks confirmed that all of these 12 lower bits of the PC are involved in either the index or tag hash functions.</p><p>Recovering the Associativity Pattern history tables contain tagged entries and are roughly organized as a cache. To recover the structure of the PHTs, then, we need to recover the associativity -the number of entries that can share the same index -of the different tables. We do this by determining how many ?PHR, PC? combinations can be predicted for the same PHRs but similar (i.e., not the same) PCs. * For this experiment, we need the branches (i.e., the ?PHR, PC?) to lead to the same index and different tags, to ultimately create conflict misses. This is difficult without knowing the index function and the tag function. But as we see in the next section, knowing the associativity is key to finding the index function, so we tackle the associativity first.</p><p>We start with the last PHT -the table that uses the longest history length. We target this PHT by placing a single correlating bit in the highest bit of the PHR. Listing 7 shows how we find its associativity. Here, we use a variable number of branches with the same PHR but different PC. We increase the number of branches and measure the misprediction rate. In this experiment (with various permutations, starting addresses, etc.), we find that we largely cannot capture more than 4 unique PCs, i.e., the associativity is at most 4.</p><p>These results are robust even when we vary the branch addresses. This suggests that the PC is largely not used in the PHT index function.</p><p>The one exception is bit PC <ref type="bibr" target="#b4">[5]</ref> on Alder Lake/Skylake. If we spread the branch addresses so that PC <ref type="bibr" target="#b4">[5]</ref> is both 0 and 1 for different branches, we can predict as many as 8 branches accurately. In other words, changing PC <ref type="bibr" target="#b4">[5]</ref> causes the index function to select a different set. We can see an instance of this in Figure <ref type="figure" target="#fig_3">6</ref>, where we get conflict misses with more than 4 unique PCs, but as soon as we advance far enough in the code so that PC <ref type="bibr" target="#b4">[5]</ref> flips, we then can capture 4 more branches accurately. We observe this same behavior for Cascade Lake and the Ivy Bridge microarchitecture (though for Ivy Bridge, PC <ref type="bibr" target="#b3">[4]</ref> is used as part of the PHT index rather than PC <ref type="bibr" target="#b4">[5]</ref>).</p><p>We recover the other PHTs similarly. Specifically, we run versions of this microbenchmark, moving the one bit of correlation to different positions in the PHR. That is, we change the position of k in PHR = k0...0 from PHR[185] to PHR[0] and measure how many branches can be correctly predicted (the associativity) for each case, keeping PC[5]=0.</p><p>Figure <ref type="figure" target="#fig_6">7</ref> shows our measurements. We have an associativity of 4 when using history bits PHR[185:58], 8 when using PHR <ref type="bibr">[57:22]</ref>, and 12 when using PHR[21:0]. These results reveal quite a bit about the underlying tables. Higher tables in the TAGE predictor use longer histories (more of the PHR), overlapping the histories captured by smaller tables. The size of the steps in the graph suggest that there are three PHTs, each of which is 4-way set associative. When using the lower bits of the global history, all three tables can each hold four distinct PCs. But when using bits 22 and higher, the lowest table is of no use, and only the eight entries in tables 2 and 3 are useful. When using bit 58 or higher, only the associativity in the highest table is of use.</p><p>Observation 5. There are 3 PHTs in the CBP, each of which is a 4-way set associative table. Only one bit of the PC is used to index the PHTs (PC <ref type="bibr" target="#b4">[5]</ref> on Alder Lake, Tiger Lake, Ice Lake, Skylake and Cascade Lake, PC <ref type="bibr" target="#b3">[4]</ref> on Haswell and Ivy Bridge).</p><p>Recovering the Index Hash Functions The last piece of our PHT puzzle is the index functions of each PHT. We assume that index functions use folded instances of the global history (much like the PHR update function). We start with the index function of the last PHT, which uses the longest history length. Assume that bit number n and bit number m of the global history are combined together to make a single bit in the index hash function of the last PHT (58 ? n, m ? 185). Therefore, if there is a conflict in the PHT when both bit n and bit m of the PHR differ, then these two branch/history pairs are mapped to the same set in the last PHT, and thus the two bits are folded together in the index function. This happens when the index function cannot distinguish between n=0,m=1 and n=1,m=0, resulting in the same index and thus conflict misses.</p><p>Similar to Listing 7, we design an experiment which includes two groups of branches. The first group has four branches with PHR = 0k0...0 (position of k is fixed and equal to 184 for the single experiment shown) and the second group is comprised of four additional branches with PHR = 0...0k0...0 (position of k is variable in the experiment and varies from 185 to 0). With no conflicts (different index), we should be able to predict both groups of branches after the first few iterations since our tables are 4-way associative. However, if the branches in the first and the second group both map to the same set in PHT (same index), we will observe an eviction (by measuring a loss in accuracy). Figure <ref type="figure" target="#fig_9">8</ref> shows the number of correctly predicted branches, depending on the position of the k bit in the second group of branches. It is clear that for certain k the number of correctly predicted branches drops from 8 to 4, indicating that these bits are combined together (in   this case, with bit 184) and map to the same set in the last PHT.</p><p>We observe that bits 8, 24, 40, . . . , 168, 184 from the even PHR bits and 1, 17, 33, . . . , 161, 177 from the odd PHR bits form an arithmetic series with the constant difference of 16. This indicates that the index function uses a straightforward, regular folding function (i.e., sequences of sixteen bits are repeatedly folded with other sequences of sixteen bits, with even and odd bits handled differently). Building on this, we exhaustively consider all pairs of bit positions to recover the exact hash function used to index each PHT. A generalized formulation of index functions is presented below. From prior experiments, we know that PC <ref type="bibr" target="#b4">[5]</ref> is used in the index function too. To understand how this bit is used, we perform similar experiments (which create deterministic conflicts). These experiments indicate that each PHT index function is index by 9 bits in total: the first 8 bits come from the folded global history, the ninth bit is PC <ref type="bibr" target="#b4">[5]</ref>, i.e., for all PHTs Index[8] = PC <ref type="bibr" target="#b4">[5]</ref> (PC <ref type="bibr" target="#b3">[4]</ref> on Haswell/Ivy Bridge). Observation 6. Each PHT is indexed by a 9-bit index function, using eight bits derived from global history, and a single bit of the PC which is not combined with any other bits. This same bit is also used (without being combined) for the base predictor.</p><p>Implication: Partitioned Branch Predictor From a security standpoint, this final observation has enormous implications. It means that no branch for which PC <ref type="bibr" target="#b4">[5]</ref> is 0 can possibly be influenced by branches for which PC <ref type="bibr" target="#b4">[5]</ref> is 1, in any of the PHTs. They cannot cause evictions to reduce branch accuracy. They cannot detect evictions, eliminating side channels. They cannot mistrain branches because they cannot induce aliasing across this partition. To ensure that the Base Predictor does not invalidate our assumption -that we can partition the entire branch predictor -we perform a last set of experiments. These experiments are very straightforward since the base predictor is simple and described in Appendix A. <ref type="bibr" target="#b2">3</ref>. We find that the base predictor is indexed directly by 13 lower bits of the branch address (PC <ref type="bibr">[12:0]</ref>). Thus, every table in the CBP is fully partitioned by PC <ref type="bibr" target="#b4">[5]</ref> (PC <ref type="bibr" target="#b3">[4]</ref> in Haswell/Ivy Bridge).</p><p>Table <ref type="table" target="#tab_11">4</ref> summaries the PHTs for different Intel microarchitectures. All tables are 4-way set associative with 9 bits of index (8 bits from folded PHR plus 1 bit from PC). Note that Half&amp;Half works on the primary server-level CPUs produced by Intel spanning more than a decade, during which time Intel has averaged over 95% of the server/datacenter CPU market share <ref type="bibr" target="#b66">[68]</ref>. In the next section we use these microarchitectural details to build more secure systems.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.">Partitioning the CBP with Half&amp;Half</head><p>This section introduces our CBP partitioning mechanism, dubbed Half&amp;Half, a fast, software-only defense against branch-based side channel and mistraining attacks that is enabled by the in-depth knowledge we gained from our reverse-engineering analysis.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.">Assumptions and Threat Model</head><p>Our goal is to isolate the conditional branch behavior of two mutually distrusting code components that are executed on a single CPU. One or both of these code components may be malicious, and seek to infer or affect the controlflow of the other component by creating collisions (either aliasing or conflicts) in the entries of the conditional branch predictor. The two code components may be run on the same physical processor core -either as co-resident SMT threads, or time-separated execution flows. We additionally make no assumptions about how the two components are separated at the process level -they may be run in separate OS processes, or in separate security domains (such as userspace and kernel code), or even in a single process sandboxed by WebAssembly -a technique to sandbox untrusted code components within a single process. We assume that the test machine employs mitigations against other attacks on the branch predictor, such as attacks that target the branch target buffer <ref type="bibr" target="#b46">[47]</ref> or the return stack buffer <ref type="bibr" target="#b47">[48]</ref> and consider these out of scope. We also consider microarchitectural attacks that exploit the memory subsystem (e.g., Meltdown <ref type="bibr" target="#b53">[54]</ref>, MDS <ref type="bibr" target="#b91">[93]</ref>, <ref type="bibr" target="#b17">[18]</ref>, and LVI <ref type="bibr" target="#b90">[92]</ref>) out of scope for this paper. Finally, since the two components are isolated and do not communicate, we consider the in-place Spectre-PHT attack <ref type="bibr" target="#b46">[47]</ref>, <ref type="bibr" target="#b45">[46]</ref>, <ref type="bibr" target="#b20">[21]</ref> (an attack which requires the malicious component to directly invoke the other component with carefully chosen inputs in order to mistrain branches) out of scope, because it does not exploit contention or aliasing.</p><p>Our defense partitions the CBP of different code components by carefully picking alignments of branches in the binaries of these components. This assumes that we can control the location of branches in the compiled binary versions of the code components (which is possible either with a small modification during compilation or by directly modifying binaries). Importantly, we do not require any changes to existing source code or existing hardware.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.">Overview</head><p>As discussed in Section 3, the base predictor is indexed using the 13 lower bits of the branch address while the PHTs are accessed via a 9-bit index, of which 8 bits come from the folded path history register (PHR) and 1 bit comes from the PC -PC <ref type="bibr" target="#b4">[5]</ref> (the sixth bit of the PC) for Alder Lake, Tiger Lake, Ice Lake, Cascade Lake, and Skylake and PC <ref type="bibr" target="#b3">[4]</ref> for Haswell and Ivy Bridge. Using this information, we partition the pattern history tables (PHTs) and the base predictor by partitioning their index function, which is done most easily by exploiting the PC bit. That is, by forcing every branch of a thread to be at an address with PC[5]==0 on (Alder Lake-Skylake), that thread has access to exactly half the entries in each of the four tables, and will share zero entries with another thread where all branches have PC <ref type="bibr" target="#b4">[5]</ref>==1. Note that because this is a symmetric division of the address space, we can even compile a single binary, and only at load time decide which of the two regions will be used, simply by varying the start address.</p><p>With two isolated CBP partitions, we can secure a large class of possible applications, including isolation of user code from kernel code (described in appendix A.5), isolation of co-resident SMT threads from each other (in the most common case of 2 hardware contexts), and isolation of the trusted application code from any untrusted code sandboxed by WebAssembly. We can, in theory, extend this to more than two partitions, however doing so would impose very significant performance penalties due to the additional restrictions on branch placement, since we now have to control bits of the PHR to do so.</p><p>Support for two partitions is particularly powerful in the SMT (hyperthreading) case, as these Intel processors all have a thread limit of two. In an SMT processor, the BPU tables and the BTB are typically shared <ref type="bibr" target="#b86">[88]</ref>. When paired with Intel's STIBP <ref type="bibr" target="#b38">[39]</ref>, which isolates the BTB but does nothing for the shared CBP, we can for the first time provide a complete solution for control flow isolation between co-executing SMT threads on the same core.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.">Implementation</head><p>In order to partition the CBP into two isolated domains, we need to adjust the addresses of all conditional branches of each program such that their PC <ref type="bibr" target="#b4">[5]</ref> bit (PC <ref type="bibr" target="#b3">[4]</ref> on some microarchitectures) is constant. We automate this process by modifying two existing compilers to compile code such that it meets our partitioning requirements. First, we implemented our partitioning scheme in LLVM to demonstrate how we can compile existing C/C++ code without modification. Next, we implemented our scheme in Swivel <ref type="bibr" target="#b60">[62]</ref>-a WebAssembly compiler that sandboxes untrusted code to prevent memory safety attacks (buffer overflows, user-after-frees etc), as well as Spectre style attacks; in particular, we replaced some of Swivel's slower mitigations that prevent Spectre-PHT attacks with our lightweight CBP partitioning scheme. Pairing Half&amp;Half with Swivel-SFI (BTB, RSB) results in a comprehensive Spectre solution that is much faster than anything prior.</p><p>Implementing the partitioning scheme In order to implement the address adjustment modifications on top of these compilers, we added code to adjust the addresses of conditional branches before emitting binary. This can be done by inserting sufficient NOP instructions to meet our alignment requirements. However, this naive approach has higher overheads than necessary; for example, a single branch may require as many as 32 NOP instructions for suitable alignment ? . To address this issue, we apply three simple optimizations in our compiler modifications: ? Using Multi-Byte NOPs: The x86 architecture allows construction of NOP instructions of different lengths <ref type="bibr" target="#b40">[41]</ref>. Multi-byte NOPs have the advantage of requiring less instruction decoding bandwidth and being quicker to translate than a sequence of one byte NOPs. We take advantage of this support, to use NOP instructions as large as 15 bytes. ? Jumping over NOPs: We observed that it was simply more efficient to jump over the sequence of NOP bytes for sequences of NOPs larger than 15 bytes. This is possible as the NOP instructions are only present to align conditional branch instructions and do not actually have to be run ? . ? Alignment-Invariant NOP Motion: We found that inserting the required NOPs right before the branch instruction exacerbates the execution time overhead since they are often placed inside backward loops. We instead inject the NOPs right after the previous branch instruction. By doing this, we are less likely to fill inner loops with NOPs, reducing lost performance due to fetch and decode overhead. Figure <ref type="figure" target="#fig_11">9</ref> shows an example code alongside its translation to domain A. For domain A, we need to ensure that the fifth bit of the address of all conditional branches is set to zero, i.e., PC <ref type="bibr" target="#b4">[5]</ref>=0. Therefore, in the example code, the second and the third branch need to be adjusted. The second branch is 23 bytes from the next boundary. Since 23 is more than the threshold (16 bytes), the compiler inserts an unconditional branch before the NOPs to jump over them. Note that the unconditional jump is a 2-byte instruction and the compiler only inserts 23-2=21 bytes of NOPs (a 15-byte NOP and a 6-byte NOP) before the conditional branch to set PC <ref type="bibr" target="#b4">[5]</ref> to zero. In this example, after inserting NOPs for the second ? NOP instructions do not use ALU resources, but still require CPU resources to fetch, decode, and convert to micro-ops. Thus, use of NOP instructions should be minimized where possible.</p><p>? The extra jump instruction added is an unconditional and therefore does not lookup or update the CBP tables. branch, the third branch does not require any extra NOPs as its new address already satisfies our goal (PC[5]=0). Architecture independent partitioning In order to make Half&amp;Half compatible with various microarchitectures, we designed a new configuration where we partition both PC <ref type="bibr" target="#b3">[4]</ref> and PC <ref type="bibr" target="#b4">[5]</ref> bits. In this case, Domain A is where both bits are 0, and Domain B has both bits 1. Because each architecture only partitions on one of the bits, each domain still has access to half the predictor (despite using 1/4 of the address space), but the required NOPs for padding is increased. With this configuration, the partitioning mechanism will work across different processors and it will not need processor-based compilation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.">Evaluation</head><p>This section evaluates our approach of partitioning the CBP (Half&amp;Half) into two isolated domains to prevent branch based attacks. We start with a security evaluation of Half&amp;Half, followed by a performance evaluation.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.1.">Security Evaluation</head><p>To investigate the security of Half&amp;Half, we first show that the branch prediction of two partitioned CBP domains, domain "A" and domain "B", are isolated, i.e., branch prediction of code running in domain "A" is unaffected by code running in domain "B". After this, we demonstrate Half&amp;Half prevents the proof-of-concept Spectre-PHT attacks from Google's SafeSide suite.</p><p>Our experiment to investigate the effectiveness of Half&amp;Half's CBP partitioning scheme consists of two functions-Function A and Function B, which are run in two partitioned domains of the CBP. Function A is considered benign, and runs a sequence of 1024 conditional branches. Function B is considered malicious, and aims to change the branch prediction accuracy of Function A by running a sequence of N branches, where N is configurable. Branches' directions within a function are correlated and correlation distances are widely varied. CBP will therefore utilize all PHTs together with the base predictor in order to maximize its prediction accuracy. As we have partitioned the CBP, we expect that the branch prediction rate of Function A is the same whether it is executed in isolation or it is executed alongside Function B (for any value of N). In our experiment, we evaluate this statement in both sequential and parallel settings: we first run Function A and Function B interleaved in a single thread; next, we run Function A and Function B in parallel on one CPU core. Sequential setting To collect our baseline numbers, we first run Function A in a loop 100k times to measure the branch prediction accuracy of this function in isolation. We then repeat this procedure, but this time we follow each call to Function A with a call to Function B, configured with N=1 branch. This results in 100k calls to Function A interleaved with 100k calls to Function B, for which we once again measure the branch prediction accuracy of Function A. We then repeat this procedure for different values of N (the number of branches in Function B), up to N=30000. The results are shown in Figure <ref type="figure" target="#fig_12">10a</ref> which graphs the misprediction rate of Function A, for different values of N. We see that the misprediction rate of Function A when partitioned is completely flat for any value of N, i.e., it is completely isolated from the control flow behavior of Function B. Additionally, when we repeat the experiment without partitioning, we see in Figure <ref type="figure" target="#fig_12">10a</ref> that Function A's branch prediction behavior is significantly affected by Function B's activity, causing an order of magnitude more misses.</p><p>Parallel setting To ensure Half&amp;Half is secure even in parallel (SMT) settings, we repeat the prior experiment with two threads-Thread A and Thread B, both pinned to a single core. Specifically, we pin these threads to different virtual or hyperthreaded cores that map to a single physical core to ensure that the threads share a branch prediction unit. In the experiment, Thread A runs Function A in parallel with Thread B running Function B, and we show the results in Figure <ref type="figure" target="#fig_12">10b</ref>. Similar to the prior experiment, we observe that the misprediction rate of Function A is independent of Function B and the value of N when partitioning is enabled.</p><p>Testing the out-of-place Spectre-PHT attack To examine the effectiveness of Half&amp;Half against the out-of-place Spectre-PHT attack <ref type="bibr" target="#b104">[106]</ref>, <ref type="bibr" target="#b7">[8]</ref>, <ref type="bibr" target="#b16">[17]</ref>, we run the proofof-concept implementation of this attack from Google's SafeSide suite <ref type="bibr" target="#b7">[8]</ref> with and without partitioning. We find that, when partitioning is enabled, an attacker cannot poison the CBP to make mispredictions in the victim code.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5.2.">Performance</head><p>To evaluate the performance overhead of Half&amp;Half, we modify two existing compilers to output binaries that are restricted to one of two partitions of the CBP. First, we modify LLVM so we can measure the overhead on existing native (C/C++) code. Next, we modify Swivel <ref type="bibr" target="#b60">[62]</ref> (a WebAssembly compiler that inserts mitigations for Spectre style attacks) to leverage CBP partitioning for its Spectre mitigations, and measure speedups. We use these compilers to evaluate the performance of standard benchmarks such as SPEC CPU 2006 <ref type="bibr" target="#b33">[34]</ref>  To measure the speedup of WebAssembly spectre mitigations, we run the corresponding benchmarks on machines 2 and 3. We run our experiments on these three microarchitectures as the partitioning approach differs slightly across them (See Section 4.2 for details). Unless otherwise specified, all benchmarks are pinned to a single (physical) CPU core. All benchmarks used in this section are compiled with statically linked libraries, in order to ensure that libraries are also partitioned.</p><p>Overhead of partitioning native code To measure the impact of partitioning on native code, we use our modified LLVM compiler to compile programs from SPEC 2006 in three settings: (1) using the full CBP, (2) using only the first domain of the CBP (Domain A), and (3) using only the second domain of the CBP (Domain B). We show the performance of the programs in Figure <ref type="figure">11</ref> for three configurations including the Alder Lake/Skylake (Only PC <ref type="bibr" target="#b4">[5]</ref>), Ivy Bridge (Only PC <ref type="bibr" target="#b3">[4]</ref>), and architecture independent (PC <ref type="bibr">[5:4]</ref>). In all cases, the results are the average of running in Domain A and B (generally, the performance varies little between the two).</p><p>From our experiments, we highlight two observations. First, we see that partitioning programs to one domain has low overhead, imposing an overhead of 1.4%-6.8%, 1.2%-6.6%, and 2.2%-8.8% in the Alder Lake/Skylake, Ivy Bridge, and Portable architectures respectively. Second, as expected, we see marginally lower overheads on Ivy Bridge as this microarchitecture requires less padding with NOP instructions to partition the CBP.</p><p>The overhead of CBP primarily comes from two sources. (1) Reduced branch prediction accuracy due to only being able to access half the predictor, and ( <ref type="formula">2</ref>) the cost of extra instructions (NOPs) in the instruction stream (which can include both pipeline and Icache costs). We measure an overall 2.8% increase in branch misses in partitioned mode, with gobmk and sjeng seeing the highest increases in misses/instruction. The average increase in dynamic instructions due to NOPs is 9%, varies from 1% to 16%, and is highest in xalancbmk, bzip2, mcf, and gobmk. Overall performance cost does not fully scale with the expansion in instructions, however, since NOPs do not execute and do not have dependencies. It will hurt applications that are bottlenecked in the front-end (instruction delivery), and have little or no impact on applications bottlenecked in the back end (instruction dependencies) such as memory-intensive mcf.</p><p>Speedup of WebAssembly Spectre mitigations We use the modified Swivel compiler to compile Wasm versions of the Sightglass benchmarks and the SPEC CPU 2006 benchmarks ? . Wasm versions of SPEC and Sightglass benchmarks are generated by compiling the C/C++ code of these benchmarks using Clang's Wasm backend <ref type="bibr" target="#b6">[7]</ref> to produce Wasm binaries. These Wasm binaries are then compiled using Swivel. We note that our modified Swivel compiler retains Swivel's BTB and RSB defenses, but uses Half&amp;Half to defend the CBP (in place of Swivel's default CBP defenses such as eliminating direct branches) as discussed in Section 4.3. We compare the performance of Half&amp;Half paired with Swivel-SFI (BTB, RSB) with Swivel-SFI (BTB, RSB, CBP) and show the results in Figure <ref type="figure" target="#fig_14">12</ref> and Figure <ref type="figure" target="#fig_4">15</ref> (See Appendix A.4) for the SPEC and Sightglass benchmarks respectively. For each bar, the result is normalized to Swivel-SFI with no CBP defense, but all other defenses active (BTB, RSB). For Sightglass, we see that Half&amp;Half based defense allows Swivel to reduce its conditional branch isolation overhead to 3.9% as compared to 55.2% for Swivel-SFI's conditional branch solution. Similarly for SPEC, the overhead reduces to (1.4%-4.9%) as compared to (9.4%-95.4%) for Swivel-SFI. This shows that Half&amp;Half is a viable defense for preventing Spectre attacks in WebAssembly settings.</p><p>Partitioning the CBP across SMT threads As discussed in Section 4.2, Half&amp;Half allows the OS to automatically isolate the CBP of two OS processes/threads that are run on one physical core (as SMT contexts, or hyperthreads). In this scenario, the OS scheduler ensures these two threads are always assigned different CBP partitions. ? Wasm only supports a subset of the SPEC 2006 benchmarks <ref type="bibr" target="#b60">[62]</ref>, so we restrict our benchmarks to the supported programs. We benchmark this exact scenario, and measure the execution overhead of Half&amp;Half on multithreaded execution. Concretely, we create two threads-Thread A and Thread B-pinned to a single core and configured to use Domain A and B, respectively. We run all permutations of 2 out of 18 SPEC benchmarks in Domain A and B (if B finishes first, it restarts until A finishes). We measure the average execution time of A, both with conventional execution, and with A and B isolated. Half&amp;Half overhead, then, is the relative increase in execution time with partitioning. We show the results in Figure <ref type="figure" target="#fig_2">13</ref>. We see that partitioning the CBP for hyperthreads only adds an overhead of 0.5%-5.4%.</p><p>The two overheads of CBP Partitioning should have opposite (relative) effects on SMT execution. The loss in branch prediction accuracy is significantly lowered, as SMT threads must share the CBP anyway (but they share it dynamically instead of statically). However, SMT puts more pressure on the front-end of the pipeline to deliver instructions at a high rate, so some configurations will be more sensitive to the NOP expansion. Overall, we see a small lowering in the cost to use CBP partitioning for SMT (compared to the single-thread Skylake overhead in Figure <ref type="figure">11</ref>). These results demonstrate that our approach can be used to partition the branch predictors of existing SMT processors with only minor performance overheads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.">Conclusion</head><p>This paper presents the first comprehensive analysis of the structure of the conditional branch predictors in modern Intel CPUs. This analysis uncovers a unique opportunity to partition the predictor into two parts based on the branch address. The resulting technique, Half&amp;Half, enables the system to provide complete CBP isolation between two domains, disabling CBP side channel and mistraining attacks. The technique works on current systems with no hardware changes. Performance overhead of Half&amp;Half is at most 4.9%, dramatically lower than the prior state-of-the-art software solution. The ability to partition the CBP into two mutually separated regions enables opportunities such as user-kernel isolation, isolation of co-resident SMT threads, and separation of sandboxes from the calling process. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.2. Branch Instructions: Influencing the CBP</head><p>As discussed in section 3.3, the global history register (PHR) can be influenced by unconditional branch instructions despite the fact that they do not use predictions from the CBP. Therefore, for completeness, we examine all possible instructions that could influence the state of CBP, such as updating the PHR and PHT entries. Our results show that all conditional branch instructions and loop instructions update the PHR (when taken) and use the predictions from the CBP. Additionally, all unconditional branches (including indirect branches) update the PHR but do not affect the PHTs. Table <ref type="table" target="#tab_13">5</ref> shows the list of all possible instructions that could influence the PHR or PHT entries. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.3. Base Predictor</head><p>As discussed in Section 2.2, state-of-the-art directional branch predictors in the literature <ref type="bibr" target="#b78">[80]</ref>, <ref type="bibr" target="#b75">[77]</ref>, as shown in Figure <ref type="figure">1</ref>, employ a base predictor (T able 0 ) alongside a set of tagged components (PHTs). The base predictor is a bimodal-like predictor <ref type="bibr" target="#b54">[55]</ref> indexed directly by branch address (PC) to record the local history of each branch. A base predictor is crucial to the performance of the CBP in modern processors because: (1) In case of no matching tagged component, CBP uses the prediction provided by base predictor, and (2) Base predictor performs better than the PHTs when a branch is strongly biased in a particular direction since its warm-up time is short. Also, Evtyushkin et al. <ref type="bibr" target="#b27">[28]</ref> showed that the CBP of Haswell and Sandy Bridge microarchitectures features a base predictor in charge of providing a basic prediction. In order to recover how many, and which, bits of branch address are used to index base predictor, we coerce the CBP to provide the prediction using base predictor instead of PHTs. We do this using an experiment shown in Listing 8. ? We try to alias two test branches in which one of them is always taken and the other one is not-taken. ? Prior to each test branch, we clear the PHR (PHR = 0...0) to ensure that the CBP can only access a set of entries within PHTs indexed by zero. Beforehand, we fill those PHT entries with some correlating branches that will cause no matching tagged component while predicting directions of test branches. Therefore, the CBP provides the prediction for test branches using only the base predictor, allowing us to study its index. By aligning addresses of test branches we try to alias them in the base predictor, thus a single entry provides prediction for both of them. Since the first test branch is always taken and the second one is always not-taken, aliasing will cause mispredictions. Listing 8: Microbenchmark pseudo-code for recovering the index of the base predictor Observation 7. We found that 13 lower bits of the branch address (PC <ref type="bibr">[12:0]</ref>) are used to index to the base predictor.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.4. Speedup of WebAssembly Spectre mitigations</head><p>We use the modified Swivel compiler to compile Wasm versions of the Sightglass benchmarks. We compare the performance of this defense with Swivel's two baseline defenses (called Swivel-SFI and Swivel-CET) and show the results in Figure <ref type="figure" target="#fig_4">15</ref> for Sightglass benchmarks. For each bar, the result is normalized to Swivel with no CBP defense, but all other defenses active.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.5. Partitioning the CBP across Kernel and User programs</head><p>As discussed in Section 4.2, Half&amp;Half can be used to partition the CBP between userspace code and kernel code. This prevents malicious users from leveraging out-ofplace Spectre-CBP attacks to learn information from kernel code. In the case of arbitrary code, we must either use trusted compilers, trusted binary translators, or verify the binaries to ensure that all conditional branches follow the partitioning policy. A number of prior works demonstrate the potential for verifying binaries <ref type="bibr" target="#b44">[45]</ref>, <ref type="bibr" target="#b58">[60]</ref>, <ref type="bibr" target="#b98">[100]</ref>. We measure the performance overhead of Half&amp;Half, with the LMbench <ref type="bibr" target="#b55">[56]</ref> benchmark suite. We measure performance overheads of LMBench when it is run isolated from the kernel code, and show the results in Figure <ref type="figure" target="#fig_18">16</ref>.</p><p>From the experiments, we see that using Half&amp;Half to isolate Kernel code from userspace code only adds an overhead of 5.9%. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.6. Swivel Protections vs Half&amp;Half Protections</head><p>In order to ensure our comparisons with Swivel performance in Section 5.2 are fair, we need to confirm that the compared solutions -specifically Swivel-SFI (PHT, BTB, RSB) vs. Swivel-SFI (BTB, RSB) -provide the same protections. We analyze those protections more deeply here.</p><p>According to the Swivel paper, either in-place or outof-place Spectre can be used by a malicious Wasm instance "A" to: 1) breakout of it's sandbox and directly access memory of Wasm instance "B". (breakout attack) 2) poison the branch predictors so that Wasm instance "B" self-exfiltrates it's own sensitive data. (poisoning attack) Breakout attacks in Swivel are protected using linear blocks and the BTB flush which we leave unchanged in our hybrid Swivel + Half&amp;Half implementation.</p><p>Poisoning attacks in Swivel are protected with distinct protections: PHT (eliminate direct branches), BTB (flush BTB), and RSB (eliminate returns). In our hybrid Swivel + Half&amp;Half, we only remove Swivel's poisoning PHT protections (i.e., direct branch elimination) in favour of direct branch partitioning which will provide equivalent protections. The table below clarifies our changes to Swivel, and how each protects against the full permutation of attacks. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.7. Half&amp;Half Integration with OS Kernels</head><p>This section details the process by which the kernel can successfully run an application compiled with Half&amp;Half, targeting SMT execution. Our integration scheme involves the following steps: First, during the OS Boot setup, each SMT core in a physical core is assigned a unique domain A or B. Depending on the microarchitecture, domain A may have PC[4/5] = 0, while domain B may have PC[4/5] = 1. This ensures that each core executes only one domain at a time.</p><p>When compiling an application, the Half&amp;Half Compiler should, by default, compile all branches with PC[4/5] = 0 and add a flag to all applications compiled with Half&amp;Half. It should be noted that handwritten assembly codes will require modifications to ensure that all branches within them have appropriate addresses.</p><p>When executing an application, the OS checks if it supports Half&amp;Half, and if so, associates the process with one of the domains A or B. If the OS assigns the process domain B, the elf loader offsets the code pages by 16/32 bytes during load.</p><p>We believe that this integration scheme only requires minor changes to the existing OS components and will enable the OS to utilize Half&amp;Half's isolation mechanisms between user/kernel and SMT threads.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head></head><label></label><figDesc>Not-taken dummies.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Miss rate of two correlated branches due to variable number of dummies between them. This helps determine the maximum size of global history.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure 3: Miss rate of two correlated branches due to variable alignment of the inputs to the PHR.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Listing 6 :</head><label>6</label><figDesc>for (i=0; i &lt; NUM_TRIES; i++){ k = rand(); SET_PHR(k0..0); //PHR = k0...0 align(alignment) //PC[alignment:0] = 0 if(k); //Test Branch 1 SET_PHR(k0..0); //PHR = k0...0 align(alignment) //PC[alignment:0] = 0 if(!k); //Test Branch 2 } Microbenchmark pseudo-code for recovering which PC bits are used in the PHT look-up process.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 5 :</head><label>5</label><figDesc>Figure 5: Recovering PC bits used in PHT look-ups.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 6 :</head><label>6</label><figDesc>Figure 6: Associativity of the last PHT. The predictor is able to predict 4 unique PCs with PC[5]=0 and 4 unique PCs with PC[5]=1.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_6"><head>Listing 7 :</head><label>7</label><figDesc>for (i=0; i &lt; NUM_TRIES; i++){ k = rand(); SET_PHR(k0..0); //PHR = k0...0 SET_ADDRESS(1); //PC[11:0] = 0 if(k); //Test Branch 1 ... SET_PHR(k0..0); //PHR = k0...0 SET_ADDRESS(n); //PC[11:0] = n-1 if(k); //Test Branch n } Microbenchmark pseudo-code for recovering the associativity of the last PHT.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_8"><head>Figure 7 :</head><label>7</label><figDesc>Figure7: Associativity of all PHTs. We have an associativity of 4 when using history bits PHR[185:58], 8 when using PHR[57:22], and 12 when using PHR[21:0].</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_9"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: PHR bits that are folded into the index.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_10"><head></head><label></label><figDesc>Hint: PHR[16i+8,16i-6,2] means PHR[start:end:step]. ? PHT #3: Index[7:0] = PHR[16i+8,16i-6,2] ? PHR[16j+1,16j-13,2] : i ? [11,1] , j ? [11,0] ? PHT #2: Index[7:0] = PHR[16i+8,16i-6,2] ? PHR[16j+1,16j-13,2] : i ? [3,1] , j ? [3,0] ? PHT #1: Index[7:0] = PHR<ref type="bibr" target="#b19">[20,</ref><ref type="bibr" target="#b5">6,</ref><ref type="bibr" target="#b1">2]</ref> ? PHR<ref type="bibr" target="#b14">[15,</ref><ref type="bibr" target="#b0">1,</ref><ref type="bibr" target="#b1">2]</ref> </figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_11"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Translating regular code to an isolated partition of the CBP (domain A).</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_12"><head>Figure 10 :</head><label>10</label><figDesc>Figure 10: Misprediction rate of Function "A" (Y-axis), when Function "B" is run on either the same or a concurrent thread on a single CPU core. The Xaxis varies the number of branches (N) executed in Function B.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_13"><head>p e r l b e n c h b z i p 2 d s o p l e x p o v r a y l b m s p h i n x 3 GFigure 11 :</head><label>2311</label><figDesc>Figure 11: Performance overhead of Half&amp;Half (LLVM) on SPEC 2006 benchmarks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_14"><head>Figure 12 :</head><label>12</label><figDesc>Figure 12: Performance overhead of Half&amp;Half (Swivel) on SPEC 2006 benchmarks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_15"><head>d s o p l e x p o v r a y l b m s p h i n x 3 GFigure 13 :</head><label>313</label><figDesc>Figure 13: Performance overhead of Half&amp;Half (LLVM) on SPEC 2006 with SMT enabled.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_16"><head>Figure 14 :</head><label>14</label><figDesc>Figure 14: Footprint in Haswell and Ivy Bridge.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_17"><head>s t e d l o o p n e s t e d l o o p 2 n e s t e d l o o p 3 r a n d o m r a n d o m 2 r a t e l i m i t s i e v e s t r c a t s t r c a t 2 s t r c h r s t r l e n s t r t oFigure 15 :</head><label>215</label><figDesc>Figure 15: Performance overhead of Half&amp;Half (Swivel) on Sightglass benchmarks.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_18"><head>Figure 16 :</head><label>16</label><figDesc>Figure 16: Performance overhead of Half&amp;Half while isolating the LMbench from Kernel code.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head></head><label></label><figDesc>Table i+1 if the prediction from</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head></head><label></label><figDesc>Table i is incorrect.</figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table n ?</head><label>n</label><figDesc></figDesc><table /></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 2 PC</head><label>2</label><figDesc></figDesc><table><row><cell>PC</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell cols="2">GHR [0:L 2 ]</cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell>index</cell><cell>tag</cell><cell></cell><cell>index</cell><cell>tag</cell><cell></cell><cell>index</cell><cell>tag</cell></row><row><cell>ctr</cell><cell>ctr</cell><cell>tag</cell><cell>u</cell><cell>ctr</cell><cell>tag</cell><cell>u</cell><cell>ctr</cell><cell>tag</cell><cell>u</cell></row><row><cell></cell><cell></cell><cell>= ?</cell><cell></cell><cell></cell><cell>= ?</cell><cell></cell><cell></cell><cell>= ?</cell><cell></cell></row><row><cell></cell><cell>Mux</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell></cell><cell></cell><cell></cell><cell>Mux</cell><cell></cell><cell>Mux</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="10">Figure 1: Structure of the TAGE predictor. As proposed</cell></row><row><cell cols="10">in [80], a base predictor is backed with several</cell></row><row><cell cols="10">tagged predictor components (Table 1...n ) indexed by</cell></row><row><cell cols="10">the program counter (PC) and increasing geometric</cell></row><row><cell>history</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 1 :</head><label>1</label><figDesc>Specifications of the analyzed processors.</figDesc><table><row><cell>Machine</cell><cell>machine 1</cell><cell>machine 2</cell><cell>machine 3</cell><cell>machine 4</cell></row><row><cell cols="2">Model Name Core i9-12900K</cell><cell>Core i7-1165G7</cell><cell cols="2">Xeon Gold 6314U Xeon Gold 6230</cell></row><row><cell>?Arch.</cell><cell>Alder Lake</cell><cell>Tiger Lake</cell><cell>Ice Lake</cell><cell>Cascade Lake</cell></row><row><cell>Machine</cell><cell>machine 5</cell><cell>machine 6</cell><cell>machine 7</cell><cell></cell></row><row><cell cols="4">Model Name Core i7-6770HQ Xeon E5-1650 V3 Xeon E3-1230 V2</cell><cell></cell></row><row><cell>?Arch.</cell><cell>Skylake</cell><cell>Haswell</cell><cell>Ivy Bridge</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_6"><head></head><label></label><figDesc>Listing 2: Helper macro for creating dummy branches.</figDesc><table><row><cell></cell><cell>Number of Dummy Branches</cell></row><row><cell cols="2">align(i) jmp label_iter</cell></row><row><cell cols="2">align(j) label_iter:</cell></row><row><cell>endrep</cell><cell></cell></row><row><cell>endmacro</cell><cell></cell></row><row><cell cols="2">for (iter=0; iter &lt; NUM_TRIES; iter++){</cell></row><row><cell cols="2">k = rand();</cell></row><row><cell>if(k);</cell><cell>//Train Branch (Miss Rate = ~50%)</cell></row><row><cell cols="2">dummy_branches(n); //n = Number of Dummy Branches</cell></row><row><cell>if(k);</cell><cell>//Test Branch</cell></row><row><cell>}</cell><cell>//Miss Rate = ~0% if correlation captured</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_8"><head>Table 2 :</head><label>2</label><figDesc>Recovering positions of affected bits in PHR.</figDesc><table><row><cell cols="2">for (i=0; i &lt; NUM_TRIES; i++){</cell><cell></cell><cell></cell></row><row><cell cols="2">cmp rand(),0;</cell><cell></cell><cell></cell></row><row><cell cols="3">dummy_branches(93,19); //Clearing PHR</cell><cell></cell></row><row><cell cols="3">SET_ADDRESS(variable); //PC[18:0] = variable</cell><cell></cell></row><row><cell>je lbl_tr</cell><cell cols="3">//Train Branch, Miss Rate = ~50%</cell></row><row><cell cols="3">SET_ADDRESS(variable); //PC[5:0] = variable</cell><cell></cell></row><row><cell>lbl_ts:</cell><cell></cell><cell></cell><cell></cell></row><row><cell>je lbl_ts</cell><cell cols="2">//Test Branch</cell><cell></cell></row><row><cell>lbl_ts:</cell><cell cols="3">//Miss Rate = ~0% if correlation captured</cell></row><row><cell>}</cell><cell></cell><cell></cell><cell></cell></row><row><cell cols="4">Listing 5: Microbenchmark pseudo-code for recovering</cell></row><row><cell cols="3">the update function of the PHR.</cell><cell></cell></row><row><cell>Flipped bit</cell><cell cols="3">dummy branches Flipped bit dummy branches</cell></row><row><cell>T0, B3, T1, B4</cell><cell>92</cell><cell>B9, B10</cell><cell>88</cell></row><row><cell>T2, B7, T3, B7</cell><cell>91</cell><cell>B13, B14</cell><cell>87</cell></row><row><cell>T4, B11, T5, B12</cell><cell>90</cell><cell>B15, B16</cell><cell>86</cell></row><row><cell>B5, B6</cell><cell>89</cell><cell>B17, B18</cell><cell>85</cell></row><row><cell cols="4">Observation 2. In the Skylake microarchitecture, the</cell></row><row><cell cols="3">following bits are used to update the PHR:</cell><cell></cell></row><row><cell cols="3">? Branch Address [18:3] : 16 bits</cell><cell></cell></row><row><cell cols="3">? Branch Target Address [5:0] : 6 bits</cell><cell></cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_10"><head>Table 3 :</head><label>3</label><figDesc>PHR structure in Intel microarchitectures.</figDesc><table><row><cell>Microarchitecture</cell><cell cols="3">PHR Size Branch Addr. Target Addr.</cell><cell>Footprint</cell></row><row><cell>Alder Lake/Tiger Lake/Ice Lake</cell><cell>194 ? 2</cell><cell>B[15 : 0]</cell><cell>T [5 : 0]</cell><cell>Figure 4b</cell></row><row><cell>Cascade Lake/Skylake</cell><cell>93 ? 2</cell><cell>B[18 : 3]</cell><cell>T [5 : 0]</cell><cell>Figure 4a</cell></row><row><cell>Haswell/Ivy Bridge</cell><cell>93 ? 2</cell><cell>B[19 : 4]</cell><cell>T [5 : 0]</cell><cell>Figure 14</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_11"><head>Table 4 :</head><label>4</label><figDesc>PHTs in Intel microarchitectures.</figDesc><table><row><cell>Microarchitecture</cell><cell>Num. of PHTs</cell><cell>Index Length</cell><cell>Size of Each PHT</cell></row><row><cell>Alder Lake/Tiger Lake/Ice Lake</cell><cell>3</cell><cell>9 = 8 + PC[5]</cell><cell>2048 = 2 9 ? 4</cell></row><row><cell>Cascade Lake/ Skylake</cell><cell></cell><cell></cell><cell></cell></row><row><cell>Haswell/Ivy Bridge</cell><cell>3</cell><cell>9 = 8 + PC[4]</cell><cell>2048 = 2 9 ? 4</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_13"><head>Table 5 :</head><label>5</label><figDesc>Instructions influencing the CBP elements , je/jne, js/jns, jo/jno, jpe/jpo, jp/jnp, jb/jnb, jae/jnae, jc/jnc, jbe/jnbe ja/jna, jl/jnl, jge/jnge, jle/jnle, jg/jng, loop, loope/loopne, loopz/loopnz, jcxz/jecxz</figDesc><table><row><cell>Affected structure</cell><cell>Instructions</cell></row><row><cell>Both PHR and PHTs jz/jnzOnly PHR</cell><cell>jmp (relative/absolute/register/memory), call/ret</cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" xml:id="foot_0"><p>*   If they have the same lower bits, they would just alias and use the same entry.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>Acknowledgments</head><p>Thanks to <rs type="person">Craig Disselkoen</rs> and <rs type="person">Evan Johnson</rs> for their insightful discussions, and the anonymous reviewers for their helpful suggestions. This work was supported, in part, by <rs type="funder">NSF</rs>/<rs type="grantName">Intel Foundational Microarchitecture Research Grant</rs> <rs type="grantNumber">CCF-1823444</rs>, as well as gifts from <rs type="funder">Intel</rs>.</p></div>
+			</div>
+			<listOrg type="funding">
+				<org type="funding" xml:id="_xxBjRKe">
+					<idno type="grant-number">CCF-1823444</idno>
+					<orgName type="grant-name">Intel Foundational Microarchitecture Research Grant</orgName>
+				</org>
+			</listOrg>
+			<div type="annex">
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Appendix A. Additional Results, and Discussion</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>A.1. PHR Update Policy: Earlier Intel Processors</head><p>Figure <ref type="figure">14</ref> shows the PHR update policy for the Haswell and Ivy Bridge microarchitectures. Both microarchitectures have the same PHR update policy, and PC <ref type="bibr" target="#b3">[4]</ref> directly provides one bit of the index to PHTs; thus it partitions the tables.</p></div>			</div>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<monogr>
+		<title level="m" type="main">The 2nd jilp championship branch prediction competition (cbp-2)</title>
+		<ptr target="http://www.jilp.org/cbp" />
+		<imprint>
+			<date type="published" when="2006">2006. 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<monogr>
+		<title level="m" type="main">The 3rd jilp championship branch prediction competition</title>
+		<ptr target="http://www.jilp.org/cbp" />
+		<imprint>
+			<date type="published" when="2011">2011. 2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<monogr>
+		<ptr target="http://www.jilp.org/cbp" />
+		<title level="m">The 4th jilp championship branch prediction competition (cbp-4)</title>
+		<imprint>
+			<date type="published" when="2014">2014. 2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<monogr>
+		<ptr target="http://www.jilp.org/cbp" />
+		<title level="m">The 5th jilp championship branch prediction competition (cbp-5)</title>
+		<imprint>
+			<date type="published" when="2016">2016. 2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<monogr>
+		<title level="m" type="main">the microarchitecture of intel, amd and via cpus</title>
+		<author>
+			<persName><forename type="first">Agner</forename><surname>Fog</surname></persName>
+		</author>
+		<ptr target="http://www.agner.org/optimize/microarchitecture.pdf" />
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">sightglass: a benchmark suite and tool to compare different implementations of the same primitives</title>
+		<author>
+			<persName><forename type="first">Bytecode</forename><surname>Alliance</surname></persName>
+		</author>
+		<ptr target="https://github.com/bytecodealliance/sightglass" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<monogr>
+		<title level="m" type="main">WASI: The WebAssembly system interface</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Gohman</surname></persName>
+		</author>
+		<ptr target="https://wasi.dev/" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<monogr>
+		<title/>
+		<author>
+			<persName><surname>Google</surname></persName>
+		</author>
+		<ptr target="https://github.com/google/safeside" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<monogr>
+		<ptr target="https://grsecurity.net/amd_branch_mispredictor_just_set_it_and_forget_it" />
+		<title level="m">Open Source Security Inc. the amd branch (mis)predictor: Just set it and forget it</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">New branch prediction vulnerabilities in openssl and necessary software countermeasures</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Ac?i?mez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shay</forename><surname>Gueron</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jean-Pierre</forename><surname>Seifert</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Cryptography and Coding</title>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="185" to="203" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">On the power of simple branch prediction analysis</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Acii?mez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">?etin</forename><surname>Kaya Ko?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jean-Pierre</forename><surname>Seifert</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Computer and Communications Security (CCS)</title>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="312" to="320" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Predicting secret keys via branch prediction</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Ac?i?mez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">?etin</forename><surname>Kaya Ko?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jean-Pierre</forename><surname>Seifert</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">RSA Conference</title>
+		<imprint>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="225" to="242" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Muontrap: Preventing cross-domain spectre-like attacks by capturing speculative state</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="132" to="144" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Shielding speculative data from microarchitectural covert channels</title>
+		<author>
+			<persName><forename type="first">Kristin</forename><surname>Barber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anys</forename><surname>Bacha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Li</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yinqian</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Radu</forename><surname>Teodorescu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Specshield</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Parallel Architectures and Compilation Techniques (PACT)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="151" to="164" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">Preventing timing leaks through transactional branching instructions</title>
+		<author>
+			<persName><forename type="first">Gilles</forename><surname>Barthe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tamara</forename><surname>Rezk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martijn</forename><surname>Warnier</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="s">Electronic Notes in Theoretical Computer Science</title>
+		<imprint>
+			<biblScope unit="volume">153</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="33" to="55" />
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">Smotherspectre: exploiting speculative execution through port contention</title>
+		<author>
+			<persName><forename type="first">Atri</forename><surname>Bhattacharyya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandra</forename><surname>Sandulescu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthias</forename><surname>Neugschwandtner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alessandro</forename><surname>Sorniotti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mathias</forename><surname>Payer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anil</forename><surname>Kurmus</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Computer and Communications Security (CCS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="785" to="800" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">A systematic evaluation of transient execution attacks and defenses</title>
+		<author>
+			<persName><forename type="first">Claudio</forename><surname>Canella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jo</forename><surname>Van Bulck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moritz</forename><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Von</forename><surname>Benjamin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Philipp</forename><surname>Berg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Ortner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Piessens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Evtyushkin</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Gruss</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="249" to="266" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Fallout: Leaking data on meltdownresistant cpus</title>
+		<author>
+			<persName><forename type="first">Claudio</forename><surname>Canella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Genkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lukas</forename><surname>Giner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marina</forename><surname>Moritz And Minkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Moghimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Piessens</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Berk</forename><surname>Sunar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jo</forename><surname>Van Bulck</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Yarom</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Computer and Communications Security (CCS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<title level="m" type="main">RFC: Speculative load hardening (a Spectre variant #1 mitigation</title>
+		<author>
+			<persName><forename type="first">Chandler</forename><surname>Carruth</surname></persName>
+		</author>
+		<ptr target="https://lists.llvm.org/pipermail/llvm-dev/2018-March/122085.html" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Fact: A flexible, constant-time programming language</title>
+		<author>
+			<persName><forename type="first">Sunjay</forename><surname>Cauligi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gary</forename><surname>Soeller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fraser</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><surname>Johannesmeyer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yunlu</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ranjit</forename><surname>Jhala</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Deian</forename><surname>Stefan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Cybersecurity Development (SecDev)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="69" to="76" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Sgxpectre: Stealing intel secrets from sgx enclaves via speculative execution</title>
+		<author>
+			<persName><forename type="first">Guoxing</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sanchuan</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>Xiao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yinqian</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhiqiang</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ten H</forename><surname>Lai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Symposium on Security and Privacy (EuroS&amp;P)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="142" to="157" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Branchspec: Information leakage attacks exploiting speculative branch instruction executions</title>
+		<author>
+			<persName><forename type="first">Md</forename><surname>Hafizul</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Islam</forename><surname>Chowdhuryy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fan</forename><surname>Yao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Computer Design (ICCD)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="529" to="536" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Jonathan</forename><surname>Corbet</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stibp</forename><surname>Taming</surname></persName>
+		</author>
+		<ptr target="https://lwn.net/Articles/773118/" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<monogr>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>De</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mooij</forename></persName>
+		</author>
+		<ptr target="https://bugzilla.mozilla.org/show_bug.cgi?id=1435266" />
+		<title level="m">Enable index masking by default</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Covert channels through branch predictors: a feasibility study</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Evtyushkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Ponomarev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nael</forename><surname>Abu-Ghazaleh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Hardware and Architectural Support for Security and Privacy (HASP)</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1" to="8" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">Jump over aslr: Attacking branch predictors to bypass aslr</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Evtyushkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Ponomarev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nael</forename><surname>Abu-Ghazaleh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1" to="13" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Understanding and mitigating covert channels through branch predictors</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Evtyushkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Ponomarev</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nael</forename><surname>Abu-Ghazaleh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Architecture and Code Optimization (TACO)</title>
+		<imprint>
+			<biblScope unit="volume">13</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="1" to="23" />
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Branchscope: A new side-channel attack on directional branch predictor</title>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Evtyushkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ryan</forename><surname>Riley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cse</forename><surname>Nael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ece</forename><surname>Abu-Ghazaleh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Ponomarev</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Spectreguard: An efficient data-centric defense mechanism against spectre attacks</title>
+		<author>
+			<persName><forename type="first">Jacob</forename><surname>Fustos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Farzad</forename><surname>Farshchi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heechul</forename><surname>Yun</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Design Automation Conference (DAC)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1" to="6" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Flush+ flush: a fast and stealthy cache attack</title>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cl?mentine</forename><surname>Maurice</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Klaus</forename><surname>Wagner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stefan</forename><surname>Mangard</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Detection of Intrusions and Malware, and Vulnerability Assessment (DIMVA)</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="279" to="299" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Spectector: Principled detection of speculative information flows</title>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Guarnieri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>K?pf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Jos?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>Morales</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andr?s</forename><surname>Reineke</surname></persName>
+		</author>
+		<author>
+			<persName><surname>S?nchez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Symposium on Security and Privacy (SP)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="1" to="19" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Hardwaresoftware contracts for secure speculation</title>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Guarnieri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>K?pf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jan</forename><surname>Reineke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pepe</forename><surname>Vila</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Symposium on Security and Privacy (SP)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1868" to="1883" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Bringing the web up to speed with WebAssembly</title>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Haas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Rossberg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><forename type="middle">L</forename><surname>Schuff</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ben</forename><forename type="middle">L</forename><surname>Titzer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Holman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Gohman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Luke</forename><surname>Wagner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alon</forename><surname>Zakai</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Bastien</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Programming Language Design and Implementation (PLDI)</title>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Spec cpu2006 benchmark descriptions</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>John</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Henning</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGARCH Computer Architecture News</title>
+		<imprint>
+			<biblScope unit="volume">34</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="1" to="17" />
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Reading privileged memory with a side-channel</title>
+		<author>
+			<persName><forename type="first">Jann</forename><surname>Horn</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page">39</biblScope>
+		</imprint>
+	</monogr>
+	<note type="report_type">Project Zero</note>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Understanding contention-based channels and using them for defense</title>
+		<author>
+			<persName><forename type="first">Casen</forename><surname>Hunger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mikhail</forename><surname>Kazdagli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ankit</forename><surname>Rawat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Dimakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sriram</forename><surname>Vishwanath</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohit</forename><surname>Tiwari</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="639" to="650" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<monogr>
+		<title level="m" type="main">Power9 processor user&apos;s manual</title>
+		<author>
+			<persName><surname>Ibm</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+		<respStmt>
+			<orgName>IBM</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Intel analysis of speculative execution side channels</title>
+		<author>
+			<persName><surname>Intel</surname></persName>
+		</author>
+		<ptr target="https://newsroom.intel.com/wp-content/uploads/sites/11/2018/01/" />
+	</analytic>
+	<monogr>
+		<title level="m">Intel-Analysis-of-Speculative-Execution-Side-Channels.pdf</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<monogr>
+		<title level="m" type="main">Single thread indirect branch predictors</title>
+		<author>
+			<persName><surname>Intel</surname></persName>
+		</author>
+		<ptr target="https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/technical-documentation/single-thread-indirect-branch-predictors.html" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<monogr>
+		<title level="m" type="main">Intel? C++ Compiler 19.1 Developer Guide and Reference</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<monogr>
+		<title level="m" type="main">Intel 64 and IA-32 Architectures Software Developer&apos;s Manual</title>
+		<imprint>
+			<date type="published" when="2011-08">August 2011</date>
+		</imprint>
+		<respStmt>
+			<orgName>Intel Corporation</orgName>
+		</respStmt>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Fast path-based neural branch prediction</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Daniel</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Jim?nez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page" from="243" to="252" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Piecewise linear branch prediction</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Daniel</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Jim?nez</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="382" to="393" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Dynamic branch prediction with perceptrons</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Daniel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Calvin</forename><surname>Jim?nez</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Lin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<imprint>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="197" to="206" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">???????, ?? ????????: Sfi safety for native-compiled wasm</title>
+		<author>
+			<persName><forename type="first">Evan</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Thien</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yousef</forename><surname>Alhessi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shravan</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Fraser</forename><surname>Brown</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sorin</forename><surname>Lerner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tyler</forename><surname>Mcmullen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stefan</forename><surname>Savage</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Deian</forename><surname>Stefan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Network and Distributed Systems Security (NDSS) Symposium</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<monogr>
+		<author>
+			<persName><forename type="first">Vladimir</forename><surname>Kiriansky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Carl</forename><surname>Waldspurger</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1807.03757</idno>
+		<title level="m">Speculative buffer overflows: Attacks and defenses</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Spectre attacks: Exploiting speculative execution</title>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Kocher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jann</forename><surname>Horn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anders</forename><surname>Fogh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Genkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Werner</forename><surname>Haas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mike</forename><surname>Hamburg</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moritz</forename><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stefan</forename><surname>Mangard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Prescher</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Symposium on Security and Privacy (SP)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1" to="19" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Spectre returns! speculation attacks using the return stack buffer</title>
+		<author>
+			<persName><surname>Esmaeil Mohammadian Koruyeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Khaled</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chengyu</forename><surname>Khasawneh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nael</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Abu-Ghazaleh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Mitigating spectre attacks using cfi informed speculation</title>
+		<author>
+			<persName><forename type="first">Shirin</forename><surname>Esmaeil Mohammadian Koruyeh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Haji Amin</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Shirazi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Khaled</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chengyu</forename><surname>Khasawneh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Nael Abu-Ghazaleh</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Speccfi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Symposium on Security and Privacy (SP)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="39" to="53" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">Branch prediction strategies and branch target buffer design</title>
+		<author>
+			<persName><forename type="first">Smith</forename><surname>Lee</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Computer</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="6" to="22" />
+			<date type="published" when="1984">1984</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">Inferring fine-grained control flow inside {SGX} enclaves with branch shadowing</title>
+		<author>
+			<persName><forename type="first">Sangho</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ming-Wei</forename><surname>Shih</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Prasun</forename><surname>Gera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Taesoo</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marcus</forename><surname>Peinado</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="557" to="574" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Make page coloring more efficient on slice-based three-level cache</title>
+		<author>
+			<persName><forename type="first">Haifeng</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tianyue</forename><surname>Lu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuhang</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mingyu</forename><surname>Chen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2019 IEEE 25th International Conference on Parallel and Distributed Systems (ICPADS)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="310" to="317" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Conditional speculation: An effective approach to safeguard out-oforder execution against spectre attacks</title>
+		<author>
+			<persName><forename type="first">Peinan</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lutan</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rui</forename><surname>Hou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lixin</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Meng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="264" to="276" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<analytic>
+		<title level="a" type="main">Meltdown: Reading kernel memory from user space</title>
+		<author>
+			<persName><forename type="first">Moritz</forename><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><surname>Prescher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Werner</forename><surname>Haas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anders</forename><surname>Fogh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jann</forename><surname>Horn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stefan</forename><surname>Mangard</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Kocher</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Daniel Genkin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="973" to="990" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<monogr>
+		<title level="m" type="main">Combining branch predictors</title>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Mcfarling</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="1993">1993</date>
+			<publisher>Citeseer</publisher>
+		</imprint>
+	</monogr>
+	<note type="report_type">Technical report</note>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">lmbench: Portable tools for performance analysis</title>
+		<author>
+			<persName><forename type="first">Carl</forename><surname>Larry W Mcvoy</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Staelin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX annual technical conference</title>
+		<meeting><address><addrLine>San Diego, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1996">1996</date>
+			<biblScope unit="page" from="279" to="294" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">A ppm-like, tag-based branch predictor</title>
+		<author>
+			<persName><forename type="first">Pierre</forename><surname>Michaud</surname></persName>
+		</author>
+		<ptr target="https://devblogs.microsoft.com/cppblog/more-spectre-mitigations-in-msvc/" />
+	</analytic>
+	<monogr>
+		<title level="m">Microsoft. More Spectre mitigations in MSVC</title>
+		<imprint>
+			<date type="published" when="2005">2005. 2020</date>
+			<biblScope unit="volume">7</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">Demystifying intel branch predictors</title>
+		<author>
+			<persName><forename type="first">Milena</forename><surname>Milenkovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aleksandar</forename><surname>Milenkovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jeffrey</forename><surname>Kulick</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Workshop on Duplicating, Deconstructing and Debunking</title>
+		<imprint>
+			<date type="published" when="2002">2002</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<analytic>
+		<title level="a" type="main">Rocksalt: better, faster, stronger sfi for the x86</title>
+		<author>
+			<persName><forename type="first">Greg</forename><surname>Morrisett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gang</forename><surname>Tan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Tassarotti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jean-Baptiste</forename><surname>Tristan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edward</forename><surname>Gan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 33rd ACM SIGPLAN conference on Programming Language Design and Implementation</title>
+		<meeting>the 33rd ACM SIGPLAN conference on Programming Language Design and Implementation</meeting>
+		<imprint>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="395" to="404" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">Dynamic path-based branch correlation</title>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Nair</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="page" from="15" to="23" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Swivel: Hardening {WebAssembly} against spectre</title>
+		<author>
+			<persName><forename type="first">Shravan</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Craig</forename><surname>Disselkoen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Moghimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sunjay</forename><surname>Cauligi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Evan</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhao</forename><surname>Gang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anjo</forename><surname>Vahldiek-Oberwagner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Sahita</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hovav</forename><surname>Shacham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1433" to="1450" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<analytic>
+		<title level="a" type="main">Going beyond the limits of sfi: Flexible and secure hardwareassisted in-process isolation with hfi</title>
+		<author>
+			<persName><forename type="first">Shravan</forename><surname>Narayan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tal</forename><surname>Garfinkel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammadkazem</forename><surname>Taram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joey</forename><surname>Rudek</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Moghimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Evan</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Fallin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anjo</forename><surname>Vahldiek-Oberwagner</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Lemay</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ravi</forename><surname>Sahita</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Deian</forename><surname>Stefan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<biblScope unit="page">2023</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Khang</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Nguyen</surname></persName>
+		</author>
+		<ptr target="https://www.intel.com/content/www/us/en/developer/articles/technical/introduction-to-cache-allocation-technology.html" />
+		<title level="m">Introduction to cache allocation technology in the intel? xeon? processor e5 v4 family</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<monogr>
+		<title level="m" type="main">You shall not bypass: Employing data dependencies to prevent bounds check bypass</title>
+		<author>
+			<persName><forename type="first">Oleksii</forename><surname>Oleksenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bohdan</forename><surname>Trach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tobias</forename><surname>Reiher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Silberstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christof</forename><surname>Fetzer</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1805.08506</idno>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<analytic>
+		<title level="a" type="main">{SpecFuzz}: Bringing spectre-type vulnerabilities to the surface</title>
+		<author>
+			<persName><forename type="first">Oleksii</forename><surname>Oleksenko</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bohdan</forename><surname>Trach</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mark</forename><surname>Silberstein</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christof</forename><surname>Fetzer</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="1481" to="1498" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">Improving the accuracy of dynamic branch prediction using branch correlation</title>
+		<author>
+			<persName><forename type="first">Shien-Tai</forename><surname>Pan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kimming</forename><surname>So</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><forename type="middle">T</forename><surname>Rahmeh</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="page" from="76" to="84" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<monogr>
+		<author>
+			<persName><surname>Passmark</surname></persName>
+		</author>
+		<ptr target="https://www.cpubenchmark.net/market_share.html" />
+		<title level="m">Amd vs intel market share</title>
+		<imprint>
+			<date type="published" when="2022">2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<analytic>
+		<title level="a" type="main">I see dead ?ops: Leaking secrets via intel/amd micro-op caches</title>
+		<author>
+			<persName><forename type="first">Xida</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Logan</forename><surname>Moody</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammadkazem</forename><surname>Taram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><surname>Jordan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Venkat</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2021-06">June 2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b68">
+	<analytic>
+		<title level="a" type="main">Cleanupspec: An&quot; undo&quot; approach to safe speculation</title>
+		<author>
+			<persName><forename type="first">Gururaj</forename><surname>Saileshwar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moinuddin K</forename><surname>Qureshi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="73" to="86" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b69">
+	<monogr>
+		<title level="m" type="main">Context: Leakage-free transient execution</title>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Schilling</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Florian</forename><surname>Kargl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moritz</forename><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Claudio</forename><surname>Canella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1905.09100</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b70">
+	<analytic>
+		<title level="a" type="main">Netspectre: Read arbitrary memory over network</title>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Schwarzl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moritz</forename><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jon</forename><surname>Masters</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">European Symposium on Research in Computer Security</title>
+		<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="279" to="299" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b71">
+	<monogr>
+		<title level="m" type="main">The o-gehl branch predictor. JILP-Championship Branch Prediction</title>
+		<author>
+			<persName><forename type="first">Andre</forename><surname>Seznec</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2004">2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b72">
+	<analytic>
+		<title level="a" type="main">Analysis of the o-geometric history length branch predictor</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="394" to="405" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b73">
+	<analytic>
+		<title level="a" type="main">A 256 kbits l-tage branch predictor</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">JILP-Championship Branch Prediction</title>
+		<imprint>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="1" to="6" />
+			<date type="published" when="2007">2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b74">
+	<analytic>
+		<title level="a" type="main">A new case for the tage branch predictor</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="117" to="127" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b75">
+	<analytic>
+		<title level="a" type="main">Tage-sc-l branch predictors</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">JILP-Championship Branch Prediction</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b76">
+	<analytic>
+		<title level="a" type="main">Tage-sc-l branch predictors again</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">JILP-Championship Branch Prediction</title>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b77">
+	<analytic>
+		<title level="a" type="main">Design tradeoffs for the alpha ev8 conditional branch predictor</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Felix</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Venkata</forename><surname>Krishnan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yiannakis</forename><surname>Sazeides</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2002">2002</date>
+			<biblScope unit="page" from="295" to="306" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b78">
+	<analytic>
+		<title level="a" type="main">A case for (partially) tagged geometric history length branch prediction</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pierre</forename><surname>Michaud</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">JILP-Championship Branch Prediction</title>
+		<imprint>
+			<biblScope unit="volume">8</biblScope>
+			<biblScope unit="issue">23</biblScope>
+			<date type="published" when="2006">2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b79">
+	<monogr>
+		<title level="m" type="main">Restricting control flow during speculative execution with venkman</title>
+		<author>
+			<persName><forename type="first">Zhuojia</forename><surname>Shen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jie</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Divya</forename><surname>Ojha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Criswell</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1903.10651</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b80">
+	<monogr>
+		<title level="m" type="main">Latest intel security news: Updated firmware available for 6th, 7th and 8th generation intel core processors, intel xeon scalable processors and more</title>
+		<author>
+			<persName><forename type="first">Navin</forename><surname>Shenoy</surname></persName>
+		</author>
+		<ptr target="https://newsroom.intel.com/news/latest-intel-security-news-updated-firmware-available/" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b81">
+	<analytic>
+		<title level="a" type="main">A study of branch prediction strategies</title>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">E</forename><surname>Smith</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="1981">1981</date>
+			<biblScope unit="page" from="135" to="148" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b82">
+	<monogr>
+		<ptr target="https://www.kernel.org/doc/html/latest/admin-guide/hw-vuln/spectre.html" />
+		<title level="m">Spectre side channels</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b83">
+	<analytic>
+		<title level="a" type="main">Secsmt: Securing SMT processors against contention-based covert channels</title>
+		<author>
+			<persName><forename type="first">Mohammadkazem</forename><surname>Taram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xida</forename><surname>Ren</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Venkat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium</title>
+		<imprint>
+			<publisher>USENIX Security</publisher>
+			<biblScope unit="page">2022</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b84">
+	<analytic>
+		<title level="a" type="main">Contextsensitive fencing: Securing speculative execution via microcode customization</title>
+		<author>
+			<persName><forename type="first">Mohammadkazem</forename><surname>Taram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ashish</forename><surname>Venkat</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><surname>Tullsen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="395" to="410" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b85">
+	<analytic>
+		<title level="a" type="main">Efficient cache attacks on AES, and countermeasures</title>
+		<author>
+			<persName><forename type="first">Eran</forename><surname>Tromer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arne</forename><surname>Dag</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adi</forename><surname>Osvik</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Shamir</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Cryptology</title>
+		<imprint>
+			<biblScope unit="volume">23</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="37" to="71" />
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b86">
+	<analytic>
+		<title level="a" type="main">Simultaneous multithreading: Maximizing on-chip parallelism</title>
+		<author>
+			<persName><forename type="first">Susan</forename><forename type="middle">J</forename><surname>Dean M Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Henry</forename><forename type="middle">M</forename><surname>Eggers</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Levy</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="page" from="392" to="403" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b87">
+	<monogr>
+		<title level="m" type="main">Retpoline: a software construct for preventing branchtarget-injection</title>
+		<author>
+			<persName><forename type="first">Paul</forename><surname>Turner</surname></persName>
+		</author>
+		<ptr target="https://support.google.com/faqs/answer/7625886" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note>Online</note>
+</biblStruct>
+
+<biblStruct xml:id="b88">
+	<monogr>
+		<title level="m" type="main">Microbenchmarks and mechanisms for reverse engineering of modern branch predictor units</title>
+		<author>
+			<persName><forename type="first">Vladimir</forename><surname>Uzelac</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2008">2008</date>
+		</imprint>
+		<respStmt>
+			<orgName>University of Alabama</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">A Masters Thesis</note>
+</biblStruct>
+
+<biblStruct xml:id="b89">
+	<analytic>
+		<title level="a" type="main">Experiment flows and microbenchmarks for reverse engineering of branch predictor structures</title>
+		<author>
+			<persName><forename type="first">Vladimir</forename><surname>Uzelac</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aleksandar</forename><surname>Milenkovic</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Performance Analysis of Systems and Software (ISPASS)</title>
+		<imprint>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="page" from="207" to="217" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b90">
+	<analytic>
+		<title level="a" type="main">LVI: Hijacking Transient Execution through Microarchitectural Load Value Injection</title>
+		<author>
+			<persName><forename type="first">Jo</forename><surname>Van Bulck</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Moghimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Schwarz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Moritz</forename><surname>Lipp</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Marina</forename><surname>Minkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Genkin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yarom</forename><surname>Yuval</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Berk</forename><surname>Sunar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Gruss</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Frank</forename><surname>Piessens</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Symposium on Security and Privacy (SP)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b91">
+	<analytic>
+		<title level="a" type="main">RIDL: Rogue in-flight data load</title>
+		<author>
+			<persName><forename type="first">Stephan</forename><surname>Van Schaik</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alyssa</forename><surname>Milburn</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sebastian</forename><surname>?sterlund</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pietro</forename><surname>Frigo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Giorgi</forename><surname>Maisuradze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kaveh</forename><surname>Razavi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Herbert</forename><surname>Bos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Cristiano</forename><surname>Giuffrida</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE Symposium on Security and Privacy (SP)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b92">
+	<analytic>
+		<title level="a" type="main">Automatically eliminating speculative leaks from cryptographic code with Blade</title>
+		<author>
+			<persName><forename type="first">Marco</forename><surname>Vassena</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Craig</forename><surname>Disselkoen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Klaus</forename><forename type="middle">V</forename><surname>Gleissenthall</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sunjay</forename><surname>Cauilgi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G?khan</forename><surname>Rami</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ranjit</forename><surname>Kici</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><surname>Jhala</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Deian</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Stefan</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Principles of Programming Languages (POPL)</title>
+		<imprint>
+			<biblScope unit="page">2021</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b93">
+	<analytic>
+		<title level="a" type="main">Nda: Preventing speculative execution attacks at their source</title>
+		<author>
+			<persName><forename type="first">Ofir</forename><surname>Weisse</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ian</forename><surname>Neal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Loughlin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Baris</forename><surname>Kasikci</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="572" to="586" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b94">
+	<monogr>
+		<author>
+			<persName><forename type="first">You</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuehai</forename><surname>Qian</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:2006.16535</idno>
+		<title level="m">A case for reversible coherence protocol</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b95">
+	<analytic>
+		<title level="a" type="main">Invisispec: Making speculative execution invisible in the cache hierarchy</title>
+		<author>
+			<persName><forename type="first">Mengjia</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiho</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dimitrios</forename><surname>Skarlatos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Morrison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Fletcher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josep</forename><surname>Torrellas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="428" to="441" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b96">
+	<analytic>
+		<title level="a" type="main">{FLUSH+ RELOAD}: A high resolution, low noise, l3 cache {Side-Channel} attack</title>
+		<author>
+			<persName><forename type="first">Yuval</forename><surname>Yarom</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Katrina</forename><surname>Falkner</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">USENIX Security Symposium (USENIX Security)</title>
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="719" to="732" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b97">
+	<analytic>
+		<title level="a" type="main">Coloris: a dynamic cache partitioning system using page coloring</title>
+		<author>
+			<persName><forename type="first">Ying</forename><surname>Ye</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><surname>West</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zhuoqun</forename><surname>Cheng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ye</forename><surname>Li</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2014 23rd International Conference on Parallel Architecture and Compilation Techniques (PACT)</title>
+		<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="381" to="392" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b98">
+	<analytic>
+		<title level="a" type="main">Native client: A sandbox for portable, untrusted x86 native code</title>
+		<author>
+			<persName><forename type="first">Bennet</forename><surname>Yee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Sehr</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gregory</forename><surname>Dardyk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bradley Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Muth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tavis</forename><surname>Ormandy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shiki</forename><surname>Okasaka</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Neha</forename><surname>Narula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nicholas</forename><surname>Fullagar</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">Communications of the ACM</title>
+		<imprint>
+			<biblScope unit="volume">53</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="91" to="99" />
+			<date type="published" when="2010">2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b99">
+	<analytic>
+		<title level="a" type="main">Two-level adaptive training branch prediction</title>
+		<author>
+			<persName><forename type="first">Tse-Yu</forename><surname>Yeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="1991">1991</date>
+			<biblScope unit="page" from="51" to="61" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b100">
+	<analytic>
+		<title level="a" type="main">Alternative implementations of two-level adaptive branch prediction</title>
+		<author>
+			<persName><forename type="first">Tse-Yu</forename><surname>Yeh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">ACM SIGARCH Computer Architecture News</title>
+		<imprint>
+			<biblScope unit="volume">20</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="124" to="134" />
+			<date type="published" when="1992">1992</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b101">
+	<analytic>
+		<title level="a" type="main">Speculative data-oblivious execution: Mobilizing safe prediction for safe and efficient speculative execution</title>
+		<author>
+			<persName><forename type="first">Jiyong</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Namrata</forename><surname>Mantri</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josep</forename><surname>Torrellas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Morrison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">W</forename><surname>Fletcher</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Symposium on Computer Architecture (ISCA)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="707" to="720" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b102">
+	<analytic>
+		<title level="a" type="main">Speculative taint tracking (stt) a comprehensive protection for speculatively accessed data</title>
+		<author>
+			<persName><forename type="first">Jiyong</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mengjia</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Artem</forename><surname>Khyzha</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Morrison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josep</forename><surname>Torrellas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">W</forename><surname>Fletcher</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="954" to="968" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b103">
+	<analytic>
+		<title level="a" type="main">Mars: A 64-core armv8 processor</title>
+		<author>
+			<persName><forename type="first">Charles</forename><surname>Zhang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Hot Chips</title>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="1" to="23" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b104">
+	<analytic>
+		<title level="a" type="main">Exploring branch predictors for constructing transient execution trojans</title>
+		<author>
+			<persName><forename type="first">Tao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kenneth</forename><surname>Koltermann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dmitry</forename><surname>Evtyushkin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="667" to="682" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b105">
+	<analytic>
+		<title level="a" type="main">A lightweight isolation mechanism for secure branch predictors</title>
+		<author>
+			<persName><forename type="first">Lutan</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Peinan</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rui</forename><surname>Hou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiazhen</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lixin</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xuehai</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Meng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Design Automation Conference (DAC)</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1267" to="1272" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b106">
+	<analytic>
+		<title level="a" type="main">Speculation invariance (invarspec): Faster safe execution through program analysis</title>
+		<author>
+			<persName><forename type="first">Neil</forename><surname>Zirui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Houxiang</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mengjia</forename><surname>Ji</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiyong</forename><surname>Yan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">W</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Adam</forename><surname>Fletcher</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Darko</forename><surname>Morrison</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josep</forename><surname>Marinov</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Torrellas</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="1138" to="1152" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

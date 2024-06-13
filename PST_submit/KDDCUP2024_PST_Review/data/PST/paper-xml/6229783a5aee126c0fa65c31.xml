@@ -1,0 +1,2993 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Decoupled Vector Runahead</title>
+				<funder ref="#_4Pd4kaj">
+					<orgName type="full">Research Foundation Flanders (FWO)</orgName>
+				</funder>
+				<funder ref="#_jQ6S3G8">
+					<orgName type="full">Engineering and Physical Sciences Research Council</orgName>
+					<orgName type="abbreviated">EPSRC</orgName>
+				</funder>
+				<funder ref="#_Ae82Xhx">
+					<orgName type="full">UGent-BOF-GOA</orgName>
+				</funder>
+				<funder ref="#_qec2k5G">
+					<orgName type="full">European Research Council</orgName>
+					<orgName type="abbreviated">ERC</orgName>
+				</funder>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Ajeya</forename><surname>Naithani</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="institution">Ghent University</orgName>
+								<address>
+									<country key="BE">Belgium</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jaime</forename><surname>Roelandts</surname></persName>
+							<affiliation key="aff1">
+								<orgName type="institution">Ghent University</orgName>
+								<address>
+									<country key="BE">Belgium</country>
+								</address>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+							<affiliation key="aff3">
+								<orgName type="department">of Lieven Eeckhout</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Decoupled Vector Runahead</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date/>
+						</imprint>
+					</monogr>
+					<idno type="DOI">10.1145/3613424.3614255</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.8.0" ident="GROBID" when="2024-01-03T08:42+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<textClass>
+				<keywords>
+					<term>CPU microarchitecture</term>
+					<term>prefetching</term>
+					<term>runahead</term>
+					<term>speculative vectorization</term>
+					<term>graph processing</term>
+				</keywords>
+			</textClass>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>We present Decoupled Vector Runahead (DVR), an in-core prefetching technique, executing separately to the main application thread, that exploits massive amounts of memory-level parallelism to improve the performance of applications featuring indirect memory accesses. DVR dynamically infers loop bounds at run-time, recognizing striding loads, and vectorizing subsequent instructions that are part of an indirect chain. It proactively issues memory accesses for the resulting loads far into the future, even when the out-oforder core has not yet stalled, bringing their data into the L1 cache, and thus providing timely prefetches for the main thread. DVR can adjust the degree of vectorization at run-time, vectorize the same chain of indirect memory accesses across multiple invocations of an inner loop, and efficiently handle branch divergence along the vectorized chain. DVR runs as an on-demand, speculative, in-order, lightweight hardware subthread alongside the main thread within the core and incurs a minimal hardware overhead of only 1139 bytes. Relative to a large superscalar 5-wide out-of-order baseline and Vector Runahead -a recent microarchitectural technique to accelerate indirect memory accesses on out-of-order processors -DVR delivers 2.4? and 2? higher performance, respectively, for a set of graph analytics, database, and HPC workloads.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>CCS CONCEPTS</head><p>? Computer systems organization ? Superscalar architectures; Single instruction, multiple data.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">INTRODUCTION</head><p>Out-of-order cores are bigger than ever, with the latest processors featuring reorder buffers of many hundreds of entries <ref type="bibr" target="#b32">[33]</ref>. And yet, although modern-day out-of-order (OoO) processors are given more than ample resources, and thus their out-of-order queueing resources are rarely filled to capacity, they are still memory-bound especially for workloads that feature chains of dependent memory accesses, or indirect memory accesses. One recent proposal, Vector Runahead <ref type="bibr" target="#b67">[67,</ref><ref type="bibr" target="#b68">68]</ref>, presents a potential method for doing better. Rather than work-skipping as earlier runahead proposals do <ref type="bibr" target="#b28">[29,</ref><ref type="bibr" target="#b39">40,</ref><ref type="bibr" target="#b62">62,</ref><ref type="bibr" target="#b66">66]</ref> to keep uncovering memory-level parallelism, Vector Runahead reformulates the transient execution performed within runahead mode to be primarily based on loop-level parallelism, following independent groups of many different dependent chains of memory accesses from future loop iterations in the program, and running them in a vectorized manner to reduce front-end and back-end pipeline resource requirements.</p><p>Vector Runahead (VR) can successfully follow and prefetch the complex memory-access patterns in modern graph analytics, database and high-performance computing (HPC) workloads. However, like the underlying out-of-order core, even with a large reorder buffer (ROB), Vector Runahead is still memory-bound. Because the large reorder buffer rarely fills up, the resource starvation that triggers Vector Runahead rarely occurs, and so its benefits over even resource-bountiful out-of-order execution are not allowed to shine.</p><p>We propose Decoupled Vector Runahead (DVR), which innovates over prior runahead proposals in several key ways. First, it completely decouples the runahead process from the main computation thread, by running it within a lightweight, in-order subthread context of its own, allowing initiation even when the core is not stalled on a full ROB, and allowing the main thread to continue to make progress on its intended computation. Second, building on VR, it implements GPU-style divergence and reconvergence on the many dynamically generated 'lanes' produced from the many future loop iterations within the speculative runahead context. Third, it performs a discovery mode within the main computation's thread to precisely predict how many loops into the future will be accessed, to limit inaccurate prefetches. When it has too few locations to prefetch from discovery mode alone, it performs nested vector runahead to generate inputs for many inner loop invocations from many different outer loop iterations simultaneously, which can then all be efficiently vectorized together to achieve extreme memory-level parallelism, even for workloads with complex data-and controlflow dependencies.</p><p>Decoupled Vector Runahead proactively prefetches cache-missing loads far in advance, meaning such loads do not sit in the reorder for ( i =0; i &lt; NUM_KEYS ; i ++) { C [ hash ( B [ hash ( A [ i ])])]++; } Figure 1: Example indirect memory access pattern <ref type="bibr" target="#b67">[67]</ref>.</p><p>buffer stalling commit or preventing branches from being resolved, let alone stall the reorder buffer entirely. Performance improves substantially as a result of its accurate, timely prefetches. DVR means runahead is no longer an alternative to very large instruction windows for out-of-order processors <ref type="bibr" target="#b66">[66]</ref>. In fact, it is much better by offering huge performance benefits even in addition to such a large instruction window. Our simulation results using a broad set of graph analytics, database, and HPC workloads report that DVR yields 2.4? and 2? higher performance on average (and up to 6.4? and 5.2?) compared to a baseline OoO core (with a 350-entry ROB) and Vector Runahead, respectively. We further demonstrate that the performance boost DVR offers is maintained when increasing ROB sizes, in contrast to Vector Runahead, thanks to its high accuracy, high coverage and timeliness, when prefetching many future dependent load chains in parallel and decoupled from the main thread.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">BACKGROUND 2.1 Runahead Execution</head><p>Runahead execution <ref type="bibr" target="#b28">[29,</ref><ref type="bibr" target="#b39">40,</ref><ref type="bibr" target="#b62">62,</ref><ref type="bibr" target="#b66">66]</ref> prefetches future memory accesses into on-chip caches after the instruction window or reorder buffer of an out-of-order core fills up and stalls with a memory access at the head of the buffer. To avoid a long-latency memory access from stalling the core, it will evict the instruction from its reorder buffer, but continue with instructions after it. While these instructions will no longer be strictly correct, and will be rolled back later, the prefetches generated as a result are accurate, as it speculatively pre-executes the application's own future instruction stream. The processor stays in runahead mode for its runahead interval: the number of cycles from the full-ROB stall to the return of the long-latency memory access. Following this, it returns to normal (correct) execution mode.</p><p>Precise Runahead Execution (PRE) <ref type="bibr" target="#b69">[69,</ref><ref type="bibr" target="#b70">70]</ref> improves the performance of prior runahead techniques in three ways: (1) in runahead mode, it improves prefetch coverage by only executing chains of instructions that lead to full-ROB stalls, (2) it does not flush the reorder buffer when exiting runahead mode, therefore saving the penalty for flushing and refilling the pipeline, and (3) it can prefetch future memory accesses even for short runahead intervals. One key characteristic of all runahead techniques, including precise runahead, is that they depend on the processor front-end for delivering future instructions for the duration of a runahead interval. Consequently, the number of instructions executed in the runahead mode depends on the front-end width and runahead interval.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Indirect Memory Accesses</head><p>Many modern applications feature dependent memory accesses with complex address-calculation patterns and multiple levels of indirection. A simple example of such patterns is shown in Figure <ref type="figure">1</ref>.</p><p>Here, array A is accessed sequentially. However, the index to access array B is calculated by hashing the value at a particular index of A, and the index to array C is calculated by hashing the access to B. That is, accesses to C depend on accesses to B, which in turn depend on accesses to A. Accesses to B and C are termed the first and second levels of indirect memory accesses, respectively, and the chain of instructions between the access of array A and the access to array C is termed the indirect chain.</p><p>For workloads with indirect memory accesses, traditional runahead techniques fail to prefetch the majority of future memory accesses for two main reasons. First, even in the presence of a stride prefetcher, PRE cannot prefetch memory accesses beyond the first level of indirection <ref type="bibr" target="#b67">[67]</ref>. For the example in Figure <ref type="figure">1</ref>, depending on the work-skipping technique, the inputs to array C will either be invalidated <ref type="bibr" target="#b28">[29]</ref>, or fail to return before runahead terminates <ref type="bibr" target="#b69">[69,</ref><ref type="bibr" target="#b70">70]</ref>. Second, even for the first level of indirect memory accesses, the number of instructions (or the number of iterations of the loop) covered in runahead mode is limited by the width of the processor front-end and the runahead interval.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Vector Runahead</head><p>Vector Runahead (VR) <ref type="bibr" target="#b67">[67]</ref> reinvents runahead execution -and alleviates the previously mentioned shortcomings -in three ways. First, it automatically generates instructions at different indices of an indirect chain, therefore eliminating the dependence of prior runahead techniques on the processor front-end for instruction supply in runahead mode. It then reorders those instructions such that many of them at a particular offset can be executed in parallel. This leads to all the load instructions at a particular offset being issued to the memory system simultaneously. Consequently, instead of waiting for one memory access to return -as typical runahead techniques like PRE do -the core waits for many memory accesses at the same time. Second, it groups a large number of reordered scalar instructions into vectors; this reduces the pressure on backend resources, like the issue queue and execution units, to process instructions. Third, VR performs delayed termination, which only leaves runahead once memory accesses for an entire indirect chain have been generated, because it is faster at generating memory-level parallelism (MLP) than normal-mode execution.</p><p>In VR, the core enters runahead mode after a full-ROB stall. The process of reinterpreting scalars as vectors, or speculative vectorization, begins when the core encounters a striding load marking the beginning of an indirect chain. The processor vectorizes the stride load and its dependents to generate prefetches.</p><p>For the example in Figure <ref type="figure">1</ref>, VR simultaneously generates accesses for multiple iterations of A (for example, from </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">MOTIVATION</head><p>While Vector Runahead <ref type="bibr" target="#b67">[67]</ref> is the first runahead technique to target indirect memory accesses and deliver substantially higher performance than prior runahead techniques, it is limited by the following factors:</p><p>(1) Performance Boost Diminishes with Bigger ROBs. Like all prior runahead techniques, VR waits for the reorder buffer to fill up. However, the size of the reorder buffer has consistently increased over recent years, and it therefore takes more cycles to fill up. As a result, the opportunity to enter runahead mode decreases with increasing ROB size, as reported in Figure <ref type="figure" target="#fig_0">2</ref>. Indeed, processor stall time due to a full ROB reduces from 51% to 5% for an ROB size of 128 to 512 entries, respectively. Reduced opportunity to enter runahead mode leads to a commensurate reduction in the performance boost VR offers. Figure <ref type="figure" target="#fig_0">2</ref> also reports performance for an OoO core and VR as a function of ROB size from 128 to 512 entries, normalized to our 350-entry ROB baseline OoO core (see Section 5 for the full experimental setup). While VR improves performance for all ROB sizes, and is faster than any out-of-order baseline no matter how small the ROB is, the performance benefit offered by VR diminishes with increasing ROB size. For some benchmarks this is so dramatic that absolute performance actually decreases with increasing ROB size. This is particularly the case for sssp, as well as bc, bfs and cc to a lesser extent. A smaller ROB triggers VR more often, which is faster than OoO execution and thus enables prefetching further down the future instruction stream. Decoupling from a full-ROB stall has the opportunity to trigger vector-runahead execution more frequently and hence deliver higher performance. Key Insight #1: To maximize prefetching opportunity, VR must not wait for a full-ROB stall.</p><p>(2) Delayed Termination Stalls Commit. VR terminates runahead mode only after vectorizing the last load instruction in the indirect chain and generating prefetches for it. Meanwhile, it is likely that the load instruction that originally blocked the head of the ROB, and caused the ROB to fill up, has returned from memory.</p><p>Although the OoO core can now commit instructions from the ROB, the processor does not return to normal mode, so as to allow the vectorized chain to complete first. This delayed termination stalls the commit stage on average 7.1% (and up to 11.8%) of the total execution time in VR across our set of benchmarks. This is a missed opportunity for the main pipeline to progress. Key Insight #2: The process of vectorization and generating prefetches in runahead mode under VR must be decoupled from the main pipeline, so that the main core can also make forward progress while prefetching along the speculatively vectorized indirect chain.</p><p>(3) Cannot Adapt to Run-time Characteristics. Vector Runahead attempts to generate as many gathers for each scalar load as possible. The goal is to achieve high memory-level parallelism by keeping all the miss status holding registers (MSHR) occupied by the outstanding memory accesses. However, this assumes that the workload's induction-variable access, from which we spawn future dependent chains, continues to steadily increase far into the future. When we look at more complicated workloads, this assumption begins to falter, and yet they still exhibit memory-level parallelism.</p><p>Algorithm 1: Breadth-first search. There are two strides (at lines 4 and 8) from which we can start Vector Runahead, resulting in a chain length of 4 or 2 respectively, and a highly data-dependent branch at line 9. Breadth-first search is a widely used graph-traversal algorithm that is used both in its own right and also as a kernel for finding connected components, maximum flows by the Edmonds-Karp algorithm <ref type="bibr" target="#b30">[31]</ref>, betweenness centrality <ref type="bibr" target="#b15">[16]</ref>, and many more. Algorithm 1 shows pseudocode matching the behavior of both the top-down step of GAP <ref type="bibr" target="#b11">[12]</ref> and Graph500 <ref type="bibr" target="#b5">[6]</ref>. In this workload, there are two possible points from which we can start Vector Runahead (two striding loads) at lines 4 and 8. Typically we will wish to vectorize from the latter, as it is an inner loop and so the accesses will be more timely. However, the length of this inner loop will be extremely data-dependent: not just on the size of the graph, but also its structure. Often, the loop will be far shorter than the amount we wish to vectorize by, and so Vector Runahead will fetch a significant amount of data the true execution will never access, polluting the cache and wasting DRAM bandwidth. Key Insight #3: VR needs to (i) learn the data-dependent, dynamic number of iterations of each loop it runs, to avoid fetching useless data, and (ii) update this each time it runs to respond to the latest run-time values.</p><p>(4) Inability to Vectorize Multiple Invocations of the Same Loop. If one iteration of a loop does not have enough loads to prefetch, the MLP exposed by VR is limited. It can begin the speculative vectorization of multiple invocations as they pass the main core but each time it only generates a small number of memory accesses, which are often generated by the core in the very near future anyway. To be able to fetch ahead far enough, VR must increase the degree of vectorization by discovering the correct values for multiple future versions of the same inner loop. In the breadthfirst search example, this means we must be able to generate many stride accesses from line 4, and follow their dependencies through to line 8, in order to run not just many loads from within the loop, but many different versions of the inner loop from different outer loops simultaneously. Key Insight #4: VR needs to look ahead to many future iterations of the same loop, if a single loop is dynamically determined to be too small to saturate the memory system, by skipping ahead to discover inputs to the same code from different outer loop iterations that will execute in the near future.</p><p>(5) Inability to Handle Control-Flow Divergence. Vector Runahead follows the control flow of the first scalar-equivalent instruction in the set of vectorized lanes, invalidating lanes with controlflow divergence. In the breadth-first search example, this is fine provided that the first edge in the sequence does not end in a previously visited vertex. Otherwise, we fail to execute prefetches for the operations inside the if-statement within the loop. In other workloads, such as betweenness centrality, there may be much broader divergence, with completely different memory accesses down each path.</p><p>Ideally, we should follow the true control flow of every single vector lane -and yet we still want to execute instructions as vectors whenever possible, getting the maximal use, and maximal parallelism, from each scalar-equivalent operation. To do this, we should take inspiration from GPUs, allowing threads to diverge and reconverge <ref type="bibr" target="#b54">[54]</ref> when necessary. Key Insight #5: VR should remove the constraint of control-flow matching between lanes, by supporting full SIMT GPU-style divergence and reconvergence.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">DVR MICROARCHITECTURE</head><p>Decoupled Vector Runahead overcomes the shortcomings listed in the previous section as follows. When the core discovers that it is executing a loop with dependent loads, based on a striding load that can be used to predict future loop iterations, a specialized vector-runahead subthread is activated on the same core as the currently executing main thread. This subthread is dynamically generated to prefetch many memory accesses into the future, but without affecting the semantics of the main thread. The vector-runahead subthread runs alongside the main thread on the same core, much like how threads co-execute in simultaneous multithreading (SMT) <ref type="bibr" target="#b91">[91]</ref>, except that the subthread is microarchitecturally generated, transient (to prefetch into the cache rather than achieve real computation), speculative, reordered to achieve extremely high memory-level parallelism, and significantly simpler, i.e., the subthread executes in-order. The vector-runahead subthread is also closely related to simultaneous subordinate microthreading <ref type="bibr" target="#b19">[20]</ref>, which also aims at improving performance of the main thread. Whereas a subordinate microthread is written in microcode featuring specialized machine-specific instructions, the vector-runahead subthread is dynamically generated and derived from the main application thread.</p><p>To achieve high memory-level parallelism from this in-order vector-runahead subthread, even while following chains of dependent loads that stall the subthread, we use single-instruction multiple-thread (SIMT) data-level parallelism <ref type="bibr" target="#b54">[54]</ref>, to execute large numbers of each instruction from the front-end, each representing a different loop iteration, simultaneously, thereby prefetching far into the future. Since this happens continuously, and overlaps with the execution of the main thread, most of the main out-oforder thread's memory accesses hit in the L1 by the time it reaches them -thus even for very large processors with massive windows, significant speedups can be achieved.</p><p>Figure <ref type="figure" target="#fig_2">3</ref> provides a schematic of a processor's microarchitecture enhanced to support DVR. We explain the various components in the following sections.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1">Discovery Mode</head><p>To discover an induction-variable load that multiple future copies of a loop can be spawned from, as in the original Vector Runahead proposal <ref type="bibr" target="#b67">[67]</ref>, we use a stride detector to identify a striding load and its stride, i.e., a load that follows a regular address sequence. Once we have this information, we enter Discovery Mode to perform a series of new analyses. The purpose of Discovery Mode is to (i) check whether the striding load is the most suitable candidate for DVR, by being the innermost striding load, (ii) derive the loop bounds, to determine how many speculative vector prefetches to generate, and (iii) discover whether there are any dependent loads based on the striding load that can be suitably prefetched by the vector-runahead subthread. Discovery Mode follows the main thread's execution through one iteration of the loop, until it reaches the striding load again, at which point it exits Discovery Mode.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.1">Innermost Striding-Load Detection.</head><p>Once an initial striding load is detected and Discovery Mode is engaged, we follow the main thread's execution to detect other striding loads that could be better candidates for initiating vector runahead. In particular, we may discover a striding load that is part of a more inner loop, and thus whose future iterations will be more timely if we prefetch them during vector-runahead mode. Striding load detection is done using the Reference Prediction Table (RPT) <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b63">63]</ref>, which keeps track of all striding loads and their strides. We keep a register initialized to zero with one bit per RPT entry. Stride loads set their bit to 1. If already set, then we have seen the same stride-load PC twice during Discovery Mode before seeing the current target stride again. This means the new stride is more inner, so we switch to performing Discovery Mode on it instead, resetting this register, the VTT and FLR (Section 4.1.2). We can vectorize multiple strides in the same loop (e.g., caused by loop unrolling), and this process simply chooses one to be the trigger, preferring innermost strides.  Once a stride is detected, DVR enters Discovery Mode, which uses the Taint Tracker and Loop-Bound Detector to discover information for the subsequent runahead. The Nested Discovery Mode logic will be used if Discovery Mode finds too few elements of the loop to vectorize. Once Discovery Mode is complete, the vector program counter (?? ? ) will be populated with the PC of the striding load, the VRAT will be populated with the striding load addresses and a copy of the main thread's scalar registers, and the decoupled vector-runahead subthread will initiate. The Reconvergence Stack will engage upon divergence in control-flow between the vector lanes.</p><p>4.1.2 Dependent-Load Checking. For DVR to be worth triggering, it must bring useful data into the cache beyond that of a simple stride prefetcher <ref type="bibr" target="#b21">[22]</ref>, which we always assume such a system will have (and always leave enabled). This means there must be further loads dependent on the value identified via the stride detector for it to be worth initiating vector runahead. We use a small Vector Taint Tracker (VTT), featuring a single bit per architectural integer register, to identify instructions that will later be vectorized. At the start of Discovery Mode, the VTT is initialized to all zeroes, except for the destination architecture register of the initiating striding load, which is set to one. This taint then propagates via instructions whose source register is tainted, transitively. If an instruction writes to a register whose taint bit is set but whose source registers are not, the taint bit of the target is reset. Whenever an input to a load is tainted in the VTT, the Final-Load Register (FLR) (initialized to zero at the start of Discovery Mode) is updated with the load PC. The FLR is a register that holds a single load PC, and its purpose is to identify the last load in the dependence chain originating from the striding load. The idea is then to vectorize all (tainted) instructions in the dependence chain starting from the striding load up until this last dependent load in the FLR. A non-zero FLR at the end of Discovery Mode indicates a load-dependence chain.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.1.3">Loop-Bound</head><p>Inference. The next step is to determine how many iterations are left for the inner loop to execute. This enables determining how many speculative vector prefetches to initiate during vector runahead. Doing so avoids generating wasteful and/or counterproductive loads that are out-of-bounds of the loop we expect to execute. During Discovery Mode, we look for the first branch with a backward edge, indicating a loop. The compare instruction that provides the source operand to this backward branch is used to determine the loop bound. In particular, we have both a Last-Compare Register (LCR) and a Seen-Branch Bit (SBB), which are zeroed whenever we update the Final-Load Register. If we see a compare instruction and the SBB is zero, we set the LCR with the compare's source and destination architectural register IDs. If we see a branch whose source matches the LCR destination and whose branch-taken destination is less than or equal to the striding load's PC,<ref type="foot" target="#foot_0">1</ref> then we set the SBB, to indicate that we should not alter the LCR unless we see a new final load.</p><p>We also take two checkpoints of the architectural register file: one upon entering Discovery Mode, and one upon leaving it. We then check the register mappings of the inputs to the identified compare instruction. If one stays constant for the whole Discovery Mode, and the other changes, we use (i) the constant value as the loop bound, and (ii) the difference in the changing value as the loop increment. This provides enough information to determine the remaining iterations of the loop. If we fail to produce a match, then we run for 128 elements, the limit for any invocation of DVR. <ref type="foot" target="#foot_1">2</ref></p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2">Vector-Runahead Subthread Operation</head><p>Once Discovery Mode has identified a striding load, its stride, its dependence chain and the remaining iterations of the inner loop, the vector-runahead subthread is spawned once the main thread reaches the candidate striding load again. The subthread starts from the striding load and ends at the PC stored in the FLR, with the goal of speculatively prefetching a large number (up to 128 in our setup) of vectorized copies. In particular, the Vectorizer replaces the striding load by vectorized copies generated using its stride. Any instruction in the future instruction stream that depends on the striding load also gets vectorized.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Vreg</head><p>Preg(s) R1 S45 S45 S45 S45 S45 S45 S45 S45 R2 V34 V35 V36 V37 V38 V39 V68 V69 Figure <ref type="figure" target="#fig_1">4</ref>: An example VRAT allocation considering 8 physical registers (one per vector lane) for brevity rather than 16 as in our setup. Architectural register R1 points to the same scalar physical register (S45) for all lanes. Architectural register R2 has been vectorized to 8 different vector physical registers, because either one of its sources was tainted, or control-flow divergence occurred.</p><p>The subthread uses the same fetch, decode and execute units as the main thread. Subthread instructions are generated from the front-end buffer, which decouples the fetch stage from the rest of the pipeline by holding decoded micro-ops (eight in our setup). While subthread instructions use the same execution units, they use a different Vector Issue Register (VIR) -rather than an out-of-order instruction queue, as it is in-order -to handle execution of the vector instruction copies. An instruction in the vector-runahead subthread's issue register is issued whenever there is no instruction ready from the main thread for the same execution port.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.1">Vector Register Allocation Table.</head><p>The vector register allocation table (VRAT) stores the subthread's current mapping from architecture scalar registers to physical registers. Even though the subthread is in-order, we still need to rename its architectural registers because it shares the physical scalar and vector register files with the main thread. The VRAT stores multiple physical (scalar or vector) registers for each scalar architectural integer register. As illustrated in Figure <ref type="figure" target="#fig_1">4</ref>, a scalar architectural register can be renamed to (i) the same scalar physical register in all vector lanes, in the case where the architectural register is not vectorized and there is no control-flow divergence across lanes, or (ii) multiple vector physical registers, where the architectural register has been vectorized or there is control-flow divergence.</p><p>To initialize the VRAT, all architectural registers from the main thread are allocated a fresh physical scalar register to decouple the subthread from its main thread. When the striding load is issued to the VIR, we allocate 16 vector (e.g., AVX-512) physical registers to map the load's target architectural register to. Unlike in an outof-order processor, physical registers are not remapped with every new instruction, since the renaming is not trying to remove WAW nor WAR dependencies, i.e., the subthread executes in program order. Instead, we allocate new physical registers in only two cases. First, when one of the source registers has been vectorized (because it depends on the striding load), but the destination register has not yet been vectorized -at which point we must select 16 free vector physical registers to map to. Second, if the destination register is a vectorized register, but is about to be overwritten by a scalar instruction -this may occur as a result of a WAW dependence in the original program code -it is renamed to a scalar physical register from the free list. When only a subset of lanes are being executed, due to branch divergence, only some registers are renamed, as described in Section 4.2.3.</p><p>Physical registers are returned to the free list once they are overwritten. Overwritten registers are freed immediately, provided they are not used as a source register for the instruction to be Figure <ref type="figure">5</ref>: The Vector Issue Register showing 4 AVX-512 vector instructions (instead of 16 as in our setup for brevity). Finegrained masking has turned some scalar-equivalent lanes in AVX-512 instructions 0 and 2 into no-ops. The first AVX-512 instruction has been issued and executed, and the last three have neither been issued nor executed. Source register src1 is scalar register S3 and is shared among all lanes (none of which have diverged), which may be for example the base address of an array, whereas source register src2 has been vectorized (for example the index into the array). The destination registers are also vectorized, to the same location as src2 as they were the same architectural scalar register.</p><p>issued -otherwise they are freed after execute, and tracked in the Vector Issue Register via the 'dead-source' bits (since it occurs after the overwriting occurs within the VRAT), as discussed in the next section.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.2">Vector Issue</head><p>Register. To achieve a significantly higher degree of memory-level parallelism than a single vector register (8 64-bit loads, as for AVX-512), we overlap the execution of multiple vector copies of the same instruction, with the target of achieving 16 AVX-512 vectors (or 16 ? 8 = 128 scalar-equivalent loops) in-flight simultaneously. Instead of using a scalar issue queue, we use a single Vector Issue Register (VIR), responsible for the issuing of each vector copy of the scalar instruction (Figure <ref type="figure">5</ref>).</p><p>If all inputs to the instruction are scalars, then just a single scalar instruction is issued. If the instruction is marked as a striding load, we use the stride detector to fill in all 128 values, and issue these as 16 vectorized AVX-512 loads. If the instruction depends on at least one vectorized input, we likewise issue 16 vectorized copies of the instruction in sequence to the execution units. Vectorized instruction copies are issued to the execution units whenever a suitable unit is free (not being used by the main thread). Within one AVX-512 instruction, we have 8 mask bits, to indicate lanes where one of the sources has been marked invalid, either through a fault, through use of floating-point registers, or through controlflow divergence. Some lanes may start as masked out, if Discovery Mode's loop-bound inference predicts that there will be less than 128 scalar-equivalent loops it can fetch. Once all instruction copies have issued and executed, if the 'dead-source' bit is set on any of the sources, the physical registers are freed. Then, we fetch the next instruction, and repeat.</p><p>Vectorized load instructions are treated like vector gather operations <ref type="bibr" target="#b87">[87]</ref>: they are split into scalar loads in the LSQ and sent to the PC (48 bits) Mask (128 bits) 0x1234 111111100000 0x12a0 000000011111 Figure <ref type="figure">6</ref>: An example reconvergence stack. The top of the stack stores the current PC and mask. Once the reconvergence point is reached, the stack head is popped and execution proceeds with the next PC and mask.</p><p>cache hierarchy individually. The memory system handles them concurrently with other regular scalar loads, allocating a different MSHR.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.3">Branch</head><p>Reconvergence. Dependent loads may be conditional, i.e., they appear down some control-flow paths and not others inside the inner loop. We allow each scalar-equivalent lane to diverge from the others. We therefore use a GPU-like reconvergence stack <ref type="bibr" target="#b54">[54]</ref>.</p><p>The results of the branches in all active lanes are compared against each other. If the next PC for any lane diverges from the others, we split the lanes based on their new destination, generate masks based on common groups, and place the masks and target PCs onto a reconvergence stack (Figure <ref type="figure">6</ref>). We follow the first lane all the way to the reconvergence point, which we set to the vector-runahead termination point (Section 4.2.4), to avoid special tracking. Once we reach the termination point for a set of matching lanes, we pop the head off the reconvergence stack, reset the masks, and proceed from the next PC in the stack. Each lane is simultaneously mapped in the VRAT. If we have divergence in scalar renaming (because we use different scalars), and this divergence occurs neatly across AVX-512 instruction boundaries, then we overwrite each scalar according to which of the 16 AVX-512 instructions use it. If we have divergence in scalar renaming within an AVX-512 instruction, we convert the destination to an AVX-512 physical register, and copy the scalar values being replaced.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.2.4">Termination.</head><p>The vector-runahead subthread terminates when the lanes reach the final indirect load in the sequence (identified by the FLR), or the next iteration of the stride PC in the case of divergence, with a 200-instruction timeout (in case we leave the loop entirely in a way not picked up by the loop bound detector, e.g., via a break).</p><p>The main thread executes concurrently with the vector-runahead subthread. Once the subthread has terminated, the main thread again becomes eligible for entering Discovery Mode the next time it executes a striding load, and thus for re-initiating DVR. The main thread will have made significant progress by this point, and most of its cache accesses will become L1 hits, provided the DVR subthread was accurate and timely.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3">Nested Vector Runahead</head><p>Loop-bound inference (Section 4.1.3) provides an accurate count of how many iterations each loop will execute, and thus how many scalar-equivalent lanes DVR can fill with useful prefetches. This may well be significantly lower than the 128-element maximum we can achieve, if each inner loop is relatively short, hurting the total memory-level parallelism, and thus limiting the benefits of the latency overlapping achieved by DVR.</p><p>The goal of the Nested Vector Runahead is to find iterations from multiple invocations of a loop when the loop bound detector does not find enough upcoming iterations of the innermost striding load (Section 4.1.1). The Nested Vector Runahead benefits benchmarks with patterns shown in Algorithm 1. If the for loop at line 7 has a small number of iterations, vectorizing the chain starting from the inner striding load at line 8 cannot generate high MLP. Therefore, it is critical to prefetch indirect chains from many invocations of the for loop. Nested Vector Runahead works in two steps. First, it performs a Nested Discovery Mode (NDM) to vectorize the chain of instructions from the outer striding load to the inner striding load, and discover loop bounds and data inputs to multiple invocations of the inner loop. Second, upon reaching the inner striding loop, it expands vectorization further to cover the inner loop as well.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.1">Nested Discovery Mode.</head><p>The goal of the NDM is to find the starting striding addresses and loop bounds for many different invocations of the inner loop at the same time. During a discovery mode (Section 4.1), the loop-bound detector may find fewer than 64 upcoming iterations of a loop. In this case, once the vector-runahead subthread is spawned, instead of performing vector runahead immediately, we alter the direction of the branch with the backward edge (see Section 4.1.3) and begin NDM on the in-order subthread by setting PCv to the instruction following the branch (not-taken path instruction). The subthread runs concurrently with the main thread. We still save both the source registers in the LCR. The constant loop increment and address of the striding load are saved in two new registers called Increment Register (IR) and Inner Load Register (ILR), respectively.</p><p>The NDM subthread begins executing scalar operations, but skips all the upcoming iterations of the inner loop due to the altered branch direction, and executes instructions outside the inner loop. When it finds an outer striding load with an address smaller than the address in the ILR (e.g., line 4 versus line 8 in Algorithm 1), it performs its first vectorization step: it vectorizes the striding load (by a factor of 16, to attempt to find at least 128 viable inner loop iterations) and marks the load's destination in the taint vector.</p><p>The process of vectorization continues for the dependents of each outer striding load -until it reaches the first iteration of each inner striding load. In Algorithm 1, the outer striding load at line 4 has dependents at both line 5 and line 6.</p><p>When it it reaches the inner striding load (at line 8), it reads the values of the vectorized copies of the source registers in the LCR, and uses these and the value in IR to calculate the number of invocations of the inner loops for each of our vectorized outer loops. If no outer striding load with an address lower than the inner striding load appears within 200 instructions after entry to the NDM, the subthread re-calculates the loop bound based on the values in LCR and IR, and vectorizes the inner striding load by the loop bound. That is, the subthread resorts back to the number of iterations calculated by the loop bound detector during the initial discovery mode.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.3.2">Further Vectorization.</head><p>Based on the loop bounds detected, the NDM subthread then collects as many striding inner addresses as possible with a maximum limit of 128. Addresses beyond the first </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4.4">Hardware Overhead</head><p>The hardware structures to support DVR incur only 1139 bytes overhead. The 32-entry stride detector requires 460 bytes: each entry incurs 48 bits for the load PC, 48 bits for the previous memory address, 16 bits for the stride distance, 2 bits for the saturating counter, and 1 bit for innermost detection. The VRAT is a 16-entry table (288 bytes): each entry features 16 register identifiers each requiring 9 bits (to select one of the 128 vector physical registers and 256 integer physical registers). The VIR incurs 86 bytes: 128 bits for the mask, 16 bits issued, 16 bits executed, 64 bits uop and imm, 9?16 bits for the destination, 10?16 bits for src1, 10?16 bits for src2. The front-end buffer incurs 64 bytes for 8 micro-ops. The 8-entry reconvergence stack requires 176 bytes: 6 bytes for the PC and 128-bit mask for each PC. The FLR and LCR require only 6 bytes and 2 bytes, respectively; the SBB requires only 1 bit. The loop-bound detector saves two checkpoints (2?16?8 bits for the register ID mappings) and two registers for the compare and branch instructions, totalling 48 bytes. The taint-tracker needs 16 bits. For NDM, the IR and ILR require 7 bits and 6 bytes for keeping track of the loop increment (maximum 128) and ID of the address of the inner striding load.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">EXPERIMENTAL SETUP</head><p>Simulation Infrastructure. We use Sniper 6.0 <ref type="bibr" target="#b17">[18]</ref>, an x86 simulator with its most detailed, cycle-level core model to simulate an aggressive 5-wide 350-entry ROB superscalar, out-of-order processor. The configuration of the core, the key microarchitectural structures of which are inspired by Intel Ice Lake processors <ref type="bibr" target="#b35">[36]</ref>, is provided in Table 1 <ref type="bibr" target="#b27">[28]</ref>. A hardware stride prefetcher is always enabled at the L1-D cache level. Additionally, there are 24 MSHRs to keep track of outstanding misses from L1-D. The branch predictor is the 8 KB TAGE-SC-L from the 2016 CBP <ref type="bibr" target="#b83">[83]</ref>.</p><p>Benchmarks. We evaluate a total of 13 benchmarks from the graph analytics, database, and HPC domains featuring complex addresscalculation patterns for a chain of indirect memory accesses. Five of the benchmarks are taken from the GAP benchmark suite <ref type="bibr" target="#b11">[12]</ref>: Betweenness Centrality (bc), Breadth-First Search (bfs), Connected Components (cc), PageRank (pr), and Single-Source Shortest Path (sssp). Eight benchmarks, namely Camel, Graph500, Hashjoin with two and eight hashes (HJ2 and HJ8), Kangaroo, NAS-CG, NAS-IS, and RandomAccess, are primarily from the database and HPC domains; these benchmarks have been extensively used by prior work <ref type="bibr" target="#b1">[2,</ref><ref type="bibr" target="#b2">3,</ref><ref type="bibr" target="#b67">67,</ref><ref type="bibr" target="#b88">88,</ref><ref type="bibr" target="#b89">89]</ref>, and we collectively call them hpc-db (highperformance computing and databases benchmark). Table <ref type="table" target="#tab_2">2</ref> describes graph inputs; LLC MPKI shows the number of misses per kilo instructions aggregated over the five benchmarks for each input on our baseline OoO core. We use the region-of-interest (ROI) marker utility in Sniper to skip the initialization phase for each benchmark and simulate the next representative 500 M instructions.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6">EVALUATION</head><p>We evaluate the following runahead techniques relative to our baseline OoO core:</p><p>? Precise Runahead Execution (PRE) <ref type="bibr" target="#b69">[69]</ref>: The state-of-the-art runahead technique that selectively executes only the chain of instructions leading to long-latency loads, and recycles register-file and issue-queue resources dynamically to avoid pipeline flushes. ? Indirect Memory Prefetcher (IMP) <ref type="bibr" target="#b98">[98]</ref>: The indirect memory prefetcher, that works at L1 D-cache level and prefetches indirect memory accesses originating from striding access patterns. ? Vector Runahead (VR): The first vector-runahead mechanism proposed by Naithani et al. <ref type="bibr" target="#b67">[67]</ref>. ? Decoupled Vector Runahead (DVR).</p><p>? Oracle: A hypothetical technique that knows all memory accesses in advance, and prefetches them at the appropriate point in time to avoid stalling. negligible performance improvements (with Camel and NAS-IS as exceptions). IMP performs better than PRE as it can detect simpleindirect patterns in benchmarks such as cc, Camel, and NAS-IS. However, it cannot prefetch indirect accesses for other benchmarks with more complex address calculation patterns. Vector Runahead manages slightly more (1.2? harmonic mean) because it is able to follow, reorder and vectorize the chains. Still, both PRE and VR suffer on large cores. The ROB rarely fills up, and even though there is still potential performance to be gained, the fact that neither PRE nor VR often reach their trigger condition limits their speedup. This is especially pronounced on the GAP benchmarks, where frequent branch mispredictions imply that the reorder buffer rarely reaches full utilization before the misprediction is discovered. This is the reason why IMP, which is detached from the core size and works at L1 D-cache level, performs better than VR for benchmarks such as cc_KR and cc_TW. In some cases where Vector Runahead is triggered, it decreases performance because of its inaccuracy (e.g., bfs on the UR dataset): when inner loops are short, the lack of DVR's Discovery Mode evicts useful data from the cache and wastes DRAM bandwidth. DVR often yields close to Oracle-level performance; it is more proactive in generating prefetches than VR and PRE, and achieves a 2.4? average speedup and 6.4? maximum. Granted, there are still some workloads where DVR does not reach the full potential of a perfect Oracle, since it is not given full knowledge of the future or unlimited resources. In some cases (NAS-CG and NAS-IS), the workload is so simple that looking ahead only 128 elements into the future is insufficient to hide the full memory latency on such a large core: wider 256-element DVR units would achieve the higher performance of the Oracle, at the expense of a larger VRAT and more physical vector registers being required to be mapped simultaneously. In others, the memory-level parallelism is more difficult to find. This is particularly pronounced on workloads running the UR graph, where vertices are uniformly smaller than the 128-edge-element target, used by DVR within inner loops to generate MLP, unlike the power-law graphs (KR and Graph 500) which spend more time in highly populated vertices. As we shall see, Nested Vector Runahead mitigates this issue partially but still suffers from timeliness due to the complex dependencies. (1) Vector Runahead <ref type="bibr" target="#b67">[67]</ref>, (2) Offload triggers a vector-runahead subthread whenever a stride is detected, (3) Discovery Mode further improves prefetch accuracy, and (4) Nested Runahead Mode completes DVR by further increasing memory-level parallelism over short loops.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.1">Performance</head></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.2">Performance Breakdown</head><p>Figure <ref type="figure" target="#fig_4">8</ref> shows how the constituent parts of DVR contribute to the overall performance gain. Offloading Vector Runahead to a subthread, and thus allowing it to run more proactively than just on a full ROB, gives large benefits on its own: from 1.2? with a base Vector Runahead to almost 1.5? here. Indeed, the fact that the base Vector Runahead is out-of-order and the offloaded DVR is in-order is barely relevant when it comes to performance: each scalar-equivalent instruction in DVR does so much work, and brings in so many (vectorized gather) loads that there is no need for full out-of-order execution in the vector-runahead subthread. Adding Discovery Mode particularly benefits bc, bfs and sssp; the over-fetching that vector-runahead techniques otherwise cause results in enough cache pollution and bandwidth wastage for the more accurate Discovery Mode to win out. Still, it is a double-edged sword on cc and pr, where the wrong-path execution triggered by DVR without Discovery Mode happens to bring in the correct data despite being out-of-bounds, as each outer loop generates only sequential values for the inner loop, unlike bc, bfs and sssp. Still, the full DVR technique, completed with the addition of Nested Runahead Mode, is uniformly best, because it can most effectively generate MLP far into the future even for short inner loops. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.3">Memory-Level Parallelism</head><p>The secrets of DVR's success are that it generates far more overlapping memory accesses than competing techniques. In Figure <ref type="figure" target="#fig_5">9</ref>, we see that the number of outstanding requests for the out-of-order core in the data cache are less than four on average, with DVR generating more than ten at a time, on average per cycle, by comparison. The simplest workloads (pr and those in hpd-db) have fewer branch mispredicts, and so achieve higher raw memory-level parallelism even if the speedups are typically higher in the more complex workloads. Even though DVR itself does not suffer significantly from branch mispredicts (its simple in-order pipeline squashes them extremely early, and its coarse form of speculative loop parallelism means branches across loop iterations do not form chains that cause all instructions later in program order to be squashed), the main thread does, and so DVR naturally ends up looking less far ahead, and overlapping fewer accesses.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.4">Effectiveness</head><p>Here we analyze to what extent DVR is successful at generating accurate, timely, comprehensive prefetches. Accuracy and Coverage. Figure <ref type="figure">10</ref> shows both the total number of main memory accesses performed, and the fraction within the main thread and runahead mode or subthread. Both DVR and VR are given for comparison, relative to the same out-of-order baseline. DVR is extremely accurate because of the Discovery Mode. By contrast, Vector Runahead can over-fetch by over 2?, because it lacks loop-length analysis.</p><p>As well as being more accurate, DVR also covers far more of each application, due to triggering more eagerly, and because Nested Mode can handle far more complex indirection. Timeliness. Figure <ref type="figure" target="#fig_7">11</ref> shows how timely the prefetches are in DVR, in terms of the access latency observed by the main thread. Most cache lines are in the L1 D-cache when the main thread accesses them, with only a few evicted to higher cache levels. This is because the combination of the Discovery and Nested Modes allows DVR to generate very fine-grained memory-level parallelism, meaning that even though we are bringing in hundreds of entries at once, we can synchronize with the main thread so that they are accessed shortly after. Still, a consistent 10-20 percent of accesses observe a latency higher than the last-level cache. When interpreted in correspondence with Figure <ref type="figure">10</ref>, we see that this is not because of   inaccuracy. Rather, it is because the prefetches are too late. Because DVR overlaps with the main thread's execution, and especially because Discovery and Nested Modes can delay the start of vectorization, many earlier accesses in a single runahead iteration may overlap with those same accesses in the main thread. This is a significant (if difficult to avoid) reason why the Oracle, which pays no such overheads for discovering future addresses, achieves better performance in some cases, as previously reported in Figure <ref type="figure">7</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="6.5">Core Size Sensitivity Analysis</head><p>Figure <ref type="figure" target="#fig_0">12</ref> reports performance for DVR as a function of ROB size normalized to our baseline OoO core with 350-entry ROB. In contrast to VR which yields diminishing performance benefits with increasing ROB size, as previously reported in Figure <ref type="figure" target="#fig_0">2</ref>, the performance boost offered by DVR holds on. In contrast to VR which is triggered upon a full ROB, DVR operates in a decoupled manner from the main thread, significantly boosting performance by continuously vectorizing and prefetching future chains of dependent loads. When we scale all the back-end structures -in proportion to the ROB -the performance of DVR relative to the OoO baseline </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7">RELATED WORK</head><p>Decoupled Vector Runahead is both a helper thread <ref type="bibr" target="#b19">[20,</ref><ref type="bibr" target="#b43">44]</ref>, and a runahead execution <ref type="bibr" target="#b66">[66]</ref> according to the categories from Mittal et al. <ref type="bibr" target="#b59">[59]</ref> and Falsafi et al. <ref type="bibr" target="#b31">[32]</ref>.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.1">Helper Threads and Precomputation</head><p>Helper threads perform work to assist the performance of a main thread. Athanasaki et al. <ref type="bibr" target="#b7">[8]</ref> perform speculative precomputation on simultaneous multithreads. Wang et al. <ref type="bibr" target="#b93">[93]</ref> run helper threads via context switching, removing the need for explicit SMT capabilities. SSMT <ref type="bibr" target="#b19">[20]</ref> introduced hardware support specifically for helper threads, rather than SMT generically, and runs microthreads alongside the main core, via a buffer that stores hand-generated micro-ops.</p><p>Slice Processors <ref type="bibr" target="#b60">[60]</ref> identify cache misses to precompute address calculation on a parallel thread. Dependence-graph computation <ref type="bibr" target="#b6">[7,</ref><ref type="bibr" target="#b82">82]</ref> executes the slices on separate hardware. Lau et al. <ref type="bibr" target="#b52">[53]</ref> introduces a small core by not only duplicating the execution hardware, but some of the core front-end as well, to run speculative threads. DeSC <ref type="bibr" target="#b36">[37]</ref> decouples address calculation and load-value usage into two separate devices.</p><p>Kim et al. <ref type="bibr" target="#b44">[45]</ref> generate helper threads automatically in the compiler. Ganusov and Burtscher <ref type="bibr" target="#b34">[35]</ref> emulate hardware prefetchers on helper threads. Speculative Precomputation <ref type="bibr" target="#b24">[25]</ref> allows helper threads to spawn their own helper threads to handle chain dependencies.</p><p>None of this prior work reorders and vectorizes the code in the helper thread to prefetch dependent memory operations far into the future instruction stream, and typically it requires software support instead of being fully microarchitectural.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.2">Runahead Techniques</head><p>Runahead execution <ref type="bibr" target="#b28">[29,</ref><ref type="bibr" target="#b65">65,</ref><ref type="bibr" target="#b66">66]</ref> was proposed as an alternative to large reorder buffers, allowing execution to continue after a longlatency load by removing the blocking instruction from the reorder buffer and continuing to transiently execute other instructions. Mutlu et al. <ref type="bibr" target="#b62">[62,</ref><ref type="bibr" target="#b64">64]</ref> showed that dynamically choosing whether or not to enter runahead can reduce the number of executed instructions, while keeping the performance benefits intact. Hashemi et al. <ref type="bibr" target="#b39">[40]</ref> filter and buffer dependency chains to improve performance. Precise Runahead <ref type="bibr" target="#b70">[70]</ref> both filters instructions and avoids throwing away correct instructions that fit inside the ROB. Branch Runahead <ref type="bibr" target="#b78">[78]</ref> uses a light dependency chain executed continuously to assist the branch predictor. Bringing runahead together with vectorization was the key idea of Vector Runahead <ref type="bibr" target="#b67">[67,</ref><ref type="bibr" target="#b68">68]</ref> (Section 2.3).</p><p>Helper threads have been combined with (scalar) runahead execution <ref type="bibr" target="#b80">[80]</ref>. MLP-aware runahead threads <ref type="bibr" target="#b26">[27]</ref> only initiate execution with far-distance MLP. Ramirez et al. <ref type="bibr" target="#b79">[79]</ref> dynamically calculate the offset at which runahead thread should run. Continuous Runahead <ref type="bibr" target="#b38">[39]</ref> offloads simple address patterns to a core at the last-level cache controller, and runs them continuously. As continuous runahead can only prefetch chains leading to independent memory accesses, EMC <ref type="bibr" target="#b37">[38]</ref>, another near-memory core, prefetches dependent cache misses. Both continuous runahead and EMC are in-order, like DVR, but due to a lack of vectorization and instruction reordering, they cannot deliver high coverage and performance like DVR.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.3">Auto-Vectorization and SW Reordering</head><p>DVR can be seen as a type of speculative vectorization <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b51">52,</ref><ref type="bibr" target="#b55">55,</ref><ref type="bibr" target="#b57">57,</ref><ref type="bibr" target="#b74">74,</ref><ref type="bibr" target="#b76">76,</ref><ref type="bibr" target="#b77">77,</ref><ref type="bibr" target="#b86">86]</ref>, albeit one that is generated microarchitecturally, that does not seek to maintain guaranteed correctness of its transient workload, and which overlaps far more independent loads than a single vector at a time. Likewise, it can be seen as a type of hardwaregenerated, compute-optimized (via vectorization) software pipelining <ref type="bibr" target="#b20">[21,</ref><ref type="bibr" target="#b46">47,</ref><ref type="bibr" target="#b81">81,</ref><ref type="bibr" target="#b90">90,</ref><ref type="bibr" target="#b92">92]</ref>, or software prefetching <ref type="bibr" target="#b2">[3,</ref><ref type="bibr">4,</ref><ref type="bibr" target="#b16">17,</ref><ref type="bibr" target="#b20">21,</ref><ref type="bibr" target="#b61">61,</ref><ref type="bibr" target="#b89">89]</ref> in that it reorders loads to overlap them.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.4">Architecturally Visible Prefetching</head><p>Prefetching the most complex memory access patterns has traditionally been the preserve of compiler-or hand-targeted hardware. The Event-Triggered Programmable Prefetcher <ref type="bibr" target="#b1">[2]</ref> offloads and overlaps many memory accesses like DVR, to hide the latencies of dependent chains. However, it uses compiler-or hand-generated thread-level parallelism, and runs on a sea of small, dedicated cores.</p><p>Harbinger instructions <ref type="bibr" target="#b4">[5]</ref>, Guided-Region Prefetching <ref type="bibr" target="#b94">[94]</ref> and RnR <ref type="bibr" target="#b99">[99]</ref> generate hints inside programs to give to prefetchers. Prodigy <ref type="bibr" target="#b88">[88]</ref> and the Graph Prefetcher [1] are configured with a set of dependent-chain patterns typical to graph workloads. Other prefetchers are configured with the indirection patterns of arrays <ref type="bibr" target="#b18">[19]</ref> or linked structures <ref type="bibr" target="#b23">[24,</ref><ref type="bibr" target="#b48">49]</ref>. Such hints may configure the entire memory hierarchy <ref type="bibr" target="#b97">[97]</ref>.</p><p>Fetcher units <ref type="bibr" target="#b40">[41,</ref><ref type="bibr" target="#b47">48,</ref><ref type="bibr" target="#b49">50,</ref><ref type="bibr" target="#b50">51,</ref><ref type="bibr" target="#b56">56,</ref><ref type="bibr" target="#b73">73,</ref><ref type="bibr" target="#b100">100]</ref> are configured with the memory access pattern, but directly access data rather than prefetching it, reducing work repetition at the expense of requiring stricter ordering guarantees to preserve correctness.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="7.5">Microarchitectural Prefetchers</head><p>Stride prefetchers <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b22">23]</ref>, for repeated patterns in addresses such as sequential walks through arrays, are endemic in commercial systems <ref type="bibr" target="#b8">[9]</ref>. The recent research literature focuses on improving their coverage, performance and selectivity <ref type="bibr" target="#b10">[11,</ref><ref type="bibr" target="#b14">15,</ref><ref type="bibr" target="#b45">46,</ref><ref type="bibr" target="#b58">58,</ref><ref type="bibr" target="#b71">71,</ref><ref type="bibr" target="#b84">84]</ref>.</p><p>More recently, temporal-history prefetchers <ref type="bibr" target="#b41">[42,</ref><ref type="bibr" target="#b42">43,</ref><ref type="bibr" target="#b72">72,</ref><ref type="bibr" target="#b95">95,</ref><ref type="bibr" target="#b96">96]</ref>, which store and repeat observed patterns, have become practical enough for deployment in Arm processors <ref type="bibr" target="#b33">[34]</ref>. Pythia <ref type="bibr" target="#b13">[14]</ref> considers more than just the PC to index predictors, by using reinforcement learning to select the relevant characteristics. Hermes <ref type="bibr" target="#b12">[13]</ref> predicts whether data will be cached or off-chip, to avoid waiting for the cache miss before accessing off-chip memory. Shi et. al <ref type="bibr" target="#b85">[85]</ref> correlate address patterns via machine learning. The complex datadependent chains within big-data workloads that DVR targets are unsuited to address correlation, given their lack of regular address pattern, or temporal reuse over even gigabytes of data <ref type="bibr" target="#b1">[2]</ref>.</p><p>Cooksey et al. <ref type="bibr" target="#b25">[26]</ref> propose a 'content-directed' prefetcher designed to pick up possible pointers within arrays, with others attempting to reduce overfetch rates via compiler input <ref type="bibr" target="#b4">[5,</ref><ref type="bibr" target="#b29">30]</ref>. IMP is successful at simple indirection patterns <ref type="bibr" target="#b98">[98]</ref> but does not scale to graph or database workloads <ref type="bibr" target="#b67">[67]</ref>. Takayashiki et al. <ref type="bibr" target="#b87">[87]</ref> generate similar simple stride-indirects by observing vector gather instructions. The Bouquet of Prefetchers <ref type="bibr" target="#b75">[75]</ref> predicts which prefetcher is best to use for each PC address.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="8">CONCLUSION</head><p>Decoupled Vector Runahead offloads the runahead execution to a simple, in-order, SIMT, vector subthread that is initiated whenever the core detects an indirect memory access pattern. Unlike prior runahead techniques, DVR does not wait for the reorder buffer to stall, and by discovering the loop bound at runtime, it can adjust the degree of vectorization to better suit application characteristics. DVR generates prefetches from multiple invocations of a loop when the discovered degree of vectorization for one invocation is not sufficient to achieve high memory-level parallelism. DVR incurs minimal hardware overhead of 1139 bytes.</p><p>The benefits of reordering-based runahead over invalidation runaheads will usher in a new era of processors with the latency insensitivity of GPUs while maintaining the programmability and single-threaded performance of CPUs. The potential of near-oracle performance for even the trickiest graph workloads is too tempting to leave on the table.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 2 :</head><label>2</label><figDesc>Figure 2: Performance of an OoO core and VR, normalized to a baseline 350-entry ROB OoO core (left axis), and processor stall time due to a full ROB (right axis), as a function of ROB size. The performance gain of VR diminishes with increasing ROB size, and for some benchmarks overall performance even decreases.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_1"><head>1 4 Vertex</head><label>4</label><figDesc>Queue workList = {startNode} 2 Array visited[startNode] = true 3 while worklist ? ? do</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_2"><head>Figure 3 :</head><label>3</label><figDesc>Figure3: DVR processor pipeline. The stride detector obtains information about loads from the dispatch and execute stages of the pipeline. Once a stride is detected, DVR enters Discovery Mode, which uses the Taint Tracker and Loop-Bound Detector to discover information for the subsequent runahead. The Nested Discovery Mode logic will be used if Discovery Mode finds too few elements of the loop to vectorize. Once Discovery Mode is complete, the vector program counter (?? ? ) will be populated with the PC of the striding load, the VRAT will be populated with the striding load addresses and a copy of the main thread's scalar registers, and the decoupled vector-runahead subthread will initiate. The Reconvergence Stack will engage upon divergence in control-flow between the vector lanes.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_3"><head>Figure 7 Figure 7 :</head><label>77</label><figDesc>Figure 7 reports normalized performance for each technique on every benchmark-input combination. PRE rarely yields more than</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_4"><head>Figure 8 :</head><label>8</label><figDesc>Figure 8: Breaking down DVR's performance normalized to the baseline OoO:(1) Vector Runahead<ref type="bibr" target="#b67">[67]</ref>, (2) Offload triggers a vector-runahead subthread whenever a stride is detected, (3) Discovery Mode further improves prefetch accuracy, and (4) Nested Runahead Mode completes DVR by further increasing memory-level parallelism over short loops.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_5"><head>Figure 9 :</head><label>9</label><figDesc>Figure 9: Memory-level parallelism, in terms of MSHRs used per cycle on average, for DVR and VR compared to the baseline OoO core. DVR generates significantly more parallel outstanding memory accesses.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_7"><head>Figure 11 :</head><label>11</label><figDesc>Figure 11: Timeliness: fraction of total prefetched cachelines in runahead mode for which the data is present in the L1-D, L2 and L3 caches during normal mode; 'Off-chip' represents either the cachelines prefetched incorrectly or the cache lines for which the data is still being transferred from memory.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 1 :</head><label>1</label><figDesc>Baseline configuration for the OoO core.</figDesc><table><row><cell>Core</cell><cell>4.0 GHz, out-of-order</cell></row><row><cell>ROB size</cell><cell>350</cell></row><row><cell>Queue sizes</cell><cell>issue (128), load (128), store (72)</cell></row><row><cell>Processor width</cell><cell>5-wide fetch/dispatch/rename/commit</cell></row><row><cell>Pipeline depth</cell><cell>15 front-end stages</cell></row><row><cell cols="2">Branch predictor 8 KB TAGE-SC-L</cell></row><row><cell>Functional units</cell><cell>4 int add (1 cycle), 1 int mult (3 cycles),</cell></row><row><cell></cell><cell>1 int div (18 cycles), 1 fp add (3 cycles),</cell></row><row><cell></cell><cell>1 fp mult (5 cycles), 1 fp div (6 cycles)</cell></row><row><cell>Vector units</cell><cell>3 ALU, 2 shift, 2 add, 2 mul, 2 shuffle</cell></row><row><cell>Register file</cell><cell>256 int (64 bit)</cell></row><row><cell></cell><cell>256 fp (128 bit)</cell></row><row><cell></cell><cell>128 vector (512 bit)</cell></row><row><cell>L1 I-cache</cell><cell>32 KB, assoc 4, 2-cycle access</cell></row><row><cell>L1 D-cache</cell><cell>32 KB, assoc 8, 4-cycle access,</cell></row><row><cell></cell><cell>24 MSHRs, stride prefetcher (16 streams)</cell></row><row><cell cols="2">Private L2 cache 256 KB, assoc 8, 8-cycle access</cell></row><row><cell>Shared L3 cache</cell><cell>8 MB, assoc 16, 30-cycle access</cell></row><row><cell>Memory</cell><cell>50 ns min. latency, 51.2 GB/s bandwidth,</cell></row><row><cell></cell><cell>request-based contention model</cell></row></table><note><p>128 are discarded. The NDM subthread then performs vectorization from the inner striding load, by populating its vector registers with these 128 targets, with all other registers set based on which of the 16 outer-loop lanes it was spawned from (scalar for currently untainted registers, and vector for registers tainted in NDM). It taints the destination of the inner striding load and enters DVR with each lane, starting and terminating as specified in Section 4.2.</p></note></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 2 :</head><label>2</label><figDesc>Graph inputs used for the GAP suite<ref type="bibr" target="#b11">[12]</ref>.</figDesc><table><row><cell>Input</cell><cell># Nodes (in Millions)</cell><cell># Edges (in Millions)</cell><cell>LLC MPKI</cell></row><row><cell>Kron (KR)</cell><cell>134.2</cell><cell>2111.6</cell><cell>19</cell></row><row><cell>LiveJournal (LJN)</cell><cell>4.8</cell><cell>69.0</cell><cell>21</cell></row><row><cell>Orkut (ORK)</cell><cell>3.1</cell><cell>1930.3</cell><cell>18</cell></row><row><cell>Twitter (TW)</cell><cell>61.6</cell><cell>1468.4</cell><cell>61</cell></row><row><cell>Urand (UR)</cell><cell>134.2</cell><cell>2147.4</cell><cell>32</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head></head><label></label><figDesc>Performance of DVR with increasing ROB size, relative to our baseline OoO core with 350-entry ROB. The performance gains delivered by DVR continue to increase despite the large size of the ROB.with 350-entry ROB is 1.9 ?, 2.2 ?, 2.2 ?, 2.4 ?, and 2.5 ? higher for the cores with the ROB sizes of 128, 192, 224, 350, and 512 entries.</figDesc><table><row><cell></cell><cell></cell><cell>OoO</cell><cell></cell><cell></cell><cell>DVR</cell></row><row><cell>Normalized to the OoO</cell><cell>Baseline (ROB=350)</cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell>IPC</cell><cell></cell><cell></cell><cell></cell><cell></cell><cell></cell></row><row><cell></cell><cell>bc</cell><cell>bfs</cell><cell>cc</cell><cell>pr</cell><cell>sssp</cell><cell>hpc-db H-mean</cell></row><row><cell cols="2">Figure 12:</cell><cell></cell><cell></cell><cell></cell><cell></cell></row></table></figure>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="1" xml:id="foot_0"><p>If we see other branches between the FLR and the LCR, we ignore the FLR and allow each runahead lane to continue onto the next stride PC, to allow it to fully explore any divergent paths that may manifest. The FLR is still used in Discovery Mode to help identify the loop, which must always encapsulate both the stride load and the FLR load.</p></note>
+			<note xmlns="http://www.tei-c.org/ns/1.0" place="foot" n="2" xml:id="foot_1"><p>Runahead is transient execution and does not need to be correct, and so the goal for using more complex heuristics is only to reduce under/overfetching.</p></note>
+		</body>
+		<back>
+
+			<div type="acknowledgement">
+<div><head>ACKNOWLEDGMENTS</head><p>We thank the reviewers for their valuable feedback. This work is supported in part by the <rs type="funder">UGent-BOF-GOA</rs> grant No. <rs type="grantNumber">01G01421</rs>, the <rs type="funder">Research Foundation Flanders (FWO)</rs> grant No. <rs type="grantNumber">G018722N</rs>, the <rs type="funder">European Research Council (ERC)</rs> Advanced Grant agreement No. <rs type="grantNumber">741097</rs>, and the <rs type="funder">Engineering and Physical Sciences Research Council (EPSRC)</rs> grant reference <rs type="grantNumber">EP/W00576X/1</rs>. Additional data related to this publication is available on request from the lead author.</p></div>
+			</div>
+			<listOrg type="funding">
+				<org type="funding" xml:id="_Ae82Xhx">
+					<idno type="grant-number">01G01421</idno>
+				</org>
+				<org type="funding" xml:id="_4Pd4kaj">
+					<idno type="grant-number">G018722N</idno>
+				</org>
+				<org type="funding" xml:id="_qec2k5G">
+					<idno type="grant-number">741097</idno>
+				</org>
+				<org type="funding" xml:id="_jQ6S3G8">
+					<idno type="grant-number">EP/W00576X/1</idno>
+				</org>
+			</listOrg>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Graph Prefetching Using Data Structure Knowledge</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2925426.2926254</idno>
+		<idno>0 128 192 224 350 512 128 192 224 350 512 128 192 224 350 512 128 192 224 350 512 128 192 224 350 512 128 192 224 350 512 128 192 224 350 512</idno>
+		<ptr target="https://doi.org/10.1145/2925426.2926254" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2016 International Conference on Supercomputing (Istanbul, Turkey) (ICS &apos;16). Association for Computing Machinery</title>
+		<meeting>the 2016 International Conference on Supercomputing (Istanbul, Turkey) (ICS &apos;16). Association for Computing Machinery<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note>Article 39, 11 pages</note>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">An Event-Triggered Programmable Prefetcher for Irregular Workloads</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3173162.3173189</idno>
+		<ptr target="https://doi.org/10.1145/3173162.3173189" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Third International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Twenty-Third International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Williamsburg, VA, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="578" to="592" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS &apos;18)</note>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Software Prefetching for Indirect Memory Accesses: A Microarchitectural Perspective</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3319393</idno>
+		<ptr target="https://doi.org/10.1145/3319393" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Computer Systems</title>
+		<imprint>
+			<biblScope unit="volume">36</biblScope>
+			<biblScope unit="issue">8</biblScope>
+			<biblScope unit="page">34</biblScope>
+			<date type="published" when="2019-06">2019. jun 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Prefetching in Functional Languages</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3381898.3397209</idno>
+		<ptr target="https://doi.org/10.1145/3381898.3397209" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2020 ACM SIGPLAN International Symposium on Memory Management</title>
+		<meeting>the 2020 ACM SIGPLAN International Symposium on Memory Management<address><addrLine>London, UK; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="16" to="29" />
+		</imprint>
+	</monogr>
+	<note>Association for Computing Machinery</note>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Compiler-Directed Content-Aware Prefetching for Dynamic Data Structures</title>
+		<author>
+			<persName><forename type="first">Hassan</forename><surname>Al-Sukhni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ian</forename><surname>Bratt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><forename type="middle">A</forename><surname>Connors</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PACT.2003.1238005</idno>
+		<ptr target="https://doi.org/10.1109/PACT.2003.1238005" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;03)</title>
+		<meeting>the 12th International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;03)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page">91</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<analytic>
+		<title level="a" type="main">Introducing the graph 500</title>
+		<author>
+			<persName><forename type="first">James</forename><surname>Alfred Ang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brian</forename><forename type="middle">W</forename><surname>Barrett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyle</forename><forename type="middle">Bruce</forename><surname>Wheeler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><forename type="middle">C</forename><surname>Murphy</surname></persName>
+		</author>
+		<ptr target="https://www.osti.gov/biblio/1014641" />
+	</analytic>
+	<monogr>
+		<title level="j">Cray User&apos;s Group (CUG)</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="page" from="45" to="74" />
+			<date type="published" when="2010-05">2010. 5 2010</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Data Prefetching by Dependence Graph Precomputation</title>
+		<author>
+			<persName><forename type="first">Murali</forename><surname>Annavaram</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jignesh</forename><forename type="middle">M</forename><surname>Patel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Edward</forename><forename type="middle">S</forename><surname>Davidson</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/379240.379251</idno>
+		<ptr target="https://doi.org/10.1145/379240.379251" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 28th Annual International Symposium on Computer Architecture</title>
+		<meeting>the 28th Annual International Symposium on Computer Architecture<address><addrLine>G?teborg, Sweden; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="52" to="61" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;01</note>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Exploring the Performance Limits of Simultaneous Multithreading for Memory Intensive Applications</title>
+		<author>
+			<persName><forename type="first">Evangelia</forename><surname>Athanasaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nikos</forename><surname>Anastopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kornilios</forename><surname>Kourtis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nectarios</forename><surname>Koziris</surname></persName>
+		</author>
+		<idno type="DOI">10.1007/s11227-007-0149-x</idno>
+		<ptr target="https://doi.org/10.1007/s11227-007-0149-x" />
+	</analytic>
+	<monogr>
+		<title level="j">Journal of Supercomputing</title>
+		<imprint>
+			<biblScope unit="volume">44</biblScope>
+			<biblScope unit="page" from="64" to="97" />
+			<date type="published" when="2008-04">2008. apr 2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">Classifying Memory Access Patterns for Prefetching</title>
+		<author>
+			<persName><forename type="first">Grant</forename><surname>Ayers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Heiner</forename><surname>Litz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Kozyrakis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378498</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378498" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Lausanne, Switzerland; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="513" to="526" />
+		</imprint>
+	</monogr>
+	<note>ASP-LOS &apos;20)</note>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">FlexVec: Auto-Vectorization for Irregular Loops</title>
+		<author>
+			<persName><forename type="first">Sara</forename><forename type="middle">S</forename><surname>Baghsorkhi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nalini</forename><surname>Vasudevan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Youfeng</forename><surname>Wu</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2908080.2908111</idno>
+		<ptr target="https://doi.org/10.1145/2908080.2908111" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 37th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+		<meeting>the 37th ACM SIGPLAN Conference on Programming Language Design and Implementation<address><addrLine>Santa Barbara, CA, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="697" to="710" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<monogr>
+		<title level="m" type="main">Bingo Spatial Data Prefetcher. In 2019 IEEE International Symposium on High Performance Computer Architecture (HPCA &apos;19)</title>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Bakhshalipour</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mehran</forename><surname>Shakerinava</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pejman</forename><surname>Lotfi-Kamran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hamid</forename><surname>Sarbazi-Azad</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2019.00053</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2019.00053" />
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<publisher>IEEE Computer Society</publisher>
+			<biblScope unit="page" from="399" to="411" />
+			<pubPlace>Los Alamitos, CA, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Beamer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krste</forename><surname>Asanovi?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Patterson</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1508.03619[cs.DC]</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">The GAP Benchmark Suite</note>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Hermes: Accelerating Long-Latency Load Requests via Perceptron-Based Off-Chip Load Prediction</title>
+		<author>
+			<persName><forename type="first">Rahul</forename><surname>Bera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Konstantinos</forename><surname>Kanellopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><surname>Shankar Balachandran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ataberk</forename><surname>Novo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Olgun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Sadrosadat</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Mutlu</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO56248.2022.00015</idno>
+		<ptr target="https://doi.org/10.1109/MICRO56248.2022.00015" />
+	</analytic>
+	<monogr>
+		<title level="m">2022 55th IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="page" from="1" to="18" />
+		</imprint>
+	</monogr>
+	<note>-55)</note>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<analytic>
+		<title level="a" type="main">Pythia: A Customizable Hardware Prefetching Framework Using Online Reinforcement Learning</title>
+		<author>
+			<persName><forename type="first">Rahul</forename><surname>Bera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Konstantinos</forename><surname>Kanellopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anant</forename><surname>Nori</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Taha</forename><surname>Shahroodi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sreenivas</forename><surname>Subramoney</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3466752.3480114</idno>
+		<ptr target="https://doi.org/10.1145/3466752.3480114" />
+	</analytic>
+	<monogr>
+		<title level="m">MICRO-54: 54th Annual IEEE/ACM International Symposium on Microarchitecture (Virtual Event, Greece) (MICRO &apos;21)</title>
+		<meeting><address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="1121" to="1137" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">DSPatch: Dual Spatial Pattern Prefetcher</title>
+		<author>
+			<persName><forename type="first">Rahul</forename><surname>Bera</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anant</forename><forename type="middle">V</forename><surname>Nori</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sreenivas</forename><surname>Subramoney</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3352460.3358325</idno>
+		<ptr target="https://doi.org/10.1145/3352460.3358325" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting>the 52nd Annual IEEE/ACM International Symposium on Microarchitecture<address><addrLine>Columbus, OH, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="531" to="544" />
+		</imprint>
+	</monogr>
+	<note>) (MICRO &apos;52)</note>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<analytic>
+		<title level="a" type="main">A faster algorithm for betweenness centrality</title>
+		<author>
+			<persName><forename type="first">Ulrik</forename><surname>Brandes</surname></persName>
+		</author>
+		<idno type="DOI">10.1080/0022250X.2001.9990249</idno>
+		<ptr target="https://doi.org/10.1080/0022250X.2001.9990249" />
+	</analytic>
+	<monogr>
+		<title level="j">The Journal of Mathematical Sociology</title>
+		<imprint>
+			<biblScope unit="volume">25</biblScope>
+			<biblScope unit="page" from="163" to="177" />
+			<date type="published" when="2001">2001. 2001</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<analytic>
+		<title level="a" type="main">Software Prefetching</title>
+		<author>
+			<persName><forename type="first">David</forename><surname>Callahan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ken</forename><surname>Kennedy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Allan</forename><surname>Porterfield</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/106972.106979</idno>
+		<ptr target="https://doi.org/10.1145/106972.106979" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fourth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Fourth International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Santa Clara, California, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="1991">1991</date>
+			<biblScope unit="page" from="40" to="52" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS IV)</note>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">An evaluation of high-level mechanistic core models</title>
+		<author>
+			<persName><forename type="first">Trevor</forename><forename type="middle">E</forename><surname>Carlson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wim</forename><surname>Heirman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stijn</forename><surname>Eyerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ibrahim</forename><surname>Hur</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2629677</idno>
+		<ptr target="https://doi.org/10.1145/2629677" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Architecture and Code Optimization</title>
+		<imprint>
+			<biblScope unit="volume">11</biblScope>
+			<biblScope unit="page">25</biblScope>
+			<date type="published" when="2014-08">2014. aug 2014</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<analytic>
+		<title level="a" type="main">Informed Prefetching for Indirect Memory Accesses</title>
+		<author>
+			<persName><forename type="first">Mustafa</forename><surname>Cavus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Resit</forename><surname>Sendag</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joshua</forename><forename type="middle">J</forename><surname>Yi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3374216</idno>
+		<ptr target="https://doi.org/10.1145/" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Architecture and Code Optimization</title>
+		<imprint>
+			<biblScope unit="volume">17</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page">29</biblScope>
+			<date type="published" when="2020-03">2020. mar 2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<analytic>
+		<title level="a" type="main">Simultaneous Subordinate Microthreading (SSMT)</title>
+		<author>
+			<persName><forename type="first">Robert</forename><forename type="middle">S</forename><surname>Chappell</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Stark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Sangwook</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><forename type="middle">K</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/300979.300995</idno>
+		<ptr target="https://doi.org/10.1145/300979.300995" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th Annual International Symposium on Computer Architecture</title>
+		<meeting>the 26th Annual International Symposium on Computer Architecture<address><addrLine>Atlanta, Georgia, USA; Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="1999">1999</date>
+			<biblScope unit="page" from="186" to="195" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;99)</note>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<analytic>
+		<title level="a" type="main">Improving Hash Join Performance through Prefetching</title>
+		<author>
+			<persName><forename type="first">Shimin</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anastassia</forename><surname>Ailamaki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Phillip</forename><forename type="middle">B</forename><surname>Gibbons</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todd</forename><forename type="middle">C</forename><surname>Mowry</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1272743.1272747</idno>
+		<ptr target="https://doi.org/10.1145/1272743.1272747" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Database Systems</title>
+		<imprint>
+			<biblScope unit="volume">32</biblScope>
+			<biblScope unit="page">17</biblScope>
+			<date type="published" when="2007-08">2007. aug 2007</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Reducing Memory Latency via Nonblocking and Prefetching Caches</title>
+		<author>
+			<persName><forename type="first">Tien-Fu</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jean-Loup</forename><surname>Baer</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/143365.143486</idno>
+		<ptr target="https://doi.org/10.1145/143365.143486" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Fifth International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Boston, Massachusetts, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="1992">1992</date>
+			<biblScope unit="page" from="51" to="61" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS V)</note>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<analytic>
+		<title level="a" type="main">Effective hardware-based data prefetching for high-performance processors</title>
+		<author>
+			<persName><forename type="first">Tien-Fu</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jean-Loup</forename><surname>Baer</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/12.381947</idno>
+		<ptr target="https://doi.org/10.1109/12.381947" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Trans. Comput</title>
+		<imprint>
+			<biblScope unit="volume">44</biblScope>
+			<biblScope unit="page" from="609" to="623" />
+			<date type="published" when="1995-05">1995. May 1995</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">A General Framework for Prefetch Scheduling in Linked Data Structures and Its Application to Multi-chain Prefetching</title>
+		<author>
+			<persName><forename type="first">Seungryul</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nicholas</forename><surname>Kohout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sumit</forename><surname>Pamnani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dongkeun</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Yeung</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/986533.986536</idno>
+		<ptr target="https://doi.org/10.1145/986533.986536" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Transactions on Computer Systems</title>
+		<imprint>
+			<biblScope unit="volume">22</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="214" to="280" />
+			<date type="published" when="2004-05">2004. may 2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<analytic>
+		<title level="a" type="main">Speculative Precomputation: Long-Range Prefetching of Delinquent Loads</title>
+		<author>
+			<persName><forename type="first">Jamison</forename><forename type="middle">D</forename><surname>Collins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hong</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dean</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><surname>Hughes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yong-Fong</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Lavery</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">P</forename><surname>Shen</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/379240.379248</idno>
+		<ptr target="https://doi.org/10.1145/379240.379248" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 28th Annual International Symposium on Computer Architecture</title>
+		<meeting>the 28th Annual International Symposium on Computer Architecture<address><addrLine>G?teborg, Sweden; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="14" to="25" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;01</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<analytic>
+		<title level="a" type="main">A Stateless, Content-directed Data Prefetching Mechanism</title>
+		<author>
+			<persName><forename type="first">Robert</forename><surname>Cooksey</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephan</forename><surname>Jourdan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dirk</forename><surname>Grunwald</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/605397.605427</idno>
+		<ptr target="https://doi.org/10.1145/605397.605427" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 10th International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the 10th International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>San Jose, California; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2002">2002</date>
+			<biblScope unit="page" from="279" to="290" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS X)</note>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">MLP-Aware Runahead Threads in a Simultaneous Multithreading Processor</title>
+		<author>
+			<persName><forename type="first">Kenzo</forename><surname>Van Craeynest</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stijn</forename><surname>Eyerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<idno type="DOI">10.1007/978-3-540-92990-1_10</idno>
+		<ptr target="https://doi.org/10.1007/978-3-540-92990-1_10" />
+	</analytic>
+	<monogr>
+		<title level="m">High Performance Embedded Architectures and Compilers, Fourth International Conference</title>
+		<title level="s">Lecture Notes in Computer Science</title>
+		<meeting><address><addrLine>HiPEAC; Paphos, Cyprus; Berlin Heidelberg, Berlin, Heidelberg</addrLine></address></meeting>
+		<imprint>
+			<publisher>Springer</publisher>
+			<date type="published" when="2009-01-25">2009. 2009. January 25-28, 2009</date>
+			<biblScope unit="volume">5409</biblScope>
+			<biblScope unit="page" from="110" to="124" />
+		</imprint>
+	</monogr>
+	<note>Proceedings</note>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<monogr>
+		<title level="m" type="main">Intel&apos;s Architecture Day 2018: The future of core, Intel gpus, 10nm, and hybrid x86</title>
+		<author>
+			<persName><surname>Dr</surname></persName>
+		</author>
+		<ptr target="https://www.anandtech.com/show/13699/intel-architecture-day-2018-core-future-hybrid-x86" />
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<publisher>Ian Cutress</publisher>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<analytic>
+		<title level="a" type="main">Improving Data Cache Performance by Pre-Executing Instructions under a Cache Miss</title>
+		<author>
+			<persName><forename type="first">James</forename><surname>Dundas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trevor</forename><surname>Mudge</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/263580.263597</idno>
+		<ptr target="https://doi.org/10.1145/263580.263597" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 11th International Conference on Supercomputing</title>
+		<meeting>the 11th International Conference on Supercomputing<address><addrLine>Vienna, Austria; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1997">1997</date>
+			<biblScope unit="page" from="68" to="75" />
+		</imprint>
+	</monogr>
+	<note>ICS &apos;97). Association for Computing Machinery</note>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<analytic>
+		<title level="a" type="main">Techniques for bandwidthefficient prefetching of linked data structures in hybrid prefetching systems</title>
+		<author>
+			<persName><forename type="first">Eiman</forename><surname>Ebrahimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2009.4798232</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2009.4798232" />
+	</analytic>
+	<monogr>
+		<title level="m">2009 IEEE 15th International Symposium on High Performance Computer Architecture</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2009">2009</date>
+			<biblScope unit="page" from="7" to="17" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Theoretical Improvements in Algorithmic Efficiency for Network Flow Problems</title>
+		<author>
+			<persName><forename type="first">Jack</forename><surname>Edmonds</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Richard</forename><forename type="middle">M</forename><surname>Karp</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/321694.321699</idno>
+		<ptr target="https://doi.org/10.1145/321694.321699" />
+	</analytic>
+	<monogr>
+		<title level="j">J. ACM</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="248" to="264" />
+			<date type="published" when="1972-04">1972. April 1972</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<monogr>
+		<title level="m" type="main">A Primer on Hardware Prefetching</title>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Thomas</forename><forename type="middle">F</forename><surname>Wenisch</surname></persName>
+		</author>
+		<idno type="DOI">10.1007/978-3-031-01743-8</idno>
+		<ptr target="https://doi.org/10.1007/978-3-031-01743-8" />
+		<imprint>
+			<date type="published" when="2014">2014</date>
+			<publisher>Springer</publisher>
+			<pubPlace>Cham, Cham, Switzerland</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<monogr>
+		<title level="m" type="main">Apple Announces The Apple Silicon M1: Ditching x86 -What to Expect</title>
+		<author>
+			<persName><forename type="first">Andrei</forename><surname>Frumusanu</surname></persName>
+		</author>
+		<ptr target="https://www.anandtech.com/show/16226/apple-silicon-m1-a14-deep-dive/2" />
+		<imprint>
+			<date type="published" when="2020">2020</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<monogr>
+		<author>
+			<persName><forename type="first">Andrei</forename><surname>Frumusanu</surname></persName>
+		</author>
+		<ptr target="https://www.anandtech.com/show/16463/snapdragon-888-vs-exynos-2100-galaxy-s21-ultra/3" />
+		<title level="m">The Snapdragon 888 vs The Exynos 2100: Cortex-X1 &amp; 5nm -Who Does It Better? AnandTech</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<analytic>
+		<title level="a" type="main">Efficient Emulation of Hardware Prefetchers via Event-Driven Helper Threading</title>
+		<author>
+			<persName><forename type="first">Ilya</forename><surname>Ganusov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Martin</forename><surname>Burtscher</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1152154.1152178</idno>
+		<ptr target="https://doi.org/10.1145/1152154.1152178" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 15th International Conference on Parallel Architectures and Compilation Techniques</title>
+		<meeting>the 15th International Conference on Parallel Architectures and Compilation Techniques<address><addrLine>Seattle, Washington, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="144" to="153" />
+		</imprint>
+	</monogr>
+	<note>PACT &apos;06)</note>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<analytic>
+		<title level="a" type="main">Opportunistic Early Pipeline Re-Steering for Data-Dependent Branches</title>
+		<author>
+			<persName><forename type="first">Saurabh</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Niranjan</forename><surname>Soundararajan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ragavendra</forename><surname>Natarajan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sreenivas</forename><surname>Subramoney</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3410463.3414628</idno>
+		<ptr target="https://doi.org/10.1145/3410463.3414628" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM International Conference on Parallel Architectures and Compilation Techniques (Virtual Event, GA, USA) (PACT &apos;20)</title>
+		<meeting>the ACM International Conference on Parallel Architectures and Compilation Techniques (Virtual Event, GA, USA) (PACT &apos;20)<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="305" to="316" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">DeSC: Decoupled Supply-compute Communication Management for Heterogeneous Architectures</title>
+		<author>
+			<persName><forename type="first">Jun</forename><surname>Tae</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Juan</forename><forename type="middle">L</forename><surname>Ham</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Margaret</forename><surname>Arag?n</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Martonosi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2830772.2830800</idno>
+		<idno>MICRO-48</idno>
+		<ptr target="https://doi.org/10.1145/2830772.2830800" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th International Symposium on Microarchitecture</title>
+		<meeting>the 48th International Symposium on Microarchitecture<address><addrLine>Waikiki, Hawaii; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="191" to="203" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Accelerating Dependent Cache Misses with an Enhanced Memory Controller</title>
+		<author>
+			<persName><forename type="first">Milad</forename><surname>Hashemi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Eiman</forename><surname>Khubaib</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Ebrahimi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2016.46</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2016.46" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 43rd International Symposium on Computer Architecture</title>
+		<meeting>the 43rd International Symposium on Computer Architecture<address><addrLine>Seoul, Republic; Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="444" to="455" />
+		</imprint>
+	</monogr>
+	<note>of Korea) (ISCA &apos;16)</note>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Continuous Runahead: Transparent Hardware Acceleration for Memory Intensive Workloads</title>
+		<author>
+			<persName><forename type="first">Milad</forename><surname>Hashemi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2016.7783764</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2016.7783764" />
+	</analytic>
+	<monogr>
+		<title level="m">The 49th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting><address><addrLine>Taipei, Taiwan; Los Alamitos, CA, USA, Article</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">61</biblScope>
+		</imprint>
+	</monogr>
+	<note>MICRO-49)</note>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Filtered Runahead Execution with a Runahead Buffer</title>
+		<author>
+			<persName><forename type="first">Milad</forename><surname>Hashemi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2830772.2830812</idno>
+		<idno>MICRO-48</idno>
+		<ptr target="https://doi.org/10.1145/2830772.2830812" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th International Symposium on Microarchitecture</title>
+		<meeting>the 48th International Symposium on Microarchitecture<address><addrLine>Waikiki, Hawaii; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="358" to="369" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<analytic>
+		<title level="a" type="main">Efficient Execution of Memory Access Phases Using Dataflow Specialization</title>
+		<author>
+			<persName><forename type="first">Chen-Han</forename><surname>Ho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sung</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jin</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Karthikeyan</forename><surname>Sankaralingam</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2749469.2750390</idno>
+		<ptr target="https://doi.org/10.1145/2749469.2750390" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 42nd Annual International Symposium on Computer Architecture</title>
+		<meeting>the 42nd Annual International Symposium on Computer Architecture<address><addrLine>Portland, Oregon; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="118" to="130" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;15)</note>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Linearizing Irregular Memory Accesses for Improved Correlated Prefetching</title>
+		<author>
+			<persName><forename type="first">Akanksha</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Calvin</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2540708.2540730</idno>
+		<ptr target="https://doi.org/10.1145/2540708.2540730" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting>the 46th Annual IEEE/ACM International Symposium on Microarchitecture<address><addrLine>Davis, California; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="247" to="259" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Prefetching Using Markov Predictors</title>
+		<author>
+			<persName><forename type="first">Doug</forename><surname>Joseph</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dirk</forename><surname>Grunwald</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/264107.264207</idno>
+		<ptr target="https://doi.org/10.1145/264107.264207" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th Annual International Symposium on Computer Architecture</title>
+		<meeting>the 24th Annual International Symposium on Computer Architecture<address><addrLine>Denver, Colorado, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="1997">1997</date>
+			<biblScope unit="page" from="252" to="263" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;97)</note>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Helper Thread Prefetching for Loosely-Coupled Multiprocessor Systems</title>
+		<author>
+			<persName><forename type="first">Changhee</forename><surname>Jung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daeseob</forename><surname>Lim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jaejin</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yan</forename><surname>Solihin</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/IPDPS.2006.1639375</idno>
+		<ptr target="https://doi.org/10.1109/IPDPS.2006.1639375" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 20th International Conference on Parallel and Distributed Processing</title>
+		<meeting>the 20th International Conference on Parallel and Distributed Processing<address><addrLine>Rhodes Island, Greece; Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page">10</biblScope>
+		</imprint>
+	</monogr>
+	<note>) (IPDPS&apos;06)</note>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Design and Evaluation of Compiler Algorithms for Pre-execution</title>
+		<author>
+			<persName><forename type="first">Dongkeun</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Yeung</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/605397.605415</idno>
+		<ptr target="https://doi.org/10.1145/605397.605415" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 10th International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the 10th International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>San Jose, California; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2002">2002</date>
+			<biblScope unit="page" from="159" to="170" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS X)</note>
+</biblStruct>
+
+<biblStruct xml:id="b45">
+	<analytic>
+		<title level="a" type="main">Path Confidence Based Lookahead Prefetching</title>
+		<author>
+			<persName><forename type="first">Jinchun</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Seth</forename><forename type="middle">H</forename><surname>Pugsley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Paul</forename><forename type="middle">V</forename><surname>Gratz</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">L</forename><surname>Narasimha Reddy</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Wilkerson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zeshan</forename><surname>Chishti</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO.2016.7783763</idno>
+		<ptr target="https://doi.org/10.1109/MICRO.2016.7783763" />
+	</analytic>
+	<monogr>
+		<title level="m">The 49th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting><address><addrLine>Taipei, Taiwan; Los Alamitos, CA, USA, Article</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="volume">60</biblScope>
+			<biblScope unit="page">12</biblScope>
+		</imprint>
+	</monogr>
+	<note>MICRO-49)</note>
+</biblStruct>
+
+<biblStruct xml:id="b46">
+	<analytic>
+		<title level="a" type="main">Asynchronous Memory Access Chaining</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Kocberber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+		<idno type="DOI">10.14778/2856318.2856321</idno>
+		<ptr target="https://doi.org/10.14778/2856318.2856321" />
+	</analytic>
+	<monogr>
+		<title level="m">Proc. VLDB Endow</title>
+		<meeting>VLDB Endow</meeting>
+		<imprint>
+			<date type="published" when="2015-12">2015. dec 2015</date>
+			<biblScope unit="volume">9</biblScope>
+			<biblScope unit="page" from="252" to="263" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b47">
+	<analytic>
+		<title level="a" type="main">Meet the Walkers: Accelerating Index Traversals for In-memory Databases</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Kocberber</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Boris</forename><surname>Grot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Javier</forename><surname>Picorel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Babak</forename><surname>Falsafi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Lim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2540708.2540748</idno>
+		<ptr target="https://doi.org/10.1145/2540708.2540748" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting>the 46th Annual IEEE/ACM International Symposium on Microarchitecture<address><addrLine>Davis, California; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="468" to="479" />
+		</imprint>
+	</monogr>
+	<note>MICRO-46)</note>
+</biblStruct>
+
+<biblStruct xml:id="b48">
+	<analytic>
+		<title level="a" type="main">Multi-Chain Prefetching: Effective Exploitation of Inter-Chain Memory Parallelism for Pointer-Chasing Codes</title>
+		<author>
+			<persName><forename type="first">Nicholas</forename><surname>Kohout</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Seungryul</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dongkeun</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Yeung</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PACT.2001.953307</idno>
+		<ptr target="https://doi.org/10.1109/PACT" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2001 International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;01)</title>
+		<meeting>the 2001 International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;01)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2001">2001. 2001</date>
+			<biblScope unit="page">953307</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b49">
+	<analytic>
+		<title level="a" type="main">SQRL: Hardware Accelerator for Collecting Software Data Structures</title>
+		<author>
+			<persName><forename type="first">Snehasish</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arrvindh</forename><surname>Shriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijayalakshmi</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jordon</forename><surname>Phillips</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2628071.2628118</idno>
+		<ptr target="https://doi.org/10.1145/2628071.2628118" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 23rd International Conference on Parallel Architectures and Compilation</title>
+		<meeting>the 23rd International Conference on Parallel Architectures and Compilation<address><addrLine>Edmonton, AB, Canada; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2014">2014</date>
+			<biblScope unit="page" from="475" to="476" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b50">
+	<analytic>
+		<title level="a" type="main">DASX: Hardware Accelerator for Software Data Structures</title>
+		<author>
+			<persName><forename type="first">Snehasish</forename><surname>Kumar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Naveen</forename><surname>Vedula</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Arrvindh</forename><surname>Shriraman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vijayalakshmi</forename><surname>Srinivasan</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2751205.2751231</idno>
+		<ptr target="https://doi.org/10.1145/2751205.2751231" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 29th ACM on International Conference on Supercomputing</title>
+		<meeting>the 29th ACM on International Conference on Supercomputing<address><addrLine>Newport Beach, California, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="361" to="372" />
+		</imprint>
+	</monogr>
+	<note>ICS &apos;15). Association for Computing Machinery</note>
+</biblStruct>
+
+<biblStruct xml:id="b51">
+	<analytic>
+		<title level="a" type="main">Exploiting Superword Level Parallelism with Multimedia Instruction Sets</title>
+		<author>
+			<persName><forename type="first">Samuel</forename><surname>Larsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saman</forename><surname>Amarasinghe</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/349299.349320</idno>
+		<ptr target="https://doi.org/10.1145/349299.349320" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the ACM SIG-PLAN 2000 Conference on Programming Language Design and Implementation</title>
+		<meeting>the ACM SIG-PLAN 2000 Conference on Programming Language Design and Implementation<address><addrLine>Vancouver, British Columbia, Canada; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2000">2000</date>
+			<biblScope unit="page" from="145" to="156" />
+		</imprint>
+	</monogr>
+	<note>PLDI &apos;00)</note>
+</biblStruct>
+
+<biblStruct xml:id="b52">
+	<analytic>
+		<title level="a" type="main">Multicore Performance Optimization Using Partner Cores</title>
+		<author>
+			<persName><forename type="first">Eric</forename><surname>Lau</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jason</forename><forename type="middle">E</forename><surname>Miller</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Inseok</forename><surname>Choi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Donald</forename><surname>Yeung</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Saman</forename><surname>Amarasinghe</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Anant</forename><surname>Agarwal</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">3rd USENIX Workshop on Hot Topics in Parallelism</title>
+		<imprint>
+			<publisher>USENIX</publisher>
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+	<note>HotPar 11</note>
+</biblStruct>
+
+<biblStruct xml:id="b53">
+	<monogr>
+		<title/>
+		<author>
+			<persName><forename type="first">Berkeley</forename><surname>Association</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Ca</surname></persName>
+		</author>
+		<ptr target="https://www.usenix.org/conference/hotpar11/multicore-performance-optimization-using-partner-cores" />
+		<imprint>
+			<biblScope unit="page" from="1" to="6" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b54">
+	<analytic>
+		<title level="a" type="main">NVIDIA Tesla: A Unified Graphics and Computing Architecture</title>
+		<author>
+			<persName><forename type="first">Erik</forename><surname>Lindholm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Nickolls</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stuart</forename><surname>Oberman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Montrym</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MM.2008.31</idno>
+		<ptr target="https://doi.org/10.1109/MM.2008.31" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">28</biblScope>
+			<biblScope unit="issue">2</biblScope>
+			<biblScope unit="page" from="39" to="55" />
+			<date type="published" when="2008-03">2008. March 2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b55">
+	<analytic>
+		<title level="a" type="main">A Compiler Framework for Extracting Superword Level Parallelism</title>
+		<author>
+			<persName><forename type="first">Jun</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuanrui</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ohyoung</forename><surname>Jang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Wei</forename><surname>Ding</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mahmut</forename><surname>Kandemir</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2254064.2254106</idno>
+		<ptr target="https://doi.org/10.1145/2254064.2254106" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 33rd ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+		<meeting>the 33rd ACM SIGPLAN Conference on Programming Language Design and Implementation<address><addrLine>Beijing, China; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2012">2012</date>
+			<biblScope unit="page" from="347" to="358" />
+		</imprint>
+	</monogr>
+	<note>PLDI &apos;12)</note>
+</biblStruct>
+
+<biblStruct xml:id="b56">
+	<analytic>
+		<title level="a" type="main">Livia: Data-Centric Computing Throughout the Memory Hierarchy</title>
+		<author>
+			<persName><forename type="first">Elliot</forename><surname>Lockerman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Axel</forename><surname>Feldmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mohammad</forename><surname>Bakhshalipour</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandru</forename><surname>Stanescu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Shashwat</forename><surname>Gupta</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Sanchez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nathan</forename><surname>Beckmann</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3373376.3378497</idno>
+		<ptr target="https://doi.org/10.1145/3373376.3378497" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Lausanne, Switzerland; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="417" to="433" />
+		</imprint>
+	</monogr>
+	<note>ASP-LOS &apos;20)</note>
+</biblStruct>
+
+<biblStruct xml:id="b57">
+	<analytic>
+		<title level="a" type="main">An Evaluation of Vectorizing Compilers</title>
+		<author>
+			<persName><forename type="first">Saeed</forename><surname>Maleki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yaoqing</forename><surname>Gao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Maria</forename><forename type="middle">J</forename><surname>Garzar?n</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tommy</forename><surname>Wong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">A</forename><surname>Padua</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PACT.2011.68</idno>
+		<ptr target="https://doi.org/10.1109/PACT.2011.68" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2011 International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;11)</title>
+		<meeting>the 2011 International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;11)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2011">2011</date>
+			<biblScope unit="page" from="372" to="382" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b58">
+	<monogr>
+		<title level="m" type="main">Best-offset hardware prefetching. In 2016 IEEE International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<author>
+			<persName><forename type="first">Pierre</forename><surname>Michaud</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2016.7446087</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2016.7446087" />
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<publisher>IEEE Computer Society</publisher>
+			<biblScope unit="page" from="469" to="480" />
+			<pubPlace>Los Alamitos, CA, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b59">
+	<analytic>
+		<title level="a" type="main">A Survey of Recent Prefetching Techniques for Processor Caches</title>
+		<author>
+			<persName><forename type="first">Sparsh</forename><surname>Mittal</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2907071</idno>
+		<ptr target="https://doi.org/10.1145/2907071" />
+	</analytic>
+	<monogr>
+		<title level="j">ACM Comput. Surv</title>
+		<imprint>
+			<biblScope unit="volume">49</biblScope>
+			<biblScope unit="page">35</biblScope>
+			<date type="published" when="2016-08">2016. aug 2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b60">
+	<analytic>
+		<title level="a" type="main">Slice-Processors: An Implementation of Operation-Based Prediction</title>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Moshovos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dionisios</forename><forename type="middle">N</forename><surname>Pnevmatikatos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Amirali</forename><surname>Baniasadi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/377792.377856</idno>
+		<ptr target="https://doi.org/10.1145/377792.377856" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 15th International Conference on Supercomputing</title>
+		<meeting>the 15th International Conference on Supercomputing<address><addrLine>Sorrento, Italy; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2001">2001</date>
+			<biblScope unit="page" from="321" to="334" />
+		</imprint>
+	</monogr>
+	<note>ICS &apos;01</note>
+</biblStruct>
+
+<biblStruct xml:id="b61">
+	<monogr>
+		<author>
+			<persName><forename type="first">Todd</forename><surname>Carl</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mowry</forename></persName>
+		</author>
+		<idno>No. GAX94-29983</idno>
+		<title level="m">Tolerating Latency through Software-Controlled Data Prefetching</title>
+		<meeting><address><addrLine>Stanford, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="1995">1995</date>
+		</imprint>
+		<respStmt>
+			<orgName>Ph. D. Dissertation. Stanford University, Computer Systems Laboratory</orgName>
+		</respStmt>
+	</monogr>
+	<note type="report_type">UMI Order</note>
+</biblStruct>
+
+<biblStruct xml:id="b62">
+	<analytic>
+		<title level="a" type="main">Techniques for Efficient Processing in Runahead Execution Engines</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA.2005.49</idno>
+		<ptr target="https://doi.org/10.1109/ISCA.2005.49" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 32nd Annual International Symposium on Computer Architecture (ISCA &apos;05)</title>
+		<meeting>the 32nd Annual International Symposium on Computer Architecture (ISCA &apos;05)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2005">2005</date>
+			<biblScope unit="page" from="370" to="381" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b63">
+	<analytic>
+		<title level="a" type="main">Address-Value Delta (AVD) Prediction: A Hardware Technique for Efficiently Parallelizing Dependent Cache Misses</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/TC.2006.191</idno>
+		<ptr target="https://doi.org/10.1109/TC.2006.191" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Trans. Comput</title>
+		<imprint>
+			<biblScope unit="volume">55</biblScope>
+			<biblScope unit="page" from="1491" to="1508" />
+			<date type="published" when="2006-12">2006. Dec 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b64">
+	<analytic>
+		<title level="a" type="main">Efficient Runahead Execution: Power-Efficient Memory Latency Tolerance</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MM.2006.10</idno>
+		<ptr target="https://doi.org/10.1109/MM.2006.10" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">26</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="10" to="20" />
+			<date type="published" when="2006-01">2006. Jan 2006</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b65">
+	<analytic>
+		<title level="a" type="main">On Reusing the Results of Pre-Executed Instructions in a Runahead Execution Processor</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hyesoon</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Stark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/L-CA.2005.1</idno>
+		<ptr target="https://doi.org/10.1109/L-CA.2005.1" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer Architecture Letters</title>
+		<imprint>
+			<biblScope unit="volume">4</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="2" to="2" />
+			<date type="published" when="2005-01">2005. Jan 2005</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b66">
+	<analytic>
+		<title level="a" type="main">Runahead execution: an alternative to very large instruction windows for out-of-order processors</title>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jared</forename><surname>Stark</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Wilkerson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><forename type="middle">N</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2003.1183532</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2003.1183532" />
+	</analytic>
+	<monogr>
+		<title level="m">The Ninth International Symposium on High-Performance Computer Architecture</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<date type="published" when="2003">2003. 2003</date>
+			<biblScope unit="page" from="129" to="140" />
+		</imprint>
+	</monogr>
+	<note>HPCA-9 2003</note>
+</biblStruct>
+
+<biblStruct xml:id="b67">
+	<analytic>
+		<title level="a" type="main">Vector Runahead</title>
+		<author>
+			<persName><forename type="first">Ajeya</forename><surname>Naithani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA52012.2021.00024</idno>
+		<ptr target="https://doi.org/10.1109/ISCA52012.2021.00024" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th Annual International Symposium on Computer Architecture (Virtual Event, Spain) (ISCA &apos;21)</title>
+		<meeting>the 48th Annual International Symposium on Computer Architecture (Virtual Event, Spain) (ISCA &apos;21)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="195" to="208" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b68">
+	<analytic>
+		<title level="a" type="main">Vector Runahead for Indirect Memory Accesses</title>
+		<author>
+			<persName><forename type="first">Ajeya</forename><surname>Naithani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MM.2022.3163132</idno>
+		<ptr target="https://doi.org/10.1109/MM.2022.3163132" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">42</biblScope>
+			<biblScope unit="page" from="116" to="123" />
+			<date type="published" when="2022-07">2022. jul 2022</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b69">
+	<analytic>
+		<title level="a" type="main">Precise Runahead Execution</title>
+		<author>
+			<persName><forename type="first">Ajeya</forename><surname>Naithani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josu?</forename><surname>Feliu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Almutaz</forename><surname>Adileh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/LCA.2019.2910518</idno>
+		<ptr target="https://doi.org/10.1109/LCA.2019.2910518" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Computer Architecture Letters</title>
+		<imprint>
+			<biblScope unit="volume">18</biblScope>
+			<biblScope unit="issue">1</biblScope>
+			<biblScope unit="page" from="71" to="74" />
+			<date type="published" when="2019-01">2019. Jan 2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b70">
+	<analytic>
+		<title level="a" type="main">Precise Runahead Execution</title>
+		<author>
+			<persName><forename type="first">Ajeya</forename><surname>Naithani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Josu?</forename><surname>Feliu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Almutaz</forename><surname>Adileh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lieven</forename><surname>Eeckhout</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA47549.2020.00040</idno>
+		<ptr target="https://doi.org/10.1109/HPCA47549.2020.00040" />
+	</analytic>
+	<monogr>
+		<title level="m">2020 IEEE International Symposium on High Performance Computer Architecture (HPCA)</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="397" to="410" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b71">
+	<analytic>
+		<title level="a" type="main">Berti: an Accurate Local-Delta Data Prefetcher</title>
+		<author>
+			<persName><forename type="first">Agust?n</forename><surname>Navarro-Torres</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Biswabandan</forename><surname>Panda</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jes?s</forename><surname>Alastruey-Bened?</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Pablo</forename><surname>Ib??ez</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO56248.2022.00072</idno>
+		<ptr target="https://doi.org/10.1109/MICRO56248.2022.00072" />
+	</analytic>
+	<monogr>
+		<title level="m">2022 55th IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2022">2022</date>
+			<biblScope unit="page" from="975" to="991" />
+		</imprint>
+	</monogr>
+	<note>-55)</note>
+</biblStruct>
+
+<biblStruct xml:id="b72">
+	<analytic>
+		<title level="a" type="main">Data Cache Prefetching Using a Global History Buffer</title>
+		<author>
+			<persName><forename type="first">Kyle</forename><forename type="middle">J</forename><surname>Nesbit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">James</forename><forename type="middle">E</forename><surname>Smith</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2004.10030</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2004.10030" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 10th International Symposium on High Performance Computer Architecture (HPCA &apos;04)</title>
+		<meeting>the 10th International Symposium on High Performance Computer Architecture (HPCA &apos;04)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page">96</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b73">
+	<analytic>
+		<title level="a" type="main">Pipette: Improving Core Utilization on Irregular Applications through Intra-Core Pipeline Parallelism</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Quan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Daniel</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Sanchez</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO50266.2020.00056</idno>
+		<ptr target="https://doi.org/10.1109/MICRO50266.2020.00056" />
+	</analytic>
+	<monogr>
+		<title level="m">2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="596" to="608" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b74">
+	<analytic>
+		<title level="a" type="main">Auto-Vectorization of Interleaved Data for SIMD</title>
+		<author>
+			<persName><forename type="first">Dorit</forename><surname>Nuzman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ira</forename><surname>Rosen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ayal</forename><surname>Zaks</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1133981.1133997</idno>
+		<ptr target="https://doi.org/10.1145/1133981.1133997" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 27th ACM SIGPLAN Conference on Programming Language Design and Implementation</title>
+		<meeting>the 27th ACM SIGPLAN Conference on Programming Language Design and Implementation<address><addrLine>Ottawa, Ontario, Canada; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2006">2006</date>
+			<biblScope unit="page" from="132" to="143" />
+		</imprint>
+	</monogr>
+	<note>PLDI &apos;06)</note>
+</biblStruct>
+
+<biblStruct xml:id="b75">
+	<analytic>
+		<title level="a" type="main">Bouquet of Instruction Pointers: Instruction Pointer Classifier-based Spatial Hardware Prefetching</title>
+		<author>
+			<persName><forename type="first">Samuel</forename><surname>Pakalapati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Biswabandan</forename><surname>Panda</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA45697.2020.00021</idno>
+		<ptr target="https://doi.org/10.1109/ISCA45697.2020.00021" />
+	</analytic>
+	<monogr>
+		<title level="m">2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA)</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="118" to="131" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b76">
+	<analytic>
+		<title level="a" type="main">Throttling Automatic Vectorization: When Less is More</title>
+		<author>
+			<persName><forename type="first">Vasileios</forename><surname>Porpodas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PACT.2015.32</idno>
+		<ptr target="https://doi.org/10.1109/PACT.2015.32" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2015 International Conference on Parallel Architecture and Compilation (PACT) (PACT &apos;15)</title>
+		<meeting>the 2015 International Conference on Parallel Architecture and Compilation (PACT) (PACT &apos;15)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="432" to="444" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b77">
+	<analytic>
+		<title level="a" type="main">PSLP: Padded SLP Automatic Vectorization</title>
+		<author>
+			<persName><forename type="first">Vasileios</forename><surname>Porpodas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alberto</forename><surname>Magni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/CGO.2015.7054199</idno>
+		<ptr target="https://doi.org/10.1109/CGO.2015.7054199" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 13th Annual IEEE/ACM International Symposium on Code Generation and Optimization</title>
+		<meeting>the 13th Annual IEEE/ACM International Symposium on Code Generation and Optimization<address><addrLine>San Francisco, California; Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="190" to="201" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b78">
+	<analytic>
+		<title level="a" type="main">Branch Runahead: An Alternative to Branch Prediction for Impossible to Predict Branches</title>
+		<author>
+			<persName><forename type="first">Stephen</forename><surname>Pruett</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yale</forename><surname>Patt</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3466752.3480053</idno>
+		<ptr target="https://doi.org/10.1145/3466752.3480053" />
+	</analytic>
+	<monogr>
+		<title level="m">MICRO-54: 54th Annual IEEE/ACM International Symposium on Microarchitecture (Virtual Event, Greece) (MICRO &apos;21)</title>
+		<meeting><address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="804" to="815" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b79">
+	<analytic>
+		<title level="a" type="main">Efficient Runahead Threads</title>
+		<author>
+			<persName><forename type="first">Tanaus?</forename><surname>Ram?rez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Pajuelo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jesus</forename><surname>Oliverio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Onur</forename><surname>Santana</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mateo</forename><surname>Mutlu</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Valero</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/1854273.1854328</idno>
+		<ptr target="https://doi.org/10.1145/1854273.1854328" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 19th International Conference on Parallel Architectures and Compilation Techniques</title>
+		<meeting>the 19th International Conference on Parallel Architectures and Compilation Techniques<address><addrLine>Vienna, Austria; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="443" to="452" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b80">
+	<analytic>
+		<title level="a" type="main">Runahead Threads to improve SMT performance</title>
+		<author>
+			<persName><forename type="first">Tanaus?</forename><surname>Ram?rez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alex</forename><surname>Pajuelo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jesus</forename><surname>Oliverio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Mateo</forename><surname>Santana</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Valero</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA.2008.4658635</idno>
+		<ptr target="https://doi.org/10.1109/HPCA.2008.4658635" />
+	</analytic>
+	<monogr>
+		<title level="m">2008 IEEE 14th International Symposium on High Performance Computer Architecture</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2008">2008</date>
+			<biblScope unit="page" from="149" to="158" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b81">
+	<analytic>
+		<title level="a" type="main">Decoupled Software Pipelining with the Synchronization Array</title>
+		<author>
+			<persName><forename type="first">Ram</forename><surname>Rangan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Neil</forename><surname>Vachharajani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Manish</forename><surname>Vachharajani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">I</forename><surname>August</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PACT.2004.1342552</idno>
+		<ptr target="https://doi.org/10.1109/PACT.2004.1342552" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 13th International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;04)</title>
+		<meeting>the 13th International Conference on Parallel Architectures and Compilation Techniques (PACT &apos;04)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2004">2004</date>
+			<biblScope unit="page" from="177" to="188" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b82">
+	<analytic>
+		<title level="a" type="main">Dependence Based Prefetching for Linked Data Structures</title>
+		<author>
+			<persName><forename type="first">Amir</forename><surname>Roth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Andreas</forename><surname>Moshovos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Gurindar</forename><forename type="middle">S</forename><surname>Sohi</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/291069.291034</idno>
+		<ptr target="https://doi.org/10.1145/291069.291034" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Eighth International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Eighth International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>San Jose, California, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="1998">1998</date>
+			<biblScope unit="page" from="115" to="126" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS VIII)</note>
+</biblStruct>
+
+<biblStruct xml:id="b83">
+	<analytic>
+		<title level="a" type="main">TAGE-SC-L Branch Predictors Again. In 5th JILP Workshop on Computer Architecture Competitions (JWAC-5): Championship Branch Prediction (CBP-5) (Seoul, South Korea)</title>
+		<author>
+			<persName><forename type="first">Andr?</forename><surname>Seznec</surname></persName>
+		</author>
+		<ptr target="https://inria.hal.science/hal-01354253" />
+	</analytic>
+	<monogr>
+		<title level="j">INRIA HAL, rennes France</title>
+		<imprint>
+			<biblScope unit="page" from="1" to="4" />
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b84">
+	<analytic>
+		<title level="a" type="main">Efficiently Prefetching Complex Address Patterns</title>
+		<author>
+			<persName><forename type="first">Manjunath</forename><surname>Shevgoor</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Sahil</forename><surname>Koladiya</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Rajeev</forename><surname>Balasubramonian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Chris</forename><surname>Wilkerson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Seth</forename><forename type="middle">H</forename><surname>Pugsley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Zeshan</forename><surname>Chishti</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2830772.2830793</idno>
+		<idno>MICRO-48</idno>
+		<ptr target="https://doi.org/10.1145/2830772.2830793" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th International Symposium on Microarchitecture</title>
+		<meeting>the 48th International Symposium on Microarchitecture<address><addrLine>Waikiki, Hawaii; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="141" to="152" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b85">
+	<analytic>
+		<title level="a" type="main">A Hierarchical Neural Model of Data Prefetching</title>
+		<author>
+			<persName><forename type="first">Zhan</forename><surname>Shi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akanksha</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kevin</forename><surname>Swersky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Milad</forename><surname>Hashemi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Parthasarathy</forename><surname>Ranganathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Calvin</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3445814.3446752</idno>
+		<ptr target="https://doi.org/10.1145/3445814.3446752" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Virtual, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="861" to="873" />
+		</imprint>
+	</monogr>
+	<note>ASP-LOS &apos;21)</note>
+</biblStruct>
+
+<biblStruct xml:id="b86">
+	<analytic>
+		<title level="a" type="main">Speculative Vectorisation with Selective Replay</title>
+		<author>
+			<persName><forename type="first">Peng</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Giacomo</forename><surname>Gabrielli</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename><forename type="middle">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/ISCA52012.2021.00026</idno>
+		<ptr target="https://doi.org/10.1109/ISCA52012.2021.00026" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th Annual International Symposium on Computer Architecture (Virtual Event, Spain) (ISCA &apos;21)</title>
+		<meeting>the 48th Annual International Symposium on Computer Architecture (Virtual Event, Spain) (ISCA &apos;21)<address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="223" to="236" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b87">
+	<analytic>
+		<title level="a" type="main">A Hardware Prefetching Mechanism for Vector Gather Instructions</title>
+		<author>
+			<persName><forename type="first">Hikaru</forename><surname>Takayashiki</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Masayuki</forename><surname>Sato</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kazuhiko</forename><surname>Komatsu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hiroaki</forename><surname>Kobayashi</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/IA349570.2019.00015</idno>
+		<ptr target="https://doi.org/10.1109/IA349570.2019.00015" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE/ACM 9th Workshop on Irregular Applications: Architectures and Algorithms</title>
+		<imprint>
+			<biblScope unit="issue">IA3</biblScope>
+			<biblScope unit="page" from="59" to="66" />
+			<date type="published" when="2019">2019. 2019</date>
+			<publisher>IEEE Computer Society</publisher>
+			<pubPlace>Los Alamitos, CA, USA</pubPlace>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b88">
+	<analytic>
+		<title level="a" type="main">Prodigy: Improving the Memory Latency of Data-Indirect Irregular Workloads Using Hardware-Software Co-Design</title>
+		<author>
+			<persName><forename type="first">Nishil</forename><surname>Talati</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kyle</forename><surname>May</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Armand</forename><surname>Behroozi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yichen</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kuba</forename><surname>Kaszyk</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christos</forename><surname>Vasiladiotis</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Tarunesh</forename><surname>Verma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Lu</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Brandon</forename><surname>Nguyen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jiawen</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Magnus Morton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Agreen</forename><surname>Ahmadi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Todd</forename><surname>Austin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O'</forename><surname>Michael</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Scott</forename><surname>Boyle</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trevor</forename><surname>Mahlke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ronald</forename><surname>Mudge</surname></persName>
+		</author>
+		<author>
+			<persName><surname>Dreslinski</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/HPCA51647.2021.00061</idno>
+		<ptr target="https://doi.org/10.1109/HPCA51647.2021.00061" />
+	</analytic>
+	<monogr>
+		<title level="m">2021 IEEE International Symposium on High-Performance Computer Architecture. Proceedings -International Symposium on High-Performance Computer Architecture 2021-February</title>
+		<imprint>
+			<date type="published" when="2021">2021</date>
+			<biblScope unit="page" from="654" to="667" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b89">
+	<analytic>
+		<title level="a" type="main">Software prefetching for indirect memory accesses</title>
+		<author>
+			<persName><forename type="first">Sam</forename><surname>Ainsworth</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Timothy</forename></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Jones</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/CGO.2017.7863749</idno>
+		<ptr target="https://doi.org/10.1109/CGO.2017.7863749" />
+	</analytic>
+	<monogr>
+		<title level="m">CGO 2017 -Proceedings of the 2017 International Symposium on Code Generation and Optimization</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="305" to="317" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b90">
+	<analytic>
+		<title level="a" type="main">Clairvoyance: Look-Ahead Compile-Time Scheduling</title>
+		<author>
+			<persName><forename type="first">Kim-Anh</forename><surname>Tran</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Trevor</forename><forename type="middle">E</forename><surname>Carlson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Konstantinos</forename><surname>Koukos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Magnus</forename><surname>Sj?lander</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Vasileios</forename><surname>Spiliopoulos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stefanos</forename><surname>Kaxiras</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alexandra</forename><surname>Jimborean</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/CGO.2017.7863738</idno>
+		<ptr target="https://doi.org/10.1109/CGO.2017.7863738" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 2017 International Symposium on Code Generation and Optimization</title>
+		<meeting>the 2017 International Symposium on Code Generation and Optimization<address><addrLine>Austin, USA; Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="171" to="184" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b91">
+	<analytic>
+		<title level="a" type="main">Simultaneous Multithreading: Maximizing on-Chip Parallelism</title>
+		<author>
+			<persName><forename type="first">Dean</forename><forename type="middle">M</forename><surname>Tullsen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Susan</forename><forename type="middle">J</forename><surname>Eggers</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Henry</forename><forename type="middle">M</forename><surname>Levy</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/223982.224449</idno>
+		<ptr target="https://doi.org/10.1145/223982.224449" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 22nd Annual International Symposium on Computer Architecture (S. Margherita Ligure, Italy) (ISCA &apos;95)</title>
+		<meeting>the 22nd Annual International Symposium on Computer Architecture (S. Margherita Ligure, Italy) (ISCA &apos;95)<address><addrLine>New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="1995">1995</date>
+			<biblScope unit="page" from="392" to="403" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b92">
+	<analytic>
+		<title level="a" type="main">Speculative Decoupled Software Pipelining</title>
+		<author>
+			<persName><forename type="first">Neil</forename><surname>Vachharajani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Ram</forename><surname>Rangan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Easwaran</forename><surname>Raman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Matthew</forename><forename type="middle">J</forename><surname>Bridges</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Guilherme</forename><surname>Ottoni</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">David</forename><forename type="middle">I</forename><surname>August</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/PACT.2007.66</idno>
+		<ptr target="https://doi.org/10.1109/PACT.2007.66" />
+	</analytic>
+	<monogr>
+		<title level="m">2007 16th International Conference on Parallel Architectures and Compilation Techniques</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2007">2007</date>
+			<biblScope unit="page" from="49" to="59" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b93">
+	<analytic>
+		<title level="a" type="main">Helper Threads via Virtual Multithreading</title>
+		<author>
+			<persName><forename type="first">Perry</forename><forename type="middle">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Jamison</forename><forename type="middle">D</forename><surname>Collins</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Hong</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dongkeun</forename><surname>Kim</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Bill</forename><surname>Greene</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kai-Ming</forename><surname>Chan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Aamir</forename><forename type="middle">B</forename><surname>Yunus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Terry</forename><surname>Sych</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Stephen</forename><forename type="middle">F</forename><surname>Moore</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><forename type="middle">P</forename><surname>Shen</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MM.2004.75</idno>
+		<ptr target="https://doi.org/10.1109/MM.2004.75" />
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Micro</title>
+		<imprint>
+			<biblScope unit="volume">24</biblScope>
+			<biblScope unit="issue">6</biblScope>
+			<biblScope unit="page" from="74" to="82" />
+			<date type="published" when="2004-11">2004. nov 2004</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b94">
+	<analytic>
+		<title level="a" type="main">Guided Region Prefetching: A Cooperative Hardware/Software Approach</title>
+		<author>
+			<persName><forename type="first">Zhenlin</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Doug</forename><surname>Burger</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Kathryn</forename><forename type="middle">S</forename><surname>Mckinley</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Steven</forename><forename type="middle">K</forename><surname>Reinhardt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Charles</forename><forename type="middle">C</forename><surname>Weems</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/859618.859663</idno>
+		<ptr target="https://doi.org/10.1145/859618.859663" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 30th Annual International Symposium on Computer Architecture</title>
+		<meeting>the 30th Annual International Symposium on Computer Architecture<address><addrLine>San Diego, California; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2003">2003</date>
+			<biblScope unit="page" from="388" to="398" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;03)</note>
+</biblStruct>
+
+<biblStruct xml:id="b95">
+	<analytic>
+		<title level="a" type="main">Temporal Prefetching Without the Off-Chip Metadata</title>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krishnendra</forename><surname>Nathella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Joseph</forename><surname>Pusdesris</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dam</forename><surname>Sunwoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akanksha</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Calvin</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3352460.3358300</idno>
+		<ptr target="https://doi.org/10.1145/3352460.3358300" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture</title>
+		<meeting>the 52nd Annual IEEE/ACM International Symposium on Microarchitecture<address><addrLine>Columbus, OH, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="996" to="1008" />
+		</imprint>
+	</monogr>
+	<note>) (MICRO &apos;52)</note>
+</biblStruct>
+
+<biblStruct xml:id="b96">
+	<analytic>
+		<title level="a" type="main">Efficient Metadata Management for Irregular Data Prefetching</title>
+		<author>
+			<persName><forename type="first">Hao</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Krishnendra</forename><surname>Nathella</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Dam</forename><surname>Sunwoo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Akanksha</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Calvin</forename><surname>Lin</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3307650.3322225</idno>
+		<ptr target="https://doi.org/10.1145/3307650.3322225" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 46th International Symposium on Computer Architecture</title>
+		<meeting>the 46th International Symposium on Computer Architecture<address><addrLine>Phoenix, Arizona; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="449" to="461" />
+		</imprint>
+	</monogr>
+	<note>ISCA &apos;19)</note>
+</biblStruct>
+
+<biblStruct xml:id="b97">
+	<analytic>
+		<title level="a" type="main">A Programmable Memory Hierarchy for Prefetching Linked Data Structures</title>
+		<author>
+			<persName><forename type="first">Chia-Lin</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Alvin</forename><forename type="middle">R</forename><surname>Lebeck</surname></persName>
+		</author>
+		<idno type="DOI">10.1007/3-540-47847-7_15</idno>
+		<ptr target="https://doi.org/10.1007/3-540-47847-7_15" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 4th International Symposium on High Performance Computing (ISHPC &apos;02)</title>
+		<meeting>the 4th International Symposium on High Performance Computing (ISHPC &apos;02)<address><addrLine>Berlin, Heidelberg</addrLine></address></meeting>
+		<imprint>
+			<publisher>Springer-Verlag</publisher>
+			<date type="published" when="2002">2002</date>
+			<biblScope unit="page" from="160" to="174" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b98">
+	<analytic>
+		<title level="a" type="main">IMP: Indirect Memory Prefetcher</title>
+		<author>
+			<persName><forename type="first">Xiangyao</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Christopher</forename><forename type="middle">J</forename><surname>Hughes</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Nadathur</forename><surname>Satish</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Srinivas</forename><surname>Devadas</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/2830772.2830807</idno>
+		<ptr target="https://doi.org/10.1145/2830772.2830807" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 48th International Symposium on Microarchitecture</title>
+		<meeting>the 48th International Symposium on Microarchitecture<address><addrLine>Waikiki, Hawaii; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2015">2015</date>
+			<biblScope unit="page" from="178" to="190" />
+		</imprint>
+	</monogr>
+	<note>MICRO-48)</note>
+</biblStruct>
+
+<biblStruct xml:id="b99">
+	<analytic>
+		<title level="a" type="main">RnR: A Software-Assisted Record-and-Replay Hardware Prefetcher</title>
+		<author>
+			<persName><forename type="first">Chao</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Yuan</forename><surname>Zeng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">John</forename><surname>Shalf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaochen</forename><surname>Guo</surname></persName>
+		</author>
+		<idno type="DOI">10.1109/MICRO50266.2020.00057</idno>
+		<ptr target="https://doi.org/10.1109/MICRO50266.2020.00057" />
+	</analytic>
+	<monogr>
+		<title level="m">2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)</title>
+		<meeting><address><addrLine>Los Alamitos, CA, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>IEEE Computer Society</publisher>
+			<date type="published" when="2020">2020</date>
+			<biblScope unit="page" from="609" to="621" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b100">
+	<analytic>
+		<title level="a" type="main">Minnow: Lightweight Offload Engines for Worklist Management and Worklist-Directed Prefetching</title>
+		<author>
+			<persName><forename type="first">Dan</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Xiaoyu</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Michael</forename><surname>Thomson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Derek</forename><surname>Chiou</surname></persName>
+		</author>
+		<idno type="DOI">10.1145/3173162.3173197</idno>
+		<ptr target="https://doi.org/10.1145/3173162.3173197" />
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twenty-Third International Conference on Architectural Support for Programming Languages and Operating Systems</title>
+		<meeting>the Twenty-Third International Conference on Architectural Support for Programming Languages and Operating Systems<address><addrLine>Williamsburg, VA, USA; New York, NY, USA</addrLine></address></meeting>
+		<imprint>
+			<publisher>Association for Computing Machinery</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="593" to="607" />
+		</imprint>
+	</monogr>
+	<note>ASPLOS &apos;18)</note>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>

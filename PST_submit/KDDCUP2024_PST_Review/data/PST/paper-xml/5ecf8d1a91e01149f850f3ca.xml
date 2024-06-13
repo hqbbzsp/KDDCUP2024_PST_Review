@@ -1,0 +1,1319 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xml:space="preserve" xmlns="http://www.tei-c.org/ns/1.0" 
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+xsi:schemaLocation="http://www.tei-c.org/ns/1.0 https://raw.githubusercontent.com/kermitt2/grobid/master/grobid-home/schemas/xsd/Grobid.xsd"
+ xmlns:xlink="http://www.w3.org/1999/xlink">
+	<teiHeader xml:lang="en">
+		<fileDesc>
+			<titleStmt>
+				<title level="a" type="main">Contrastive Learning for Debiased Candidate Generation at Scale</title>
+			</titleStmt>
+			<publicationStmt>
+				<publisher/>
+				<availability status="unknown"><licence/></availability>
+				<date type="published" when="2020-06-02">2 Jun 2020</date>
+			</publicationStmt>
+			<sourceDesc>
+				<biblStruct>
+					<analytic>
+						<author>
+							<persName><forename type="first">Chang</forename><surname>Zhou</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Alibaba Group</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jianxin</forename><surname>Ma</surname></persName>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Alibaba Group</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jianwei</forename><surname>Zhang</surname></persName>
+							<email>zhangjianwei.zjw@alibaba-inc.com</email>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Alibaba Group</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Jingren</forename><surname>Zhou</surname></persName>
+							<email>jingren.zhou@alibaba-inc.com</email>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Alibaba Group</orgName>
+							</affiliation>
+						</author>
+						<author>
+							<persName><forename type="first">Hongxia</forename><surname>Yang</surname></persName>
+							<email>yang.yhx@alibaba-inc.com</email>
+							<affiliation key="aff0">
+								<orgName type="laboratory">Alibaba Group</orgName>
+							</affiliation>
+						</author>
+						<title level="a" type="main">Contrastive Learning for Debiased Candidate Generation at Scale</title>
+					</analytic>
+					<monogr>
+						<imprint>
+							<date type="published" when="2020-06-02">2 Jun 2020</date>
+						</imprint>
+					</monogr>
+					<idno type="arXiv">arXiv:2005.12964v3[cs.IR]</idno>
+				</biblStruct>
+			</sourceDesc>
+		</fileDesc>
+		<encodingDesc>
+			<appInfo>
+				<application version="0.7.2" ident="GROBID" when="2022-12-25T14:19+0000">
+					<desc>GROBID - A machine learning software for extracting information from scholarly documents</desc>
+					<ref target="https://github.com/kermitt2/grobid"/>
+				</application>
+			</appInfo>
+		</encodingDesc>
+		<profileDesc>
+			<abstract>
+<div xmlns="http://www.tei-c.org/ns/1.0"><p>Deep candidate generation (DCG), which narrows down the enormous corpus to a few hundred candidate items via representation learning, is integral to industrial recommender systems <ref type="bibr" target="#b9">[10]</ref>. Standard approaches adopt maximum likelihood estimation (MLE) and rely on sampling to ensure scalability, which reduces DCG to a task similar to language modeling. However, live recommender systems face severe unfairness of exposure with a corpus several orders of magnitude larger than that of natural language, which implies that (1) MLE will preserve and even exacerbate the exposure bias in the long run, as it aims to faithfully fit the history records, and (2) suboptimal sampling and inadequate use of item features can lead to inferior representations for the items that are unfairly ignored. In this paper, we introduce CLRec, a C ontrastive Learning paradigm successfully deployed in a real-world massive REC ommender system, for alleviating exposure unfairness in DCG. We theoretically prove that a popular choice of contrastive loss is equivalent to reducing the exposure bias via inverse propensity scoring, which complements previous understanding of contrastive learning. We further implement an effective sampling distribution and reuse most of the computation when encoding rich features for both positive and negative items, by employing a fix-sized queue to store items (and reuse the computed representations) from previous batches, where the queue serves as the negative sampler. Extensive offline analyses and four-month online A/B tests demonstrate substantial improvement, including a dramatic reduction in the Matthew effect. * Equal contribution.</p></div>
+			</abstract>
+		</profileDesc>
+	</teiHeader>
+	<text xml:lang="en">
+		<body>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="1">Introduction</head><p>Large-scale industrial recommender systems adopt a multi-stage pipeline, where the first stage, namely candidate generation, is responsible for instantly retrieving from an extremely large corpus a few hundred candidate items that are likely relevant to the user. Deep candidate generation (DCG) <ref type="bibr" target="#b9">[10]</ref>, a paradigm that learns vector representations of both users and items to enable fast k-nearest neighbor retrieval <ref type="bibr" target="#b20">[21]</ref>, has become an integral part of many live industrial systems, thanks to its enhanced expressiveness and improved flexibility compared to the traditional collaborative filtering techniques.</p><p>Typical large-scale DCG models <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b11">12,</ref><ref type="bibr" target="#b43">44,</ref><ref type="bibr" target="#b23">24]</ref> regard the problem of finding the most relevant items to the users as estimating one categorical distribution over all items for each user, conditioned on the user's past clicks. Maximum likelihood estimation (MLE) is the conventional principle for training such models. Apparently, exact computation of the log likelihood, which requires computing softmax over millions or even billions of items, is computationally infeasible. Sampling is thus crucial to DCG, and empirically sampled-softmax <ref type="bibr" target="#b3">[4]</ref> usually outperforms binary-cross-entropy based approximations such as NCE <ref type="bibr" target="#b12">[13]</ref> and negative sampling <ref type="bibr" target="#b27">[28]</ref> especially in large-scale settings <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b23">24]</ref>.</p><p>However, the MLE paradigm and the sampling strategies mainly stem from the language modeling community, where the primary goal is to faithfully fit the observed texts. Indeed, live recommender systems are different from natural language texts. 1) The training data for DCG are collected under the previous systems, which are far from optimal and introduce severe exposure bias. In particular, many high-quality items can be under-recommended and faithfully fitting the data will lead to unfairness towards them. 2) The number of items is far larger than that of words, e.g. ≈ 100M items in our system compared to ≈ 100k words, and items have complex features such as texts and images. Many items may never be sampled in an epoch. And encoding complex features for the negative samples is expensive since the number of negative samples need be large, e.g. &gt; 1k negative samples for each positive one, even though rich features benefit the under-recommended items.</p><p>In this paper, we introduce CLRec, a practical C ontrastive Learning framework for debiased DCG in REC ommender systems. We establish the theoretical connection between contrastive learning and inverse propensity weighting, where the latter is a well-studied technique for bias reduction <ref type="bibr" target="#b37">[38]</ref>. Our theoretical result complements the previous understanding of contrastive learning which are mainly from informationtheoretic or geometric perspectives. We then present an easy-to-implement efficient framework for practically reducing the exposure bias of a large-scale system. In particular, our implementation maintains a fix-sized first-in first-out (FIFO) queue to accumulate positive samples and their representations from the previous batches, and use the content of the queue to serve as the negative samples, which are to be discriminated from the positive samples of the next batch. It guarantees all items will be sampled sometime in an epoch to serve as the negative examples. More importantly, it allows us to reuse the computed results from the previous batches, e.g., it saves 90% computations when the queue size is 10× of the batch size. As a result, we can afford to encode complex features for the negative samples even when the number of negative samples (= the queue size) are very large, which improves the quality of the learned representations for the under-recommended items.</p><p>CLRec has been fully deployed into our live system to serve billions of page views each day since January 2020. We observe that CLRec is capable of recommending high-quality items that are largely neglected by the previous systems, and it consistently outperforms the previous state-or-art baselines regarding the online recommendation performance.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2">The Proposed Framework</head><p>In this section, we prove the connection between contrastive learning and inverse propensity weighting (IPW), based on which we propose a practical framework for bias reduction in large-scale DCG.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.1">Problem Formulation</head><p>Notations We are given a dataset of user clicks D = {(x u,t , y u,t ) : u = 1, 2, . . . , N ∧ t = 1, 2, . . . , T u }, where x u,t = {y u,1 , y u,2 , . . . , y u,t−1 } represents a user's clicks prior to the t th click y u,t , and T u represents the number of clicks made by the user. We will drop the sub-scripts occasionally and write (x, y) in place of (x u,t , y u,t ) for convenience. We use X to refer to the set of all possible click sequences, i.e. x ∈ X . Each y ∈ Y represents a clicked item, which includes various types of features associated with the item, while Y is the set of all possible items. The features of y could be in any form, e.g., the item's unique identifier number, embeddings or raw data of its image and text description. The number of items |Y| easily reaches 100 million in large live systems.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Deep Candidate Generation</head><p>The deep candidate generation paradigm involves learning a user behavior encoder f θ (x) ∈ R d and an item encoder g θ (y) ∈ R d . It then takes {g θ (y)} y∈Y and builds a k-nearest-neighbor search service, e.g. using Faiss <ref type="bibr" target="#b20">[21]</ref>. As a result, given an arbitrary user behavior sequence x at serving time, we can instantly retrieve the top k items relevant to the user by finding the top k candidate g θ (y) similar to f θ (x). Most implementations use inner product φ θ (x, y) = f θ (x), g θ (y) or cosine similarity as the similarity score. The typical learning procedure fits the data following the maximum likelihood estimation (MLE) principle:</p><formula xml:id="formula_0">arg min θ 1 |D| (x,y)∈D − log p θ (y | x), where p θ (y | x) = exp φ θ (x, y) y ∈Y exp φ θ (x, y ) . (<label>1</label></formula><formula xml:id="formula_1">)</formula><p>The denominator of p θ (y | x) sums over all possible items, which is infeasible in practice and thus requires approximation, e.g., via sampling. However, the observed clicks for training are from the previous version of the recommender system, which suffer from exposure bias (i.e. missing not at random <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b29">30]</ref>) and reflect the users' preference regarding the recommended items rather than all potential items. High-quality items that had few clicks will likely remain under-recommended with the MLE training paradigm.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.2">Understanding Contrastive Learning from a Bias-Reduction Perspective</head><p>We now introduce the family of contrastive losses that we are interested in, and reveal their connection with the inverse propensity weighting (IPW) techniques for bias reduction.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Sampled Softmax</head><p>The kind of contrastive loss we will investigate is strikingly similar to sampled softmax. We thus recap sampled softmax here and will show that the minor difference is crucial later. There are many variants of sampeld softmax <ref type="bibr" target="#b3">[4,</ref><ref type="bibr" target="#b18">19]</ref>, among which the following variant is implemented by TensorFlow and popular among industrial systems:</p><formula xml:id="formula_2">arg min θ 1 |D| (x,y)∈D − log exp (φ θ (x, y) − log q(y | x)) L i=0 exp (φ θ (x, y i ) − log q(y i | x)) , (<label>2</label></formula><formula xml:id="formula_3">)</formula><p>where L is the number of negative samples, y 0 is the positive sample (i.e. we set y 0 = y), and the L negative samples {y i } L i=1 are drawn from a proposal distribution q(y | x). Subtracting log q(y | x) is necessary for it to converge to the same solution as the exact loss (Eq. 1). Most implementations assume q(y | x) = q(y) and set q(y) somehow proportional to the popularity of the items to improve convergence. In practice, we would draw thousands of negative samples to pair with each positive example. Sample softmax in general outperforms other approximations such as NCE <ref type="bibr" target="#b12">[13]</ref> and negative sampling <ref type="bibr" target="#b27">[28]</ref> when the vocabulary is large <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b18">19]</ref>.</p><p>Contrastive Loss We study the following type of contrastive loss <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b28">29]</ref>:</p><formula xml:id="formula_4">arg min θ 1 |D| (x,y)∈D − log exp (φ θ (x, y)) L i=0 exp (φ θ (x, y i )) ,<label>(3)</label></formula><p>where {y i } L i=1 are again sampled from q(y | x) for each x to pair with the positive sample y 0 = y. It no longer optimizes the MLE loss (Eq. 1), because it misses − log q(y | x)) and thus does not correct the bias introduced by sampling. Many efforts on contrastive learning has been focusing on designing a well-performing proposal distribution q(y | x) <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b6">7]</ref>. InfoNCE <ref type="bibr" target="#b28">[29]</ref> shows that this loss maximizes a lower bound of the mutual information between x and y if we set the proposal distribution q(y | x) to the actual data distribution p data (y), i.e. if we sample y proportional to its frequency in the dataset D.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Contrastive Learning and Exposure Bias Reduction</head><p>The contrastive loss shown above (Eq. 3) has been achieving remarkable success recently, e.g., in visual representation learning <ref type="bibr" target="#b13">[14]</ref>. Nevertheless, it remains mysterious why the loss is effective. We will reveal that the contrastive loss is a sampling-based approximation of the following inverse propensity weighted (IPW) loss:</p><formula xml:id="formula_5">arg min θ 1 |D| (x,y)∈D − 1 q(y | x) • log p θ (y | x),<label>(4)</label></formula><p>where q(y | x) should be the propensity score function, which represents the probability that item y is recommended to user x when we were collecting the training data D. In theory, it models missing-not-atrandom via the propensity scores and thus corrects the exposure bias <ref type="bibr" target="#b37">[38,</ref><ref type="bibr" target="#b29">30]</ref>. A standard implementation of the IPW loss has two steps, where the first step is to use a separate model to serve as q(y | x) and optimize it by fitting the exposure history according to the MLE principle, while the second step is to optimize p θ (y | x) according to Eq. 4. However, the two-stage pipeline of IPW, as well as the numerical instability brought by 1 q(y|x) , makes IPW impractical to be deployed in our large-scale production system. Fortunately, we can prove that the contrastive loss (Eq. 3) is in principle optimizing the same loss as Eq. 4. And in subsection 2.3 we will provide a simple implementation that does not require two separate steps and avoids division-by-q(y | x). Our key theoretical result is: Theorem 1. The optimal solutions of the contrastive loss (Eq. 3) and the IPW loss (Eq. 4) both minimize the KL divergence from p θ (y | x) to r(y | x) = p data(y|x) /q(y|x) y ∈Y p data(y |x) /q(y |x) . Here p data (y | x) is the data distribution, i.e. how frequent y appears in D given context x.</p><p>Proof. We now give a proof sketch on the theorem. We will focus on one training instance, i.e. one sequence x ∈ X . The IPW loss (Eq. 4) for training sample x is − y:(x,y)∈D  <ref type="figure">y</ref>) is expressive enough to fit the target distribution r(y | x), the global optima wil be the ones that make p θ (y | x) equal to r(y | x) for all possible y ∈ Y.</p><formula xml:id="formula_6">1 q(y|x) log p θ (y | x) ∝</formula><formula xml:id="formula_7">− y∈Y p data (y|x) q(y|x) log p θ (y | x) ∝ − y∈Y r(y | x) log p θ (y | x) = D KL (r p θ ) + const.w.r.t. θ. The IPW loss is thus minimizing the Kullback-Leibler (KL) divergence from p θ (y | x) to r(y | x). If φ θ (x,</formula><p>Let us now focus on the contrastive loss for the training sample (x, y). Let C = {y} ∪ {y i } L i=1 , where y is the positive example and {y i } L i=1 are the L negative samples drawn from q(y | x). Note that C is a multi-set where we allow the same item to appear multiple times. The contrastive loss (Eq. 3) for x is then equal to − y:(x,y)∈D C q(C | x, y) log exp(φ θ (x,y))</p><formula xml:id="formula_8">y ∈C exp(φ θ (x,y )) ∝ − y∈Y C q(C | x, y)p data (y | x) log exp(φ θ (x,y)) y ∈C exp(φ θ (x,y )) , where q(C | x, y) = L i=1 q(y i | x) if y ∈ C or q(C | x, y) = 0 if y /</formula><p>∈ C, since C must include y if we know that the positive example is y.</p><p>Let q(C | x) = y ∈C q(y | x). We then have q(C | x, y) = q(C|x) q(y|x) if C includes y, and q(C | x, y) = 0 otherwise. As a result, we can see that the contrastive loss for training sample x is proportional to</p><formula xml:id="formula_9">− y∈Y C:y∈C q(C|x) q(y|x) p data (y | x) log exp(φ θ (x,y)) y ∈C exp(φ θ (x,y )) , which is equal to E q(C|x) − y∈C p data (y|x) q(y|x) log exp(φ θ (x,y)) y ∈C exp(φ θ (x,y )) E q(C|x) D KL (r C p C θ ) + const.w.r.t. θ.</formula><p>Here we use r C and p C θ to refer to the probability distributions</p><formula xml:id="formula_10">r C (y | x) = p data(y|x) /q(y|x) y ∈C p data(y |x) /q(y |x) and p C θ (y | x) = exp(φ θ (x,y))</formula><p>y ∈C exp(φ θ (x,y )) , whose supports are C ⊂ Y. Since we are minimizing the KL divergence under all possible C ⊂ Y, the global optima will be the ones that make p θ (y | x) equal to r(y | x) for all y ∈ Y if φ θ (x, y) is expressive enough to fit the target distribution.</p><p>In summary, the IPW loss and the contrastive loss have the same global optima if φ θ (x, y) is expressive enough to fit arbitrary probability distributions. In theory, φ θ (x, y) will be expressive enough if we implement it using a neural network, due to the universal approximation theorem.</p><p>Remark 1. The implication of Theorem 1 is that the contrastive loss (Eq. 3) can approximately reduce the exposure bias if we set the proposal distribution q(y | x) to be the propensity score, i.e. the probability that the old systems deliver item y to user x when we were collecting the training data D.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="2.3">Practical Implementations of Contrastive Learning for Large-Scale DCG</head><p>We now describe our implementations of the debiased contrastive loss for large-scale DCG.</p><p>We first note that the propensity score q(y | x) is not easy to estimate in practice, because industrial recommender systems involve many complicated stages and the data are also highly sparse. Moreover, some theoretical results have pointed out that small propensities can lead to high variance that harms </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Contrastive Learning</head><p>Figure <ref type="figure">2</ref>: How many times the items of a specific degree (i.e. popularity levels) is being recommended vs. the logarithm of a degree. The y-axis is equal to the number of items in a bucket × the items' degree. The rightmost bar is not high because the number of the extremely popular items is small, even though each has a high degree.</p><p>overall performance, and thus the accurate propensity scores may not perform better than the smoothed inaccurate propensities <ref type="bibr" target="#b29">[30]</ref>. We thus use q(y) in place of q(y | x), i.e. assuming q(y | x) ≈ q(y), to ease estimation and avoid small propensities. Secondly, q(y) (i.e. the probability that item y is being recommended to some user) has an extremely high correlation with p data (y) (i.e. the probability that item y is being recommended and clicked by someone), because the existing system will mainly recommends items that have a high click-through rate if it is already highly optimized. We thus further replace q(y) with p data (y), i.e. assuming q(y) ≈ p data (y), to ease implementation. In summary, we assume q(y | x) ≈ p data (y), which allows us to draw negative samples from D direclty when implementing the contrastive loss for bias reduction. We thus, unlike the IPW methods, do not need to introduce an extra stage into the training pipeline.</p><p>However, sampling will still incur non-negligible overheads, e.g. communication costs, in a distributed environment <ref type="bibr" target="#b32">[33]</ref>. We thus adopt a queue-based design <ref type="bibr" target="#b13">[14]</ref> that avoids explicitly performing sampling, as shown in Figure <ref type="figure" target="#fig_0">1b</ref> and Figure <ref type="figure" target="#fig_0">1c</ref>. To be specific, we maintain a first-in first-out (FIFO) queue Q, which has a fixed capacity and can store |Q| examples. Given a new batch to process, we first enqueue the positive examples y (or their representations g θ (y)) encountered in the present batch into Q. We then use the examples stored in the queue as {y i } L i=0 (including one positive example and L negative examples) to compute the denominator of the contrastive loss (Eq. 3) for the present batch. In a distributed setting, each worker maintains its own queue locally to avoid communication costs. When the queue size |Q| is equal to the batch size, our implementation is then equivalent to sampling negative examples from the present batch <ref type="bibr" target="#b30">[31,</ref><ref type="bibr" target="#b15">16,</ref><ref type="bibr" target="#b8">9]</ref> (see Figure <ref type="figure" target="#fig_0">1a</ref>). In general, we need thousands of negative samples to achieve satisfying performance. We therefore use a large queue size, but with a small batch size to prevent out-of-memory, e.g. batch size = 256 and queue size = 2560.</p><p>With the implementation that caches g θ (y) (see Figure <ref type="figure" target="#fig_0">1c</ref>), we can no longer back-propagate through the negative examples from the previous batches, though we can still back-propagate through the negative examples from the present batch. As a result, we find that the total training steps required for convergence mildly increase. However, since each training step will take much less time to compute (and less communication costs in a distributed training setting), the total running time can still be greatly reduced if the features of the negative items are expensive to encode, e.g. if the features contain raw images, texts, or even structured data such as a knowledge graph.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3">Experiment</head><p>In this section, we report offline and online results in a large-scale e-commerce recommender system, as well as offline results on public datasets to ensure reproducibility. </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1">Online and Offline Experiments in Production Envrionments</head><p>The online experiments have lasted for four months, and our algorithm serves several scenarios with different traffic volumes. The total number of items for recommendation is around 100 million. We use seven categorical features in this section, including item ID, coarse-grained and fine-grained category IDs, seller ID, seller category, brand ID, and gender preference as the item features to encode. We will explore in later subsections features of complex data types that are more expensive to encode. We describe details such as the encoders and hyper-parameters in the supplementary material.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.1">The Debiasing Effect in Large-scale Production Environments</head><p>To examine the debiasing effects of CLRec, we first conduct offline experiments and compare CLRec with sampled softmax. We report the aggregated diversity <ref type="bibr" target="#b0">[1]</ref> in Table <ref type="table" target="#tab_0">1</ref>, and the distributions of the recommended items resulted from the different losses in Figure <ref type="figure">2</ref>.</p><p>Table <ref type="table" target="#tab_0">1</ref> shows that CLRec has an over 2× improvement on aggregated diversity. We see from Figure <ref type="figure">2</ref> sampled softmax tends to faithfully fit the distribution of the training data. CLRec, however, learns a quite different distribution, which shifts towards the under-recommended items. These results suggest that CLRec does result in a fairer algorithm that alleviates the "rich-get-richer" phenomena. This debiasing effect not only leads to a fairer system, but also contributes to a significant improvement regarding the online performance. In Table <ref type="table" target="#tab_1">2</ref>, we compare CLRec with other sampling alternatives using the same implementation of the encoders. Details of the alternative methods can be found in the supplemental material. We observe that negative sampling <ref type="bibr" target="#b27">[28]</ref>, including its variant <ref type="bibr" target="#b40">[41]</ref> that makes the instances in a batch share the same large set of negative samples, does not perform well in our settings. CLRec's improvement over sampled-softmax <ref type="bibr" target="#b18">[19,</ref><ref type="bibr" target="#b3">4]</ref> w.r.t. the offline metric HitRate@50 is negliable. However, CLRec achieves significant improvement regarding the click-through rate (CTR) online. This indicates that there exists discrepancy between the offline metric and online performance, possibly because the offline metric fails to take the data bias into account.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.1.2">Four Months' Large-Scale A/B testing</head><p>CLRec has been fully depolyed into several heavy-traffic scenarios since Jan 2020, after the initial proof-of-concept ablation studies shown in Table <ref type="table" target="#tab_1">2</ref>. Table <ref type="table" target="#tab_2">3</ref> shows our primary online results conducted in these heavy-traffic scenarios, with billions of page views each day. During the four months A/B testing, CLRec has been consistently outperforming the previous state-or-art baseline in terms of the fairness metrics such as aggregated diversity and average popularity index, as well as the user engagement metrics such as click-through rate and average dwell time.</p><p>We see that, compared with MIND <ref type="bibr" target="#b23">[24]</ref>, which is the previous state-of-art DCG baseline deployed in the system, CLRec tends to recommend items with a much lower popularity index while being more attractive to the users. This demonstrates CLRec's ability of identifying high-quality items that are rarely recommended by the previous systems. We further achieve a +2% relative improvement in terms of the total clicks number on our platform after ensembling CLRec and MIND, compared to using MIND as the only deep candidate generation method in our system. Table <ref type="table">5</ref>: Task u2u, a complex pretext task that requires the cached implementation due to high costs when encoding the negative samples. Task u2i is the regular task where x is a sequence of clicks and y is the next click. Task u2u adds an auxiliary loss where x and y are both sequences from the same user (before and after a sampled timestamp), which is co-trained with task u2i. HR1@50 and HR5@50 represent HR@50 for predicting next one and five clicks respectively.</p><p>Task &amp; Implementation HR1@50 HR5@50 CLRec-u2i 17.9% 12.1% CLRec-u2u, cached 18.3% 12.7% CLRec-u2u, cached + MoCo 18.2% 12.6% </p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.2">Feasibility of CLRec Framework on Complex Pretext Tasks</head><p>Efficiency Table <ref type="table" target="#tab_3">4</ref> compares CLRec and smapled-softmax in terms of training speed and the network traffic required in a distributed setting. CLRec's queue-based implementation is much more efficient than the methods that perform explicit sampling, since CLRec reuses the result computed for a positive sample shortly later when the sample is serving as a negative sample. The version of sampled-softmax that encodes features for the negative items is from <ref type="bibr" target="#b44">[45]</ref>. This proof-of-concept experiment only uses seven categorical features, and we can deduce that the improvement regarding efficiency will be much more substantial with more complex features. Table <ref type="table" target="#tab_4">6</ref> shows that encoding features for the negative samples is beneficial, which justifies the efforts spent on efficiency.</p><p>Complex Pretext Task that Requires the Cached Implementation We now demonstrate that CLRec with a queue that caches the computed results can enable more complex pretext tasks that may improve the quality of the learned representations. To be more specific, we consider an auxiliary task where x and y are both sequences from the same user (before and after a sampled timestamp). The goal is to identify the correct sequence y that belongs to the same user that produces x. More details can be found in the supplemental material. This auxiliary task is previously too expensive to implement with sampled-softmax, since the negative samples are sequences and are thus expensive to encode. Fortunately, cached CLRec can implement this task efficiently. Table <ref type="table">5</ref> demonstrates that the auxiliary task can improve an algorithm's ability to make long-term prediction. MoCo (short for momentum contrast) <ref type="bibr" target="#b13">[14]</ref> propose a momentum method for updating the encoders based on the cached results. We observe no additional gain with MoCo, possibly because (1) our model is shallow compared to those for visual representation learning, and (2) we have a large embedding table which serves as a consistent dictionary that prevents our training loss from oscillating.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="3.3">Experiments on Public Dataset</head><p>To ensure reproducibility, we also conduct experiments on three public datasets from the existing work <ref type="bibr" target="#b21">[22,</ref><ref type="bibr" target="#b33">34]</ref>. The source code will be released. We strictly follow the settings and metrics used by BERT4Rec <ref type="bibr" target="#b33">[34]</ref> and report the results in Table <ref type="table" target="#tab_5">7</ref>. Note that the metrics used by BERT4Rec <ref type="bibr" target="#b33">[34]</ref> penalizes false positive predictions on popular negative items. As a result, CLRec achieves a significant performance gain thanks to bias reduction. Qualitative results that illustrate the debiasing effects, which are similar to those in Subsection 3.1.1, can be found in the supplementary material.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="4">Related Work</head><p>Deep Candidate Generation Deep candidate generation methods are widely deployed in industrial systems, e.g., YouTube <ref type="bibr" target="#b9">[10,</ref><ref type="bibr" target="#b19">20,</ref><ref type="bibr" target="#b7">8]</ref>, Taobao <ref type="bibr" target="#b42">[43,</ref><ref type="bibr" target="#b23">24,</ref><ref type="bibr" target="#b26">27,</ref><ref type="bibr" target="#b43">44]</ref>, and Pinterest <ref type="bibr" target="#b40">[41]</ref>. The existing methods explicitly sample negative examples from a pre-defined proposal distribution <ref type="bibr" target="#b27">[28,</ref><ref type="bibr" target="#b18">19,</ref><ref type="bibr" target="#b3">4]</ref>. The proposal distribution not only affects convergence, but also has a significant impact on the performance <ref type="bibr" target="#b6">[7]</ref>. Empirically the number of the negative samples need to be large, e.g. a few thousand ones for pairing with a positive example. Consequently, it is computationally expensive to incorporate rich features for the negative samples, and the existing systems typically choose to not encode features for the negative examples, except for simple features such as item IDs <ref type="bibr" target="#b9">[10]</ref>, even though rich features for the negative samples are demonstrated to be beneficial <ref type="bibr" target="#b2">[3]</ref>. CLRec provides an efficient framework for encoding rich features for the negative samples by caching the computed results.</p><p>Bias Reduction and Fairness in Recommender Systems Algorithms that directly fits the training data will suffer from selection bias due to the missing-not-at-random phenomenon <ref type="bibr" target="#b25">[26,</ref><ref type="bibr" target="#b29">30]</ref>, where the previous recommendation algorithms affect the training data collected. The topic of reducing the bias in training and evaluating recommender systems has been explored before <ref type="bibr" target="#b31">[32,</ref><ref type="bibr" target="#b1">2,</ref><ref type="bibr" target="#b37">38,</ref><ref type="bibr" target="#b29">30,</ref><ref type="bibr" target="#b7">8,</ref><ref type="bibr" target="#b39">40]</ref>. However, these existing works mostly focus on small-scale offline settings, and rely on techniques impractical for large-scale DCG. For example, most of them involve an extra stage to train a propensity score estimator, while we also find that dividing the propensity scores leads to numerical instability and thus fail to achieve satisfying results. Correcting the bias helps improve P-fairness <ref type="bibr" target="#b5">[6]</ref>, i.e. fairness towards the previously under-recommended products <ref type="bibr" target="#b4">[5]</ref>.</p><p>Contrastive Learning Contrastive learning, which aim to learn high-quality representations via self-supervised pretext tasks, recently achieves remarkable successes in various domains, e.g., speech processing <ref type="bibr" target="#b28">[29]</ref>, computer vision <ref type="bibr" target="#b16">[17,</ref><ref type="bibr" target="#b13">14]</ref>, graph data <ref type="bibr" target="#b35">[36]</ref>, and compositional environments <ref type="bibr" target="#b22">[23]</ref>. The contrastive loss we investigate in this paper is a generalization of the InfoNCE loss <ref type="bibr" target="#b28">[29]</ref>, which is previously understood as a bound of the mutual information between two variables <ref type="bibr" target="#b28">[29]</ref>. Our paper provides a new perspective on the effectiveness of the contrastive loss, by illustrating its connection with inverse propensity weighting, a well-known technique for bias reduction.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head n="5">Conclusion</head><p>We established in theory the connection between contrastive learning and bias reduction. We then proposed CLRec, a contrastive learning framework for debiased candidate generation, which may lead to a fairer system and can achieve high efficiency when encoding features of complex data types.</p></div>
+<div xmlns="http://www.tei-c.org/ns/1.0"><head>Broader Impact</head><p>Positive Impact The debiasing effect of CLRec framework helps to address the P-fairness <ref type="bibr" target="#b5">[6]</ref> problem in recommender system, so that high quality items that are previously under-exposured get more chances of being presented to the users. It leads to a fairer eco-system. While this paper takes live e-commerce recommender systems as an example to illustrate the power of CLRec, we would like to highlight that CLRec can be applied to other applications such as search engines, advertising, the retrieval phase in open domain question answering. From a societal perspective, applying CLRec to the various domains may bring:</p><p>• Fairer traffic assignment in user-generated content (UGC) platforms.</p><p>• Increased diversity of the information being spread in the society by conveying the voices from the minority.</p><p>• Fairer opportunities in the job market.</p><p>Although there are other studies, e.g. IPW-based approaches, that aim to address similar problems of bias reduction, they usually suffer from implementation difficulties and numerical instability during optimization. Moreover, few has targeted specifically at the candidate generation stage in the recommender systems. We also find little public information on how a debiased method will eventually affect a live system. This paper shares the online experimental results lasted for at least four months and reports positive results, which could be valuable to the community.</p><p>Negative Impact A more accurate recommender system means that a user will more easily absorb passively the information that the system presents. Platforms that provide accurate recommendation service may thus have the power to control what they want their users to see. This a general problem for recommender systems. On the other hand, CLRec prefers under-explored items that have a high potential, and it is not clear whether CLRec will be more prone to adversarial attacks.</p></div><figure xmlns="http://www.tei-c.org/ns/1.0" xml:id="fig_0"><head>Figure 1 :</head><label>1</label><figDesc>Figure 1: Three implementations of CLRec , whose implicit proposal distributions are q(y | x) = p data (y). The superscripts +, − mean positive and negative examples respectively. Implementation (a) uses the positive examples of other instance in the present batch as the negative examples. Implementation (b) creates a fixed-sized FIFO queue to store the positive examples encountered in previously processed batches, and use the examples stored in the queue to serve as the negative examples for the present batch. Implementation (c) differs from implementation (b) in that the queue caches the computed representations g θ (y) rather than storing the raw features of y.</figDesc></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_0"><head>Table 1 :</head><label>1</label><figDesc>Aggregate diversity<ref type="bibr" target="#b0">[1]</ref>, i.e. the number of distinct items recommended to a random subset of users.</figDesc><table><row><cell></cell><cell>Aggregated Diversity</cell></row><row><cell>sampled-softmax</cell><cell>10,780,111</cell></row><row><cell>CLRec</cell><cell>21,905,318</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_1"><head>Table 2 :</head><label>2</label><figDesc>CLRec vs. the sampling-based alternatives. We conducted these proof-of-concept live experiments in a small-traffic scenario, due to the costs of online experiments. The baseline that uses negative sampling has been outdated and removed from our live system at least six months before this work starts.</figDesc><table><row><cell></cell><cell></cell><cell></cell><cell># Impression</cell><cell>Log(ItemDegree)</cell><cell>Training Data</cell></row><row><cell></cell><cell></cell><cell></cell><cell># Impression</cell><cell>Log(ItemDegree)</cell><cell>Sampled Softmax</cell></row><row><cell></cell><cell></cell><cell></cell><cell># Impression</cell></row><row><cell></cell><cell></cell><cell></cell><cell>0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0 5.5 6.0 6.5 7.0 7.5 8.0 8.5 9.0 9.5 10 .0 10 .5 11 .0 11 .5 12 .0 12 .5 13 .0 13 .5 14 .0 14 .5 15 .0 15 .5 Log(ItemDegree)</cell></row><row><cell>Method</cell><cell cols="3">HR@50 CTR(online)</cell></row><row><cell>negative sampling</cell><cell></cell><cell>7.1%</cell><cell>outdated</cell></row><row><cell cols="2">shared negative sampling</cell><cell>6.4%</cell><cell>-</cell></row><row><cell>sampled-softmax</cell><cell></cell><cell>17.6%</cell><cell>3.32%</cell></row><row><cell>CLRec</cell><cell></cell><cell>17.8%</cell><cell>3.85%</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_2"><head>Table 3 :</head><label>3</label><figDesc>Primary live experiment results conducted in one of the largest scenarios on our platform. CLRec consistently outperforms the baseline for months and has been fully deployed since Jan 2020.Method CTR Average Dwell Time Popularity Index of Recommneded Items</figDesc><table><row><cell>MIND</cell><cell>5.87%</cell><cell>-</cell><cell>0.658 (high → tend to recommend popular items)</cell></row><row><cell>CLRec</cell><cell>6.30%</cell><cell>+11.9%</cell><cell>0.224 (low → fair to under-recommended items)</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_3"><head>Table 4 :</head><label>4</label><figDesc>Efficiency. We report the training speed in terms of the number of the positive examples processed per second, and the average network traffic of the workers in a distributed environment.</figDesc><table><row><cell>Method</cell><cell cols="2">Examples Per Second Network Traffic (MB/s)</cell></row><row><cell>sampled-softmax + negatives w/o features</cell><cell>≈ 280k</cell><cell>≈ 700</cell></row><row><cell>sampled-softmax + negatives with features</cell><cell>≈ 130k</cell><cell>≈ 1, 100</cell></row><row><cell>CLRec + negatives w/o features</cell><cell>≈ 330k</cell><cell>≈ 500</cell></row><row><cell>CLRec + negatives with features</cell><cell>≈ 280k</cell><cell>≈ 500</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_4"><head>Table 6 :</head><label>6</label><figDesc>The benefits of encoding features for the negative samples. Most baselines that employ sampled-softmax do not encode rich features for the negative samples (though they still use features when encoding the users' click sequences), because the number of negative samples is large and encoding them brings high costs if the features are complex.</figDesc><table><row><cell cols="2">Fortunately, CLRec's cached implementation</cell></row><row><cell>greatly reduces the costs.</cell><cell></cell></row><row><cell>Method</cell><cell>HR@50</cell></row><row><cell cols="2">CLRec + negatives w/o features 17.4%</cell></row><row><cell cols="2">CLRec + negatives with features 19.4%</cell></row></table></figure>
+<figure xmlns="http://www.tei-c.org/ns/1.0" type="table" xml:id="tab_5"><head>Table 7 :</head><label>7</label><figDesc>Results on public benchmarks to ensure reproducibility. For fair comparision, the CLRec implementation here uses the same Transformer<ref type="bibr" target="#b24">[25]</ref> encoder as SASRec but with a contrastive loss.</figDesc><table><row><cell cols="5">Method Metric ML-1M Beauty Steam</cell><cell cols="3">Metric ML-1M Beauty Steam</cell></row><row><cell>SASRec</cell><cell>HR@1</cell><cell>0.2351</cell><cell>0.0906</cell><cell>0.0885</cell><cell>NDCG@5 0.3980</cell><cell>0.1436</cell><cell>0.1727</cell></row><row><cell>BERT4Rec</cell><cell></cell><cell>0.2863</cell><cell>0.0953</cell><cell>0.0957</cell><cell>0.4454</cell><cell>0.1599</cell><cell>0.1842</cell></row><row><cell>CLRec</cell><cell></cell><cell>0.3013</cell><cell cols="2">0.1147 0.1325</cell><cell>0.4616</cell><cell cols="2">0.1876 0.2396</cell></row><row><cell>Improv.</cell><cell></cell><cell>+5.2%</cell><cell cols="2">+20.4% +38.4%</cell><cell>+3.6%</cell><cell cols="2">+17.3% +30.0%</cell></row><row><cell>SASRec</cell><cell>HR@5</cell><cell>0.5434</cell><cell>0.1934</cell><cell>0.2559</cell><cell>NDCG@10 0.4368</cell><cell>0.1633</cell><cell>0.2147</cell></row><row><cell>BERT4Rec</cell><cell></cell><cell>0.5876</cell><cell>0.2207</cell><cell>0.2710</cell><cell>0.4818</cell><cell>0.1862</cell><cell>0.2261</cell></row><row><cell>CLRec</cell><cell></cell><cell>0.6045</cell><cell cols="2">0.2552 0.3413</cell><cell>0.4988</cell><cell cols="2">0.2156 0.2852</cell></row><row><cell>Improv.</cell><cell></cell><cell>+2.9%</cell><cell cols="2">+15.6% +25.9%</cell><cell>+3.5%</cell><cell cols="2">+15.8% +26.1%</cell></row><row><cell cols="2">SASRec HR@10</cell><cell>0.6629</cell><cell>0.2653</cell><cell>0.3783</cell><cell>MRR@1 0.3790</cell><cell>0.1536</cell><cell>0.1874</cell></row><row><cell>BERT4Rec</cell><cell></cell><cell>0.6970</cell><cell>0.3025</cell><cell>0.4013</cell><cell>0.4254</cell><cell>0.1701</cell><cell>0.1949</cell></row><row><cell>CLRec</cell><cell></cell><cell>0.7194</cell><cell cols="2">0.3423 0.4829</cell><cell>0.4417</cell><cell cols="2">0.1968 0.2457</cell></row><row><cell>Improv.</cell><cell></cell><cell>+3.2%</cell><cell cols="2">+13.1% +20.3%</cell><cell>+3.8%</cell><cell cols="2">+15.7% +26.0%</cell></row></table></figure>
+		</body>
+		<back>
+			<div type="references">
+
+				<listBibl>
+
+<biblStruct xml:id="b0">
+	<analytic>
+		<title level="a" type="main">Improving aggregate recommendation diversity using ranking-based techniques</title>
+		<author>
+			<persName><forename type="first">G</forename><surname>Adomavicius</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Kwon</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Knowledge and Data Engineering</title>
+		<imprint>
+			<biblScope unit="volume">24</biblScope>
+			<biblScope unit="issue">5</biblScope>
+			<biblScope unit="page" from="896" to="911" />
+			<date type="published" when="2011">2011</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b1">
+	<analytic>
+		<title level="a" type="main">Unbiased learning to rank with unbiased propensity estimation</title>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Ai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Bi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Luo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Guo</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">B</forename><surname>Croft</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The 41st International ACM SIGIR Conference on Research &amp; Development in Information Retrieval</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="385" to="394" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b2">
+	<analytic>
+		<title level="a" type="main">Personalized bundle list recommendation</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Qu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>An</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The World Wide Web Conference</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="60" to="71" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b3">
+	<analytic>
+		<title level="a" type="main">Adaptive importance sampling to accelerate training of a neural probabilistic language model</title>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-S</forename><surname>Senécal</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="j">IEEE Transactions on Neural Networks</title>
+		<imprint>
+			<biblScope unit="volume">19</biblScope>
+			<biblScope unit="issue">4</biblScope>
+			<biblScope unit="page" from="713" to="722" />
+			<date type="published" when="2008">2008</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b4">
+	<analytic>
+		<title level="a" type="main">Fairness in recommendation ranking through pairwise comparisons</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Beutel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Doshi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Qian</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Wei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Heldt</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Hong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">H</forename><surname>Chi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Goodrow</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">KDD</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b5">
+	<monogr>
+		<title level="m" type="main">Multisided fairness for recommendation</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Burke</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b6">
+	<analytic>
+		<title level="a" type="main">Word2vec applied to recommendation: Hyperparameters matter</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Caselles-Dupré</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Lesaint</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Royo-Letelier</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th ACM Conference on Recommender Systems</title>
+				<meeting>the 12th ACM Conference on Recommender Systems</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="352" to="356" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b7">
+	<analytic>
+		<title level="a" type="main">Top-k off-policy correction for a reinforce recommender system</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Beutel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Covington</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jain</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">F</forename><surname>Belletti</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">H</forename><surname>Chi</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Twelfth ACM International Conference on Web Search and Data Mining</title>
+				<meeting>the Twelfth ACM International Conference on Web Search and Data Mining</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="456" to="464" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b8">
+	<analytic>
+		<title level="a" type="main">On sampling strategies for neural network-based collaborative filtering</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Shi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Hong</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining</title>
+				<meeting>the 23rd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="page" from="767" to="776" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b9">
+	<analytic>
+		<title level="a" type="main">Deep neural networks for youtube recommendations</title>
+		<author>
+			<persName><forename type="first">P</forename><surname>Covington</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Sargin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 10th ACM Conference on Recommender Systems</title>
+				<meeting>the 10th ACM Conference on Recommender Systems</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="191" to="198" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b10">
+	<analytic>
+		<title level="a" type="main">Understanding the difficulty of training deep feedforward neural networks</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Glorot</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the thirteenth international conference on artificial intelligence and statistics</title>
+				<meeting>the thirteenth international conference on artificial intelligence and statistics</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="249" to="256" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b11">
+	<analytic>
+		<title level="a" type="main">Real-time personalization using embeddings for search ranking at airbnb</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Grbovic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Cheng</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery &amp; Data Mining</title>
+				<meeting>the 24th ACM SIGKDD International Conference on Knowledge Discovery &amp; Data Mining</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="311" to="320" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b12">
+	<analytic>
+		<title level="a" type="main">Noise-contrastive estimation: A new estimation principle for unnormalized statistical models</title>
+		<author>
+			<persName><forename type="first">M</forename><surname>Gutmann</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Hyvärinen</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the Thirteenth International Conference on Artificial Intelligence and Statistics</title>
+				<meeting>the Thirteenth International Conference on Artificial Intelligence and Statistics</meeting>
+		<imprint>
+			<date type="published" when="2010">2010</date>
+			<biblScope unit="page" from="297" to="304" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b13">
+	<monogr>
+		<title level="m" type="main">Momentum contrast for unsupervised visual representation learning</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Fan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Xie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Girshick</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1911.05722</idno>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b14">
+	<analytic>
+		<title level="a" type="main">An unsupervised neural attention model for aspect extraction</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">S</forename><surname>Lee</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><forename type="middle">T</forename><surname>Ng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Dahlmeier</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics</title>
+		<title level="s">Long Papers</title>
+		<meeting>the 55th Annual Meeting of the Association for Computational Linguistics</meeting>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+			<biblScope unit="volume">1</biblScope>
+			<biblScope unit="page" from="388" to="397" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b15">
+	<monogr>
+		<title level="m" type="main">Session-based recommendations with recurrent neural networks</title>
+		<author>
+			<persName><forename type="first">B</forename><surname>Hidasi</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Karatzoglou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Baltrunas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Tikk</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1511.06939</idno>
+		<imprint>
+			<date type="published" when="2015">2015</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b16">
+	<monogr>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">D</forename><surname>Hjelm</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Fedorov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Lavoie-Marchildon</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Grewal</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Bachman</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Trischler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1808.06670</idno>
+		<title level="m">Learning deep representations by mutual information estimation and maximization</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b17">
+	<analytic>
+		<title level="a" type="main">Improving sequential recommendation with knowledge-enhanced memory networks</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">X</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Dou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J.-R</forename><surname>Wen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><forename type="middle">Y</forename><surname>Chang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">The 41st International ACM SIGIR Conference on Research &amp; Development in Information Retrieval</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="505" to="514" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b18">
+	<monogr>
+		<author>
+			<persName><forename type="first">S</forename><surname>Jean</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Cho</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Memisevic</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1412.2007</idno>
+		<title level="m">On using very large target vocabulary for neural machine translation</title>
+				<imprint>
+			<date type="published" when="2014">2014</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b19">
+	<monogr>
+		<author>
+			<persName><forename type="first">M</forename><forename type="middle">R</forename><surname>Joglekar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><forename type="middle">K</forename><surname>Adams</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Khaitan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><forename type="middle">V</forename><surname>Le</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1907.04471</idno>
+		<title level="m">Neural input search for large scale recommendation models</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b20">
+	<monogr>
+		<author>
+			<persName><forename type="first">J</forename><surname>Johnson</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Douze</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Jégou</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1702.08734</idno>
+		<title level="m">Billion-scale similarity search with gpus</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b21">
+	<analytic>
+		<title level="a" type="main">Self-attentive sequential recommendation</title>
+		<author>
+			<persName><forename type="first">W.-C</forename><surname>Kang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Mcauley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE International Conference on Data Mining (ICDM)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="197" to="206" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b22">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Kipf</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">E</forename><surname>Van Der Pol</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Welling</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1911.12247</idno>
+		<title level="m">Contrastive learning of structured world models</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b23">
+	<analytic>
+		<title level="a" type="main">Multi-interest network with dynamic routing for recommendation at tmall</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Huang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Kang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Q</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">L</forename><surname>Lee</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 28th ACM International Conference on Information and Knowledge Management</title>
+				<meeting>the 28th ACM International Conference on Information and Knowledge Management</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="2615" to="2623" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b24">
+	<monogr>
+		<title level="m" type="main">A structured self-attentive sentence embedding</title>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Feng</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><forename type="middle">N D</forename><surname>Santos</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Yu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Xiang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1703.03130</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b25">
+	<monogr>
+		<title level="m" type="main">Statistical analysis with missing data</title>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">J</forename><surname>Little</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><forename type="middle">B</forename><surname>Rubin</surname></persName>
+		</author>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<publisher>John Wiley &amp; Sons</publisher>
+			<biblScope unit="volume">793</biblScope>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b26">
+	<analytic>
+		<title level="a" type="main">Learning disentangled representations for recommendation</title>
+		<author>
+			<persName><forename type="first">J</forename><surname>Ma</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Zhu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="5712" to="5723" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b27">
+	<analytic>
+		<title level="a" type="main">Distributed representations of words and phrases and their compositionality</title>
+		<author>
+			<persName><forename type="first">T</forename><surname>Mikolov</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Sutskever</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><forename type="middle">S</forename><surname>Corrado</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Dean</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in neural information processing systems</title>
+				<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="3111" to="3119" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b28">
+	<monogr>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">V D</forename><surname>Oord</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">O</forename><surname>Vinyals</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1807.03748</idno>
+		<title level="m">Representation learning with contrastive predictive coding</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b29">
+	<monogr>
+		<author>
+			<persName><forename type="first">T</forename><surname>Schnabel</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Swaminathan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Singh</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Chandak</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">T</forename><surname>Joachims</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1602.05352</idno>
+		<title level="m">Recommendations as treatments: Debiasing learning and evaluation</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b30">
+	<analytic>
+		<title level="a" type="main">Improved deep metric learning with multi-class n-pair loss objective</title>
+		<author>
+			<persName><forename type="first">K</forename><surname>Sohn</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Advances in Neural Information Processing Systems</title>
+				<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="1857" to="1865" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b31">
+	<analytic>
+		<title level="a" type="main">Evaluation of recommendations: rating-prediction and ranking</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Steck</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 7th ACM conference on Recommender systems</title>
+				<meeting>the 7th ACM conference on Recommender systems</meeting>
+		<imprint>
+			<date type="published" when="2013">2013</date>
+			<biblScope unit="page" from="213" to="220" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b32">
+	<analytic>
+		<title level="a" type="main">Distributed negative sampling for word embeddings</title>
+		<author>
+			<persName><forename type="first">S</forename><surname>Stergiou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Straznickas</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Tsioutsiouliklis</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Thirty-First AAAI Conference on Artificial Intelligence</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b33">
+	<analytic>
+		<title level="a" type="main">Bert4rec: Sequential recommendation with bidirectional encoder representations from transformer</title>
+		<author>
+			<persName><forename type="first">F</forename><surname>Sun</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Wu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Pei</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Ou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Jiang</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 28th ACM International Conference on Information and Knowledge Management</title>
+				<meeting>the 28th ACM International Conference on Information and Knowledge Management</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="page" from="1441" to="1450" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b34">
+	<monogr>
+		<title level="m" type="main">Attention is all you need</title>
+		<author>
+			<persName><forename type="first">A</forename><surname>Vaswani</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Shazeer</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">N</forename><surname>Parmar</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Uszkoreit</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Jones</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><forename type="middle">N</forename><surname>Gomez</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">L</forename><surname>Kaiser</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">I</forename><surname>Polosukhin</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1706.03762</idno>
+		<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b35">
+	<monogr>
+		<author>
+			<persName><forename type="first">P</forename><surname>Veličković</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Fedus</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Liò</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Bengio</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><forename type="middle">D</forename><surname>Hjelm</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1809.10341</idno>
+		<title level="m">Deep graph infomax</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b36">
+	<analytic>
+		<title level="a" type="main">Cosface: Large margin cosine loss for deep face recognition</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Ji</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Gong</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Liu</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition</title>
+				<meeting>the IEEE Conference on Computer Vision and Pattern Recognition</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="5265" to="5274" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b37">
+	<analytic>
+		<title level="a" type="main">Learning to rank with selection bias in personal search</title>
+		<author>
+			<persName><forename type="first">X</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Bendersky</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Metzler</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">M</forename><surname>Najork</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 39th International ACM SIGIR conference on Research and Development in Information Retrieval</title>
+				<meeting>the 39th International ACM SIGIR conference on Research and Development in Information Retrieval</meeting>
+		<imprint>
+			<date type="published" when="2016">2016</date>
+			<biblScope unit="page" from="115" to="124" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b38">
+	<analytic>
+		<title level="a" type="main">Deep cosine metric learning for person re-identification</title>
+		<author>
+			<persName><forename type="first">N</forename><surname>Wojke</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">A</forename><surname>Bewley</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">2018 IEEE winter conference on applications of computer vision (WACV)</title>
+				<imprint>
+			<publisher>IEEE</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="748" to="756" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b39">
+	<analytic>
+		<title level="a" type="main">Unbiased offline recommender evaluation for missing-not-at-random implicit feedback</title>
+		<author>
+			<persName><forename type="first">L</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Cui</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Xuan</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Wang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">S</forename><surname>Belongie</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">D</forename><surname>Estrin</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 12th ACM Conference on Recommender Systems</title>
+				<meeting>the 12th ACM Conference on Recommender Systems</meeting>
+		<imprint>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="279" to="287" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b40">
+	<monogr>
+		<author>
+			<persName><forename type="first">R</forename><surname>Ying</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">R</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Eksombatchai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><forename type="middle">L</forename><surname>Hamilton</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Leskovec</surname></persName>
+		</author>
+		<idno type="arXiv">arXiv:1806.01973</idno>
+		<title level="m">Graph convolutional neural networks for web-scale recommender systems</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+	<note type="report_type">arXiv preprint</note>
+</biblStruct>
+
+<biblStruct xml:id="b41">
+	<analytic>
+		<title level="a" type="main">Atrank: An attention-based user behavior modeling framework for recommendation</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Bai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Song</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Chen</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Thirty-Second AAAI Conference on Artificial Intelligence</title>
+				<imprint>
+			<date type="published" when="2018">2018</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b42">
+	<analytic>
+		<title level="a" type="main">Scalable graph embedding for asymmetric proximity</title>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Z</forename><surname>Liu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Gao</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Thirty-First AAAI Conference on Artificial Intelligence</title>
+				<imprint>
+			<date type="published" when="2017">2017</date>
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b43">
+	<analytic>
+		<title level="a" type="main">Learning tree-based deep model for recommender systems</title>
+		<author>
+			<persName><forename type="first">H</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">X</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">P</forename><surname>Zhang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">G</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>He</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Gai</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery &amp; Data Mining</title>
+				<meeting>the 24th ACM SIGKDD International Conference on Knowledge Discovery &amp; Data Mining</meeting>
+		<imprint>
+			<publisher>ACM</publisher>
+			<date type="published" when="2018">2018</date>
+			<biblScope unit="page" from="1079" to="1088" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+<biblStruct xml:id="b44">
+	<analytic>
+		<title level="a" type="main">Aligraph: a comprehensive graph neural network platform</title>
+		<author>
+			<persName><forename type="first">R</forename><surname>Zhu</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">K</forename><surname>Zhao</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">H</forename><surname>Yang</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">W</forename><surname>Lin</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">C</forename><surname>Zhou</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">B</forename><surname>Ai</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">Y</forename><surname>Li</surname></persName>
+		</author>
+		<author>
+			<persName><forename type="first">J</forename><surname>Zhou</surname></persName>
+		</author>
+	</analytic>
+	<monogr>
+		<title level="m">Proceedings of the VLDB Endowment</title>
+				<meeting>the VLDB Endowment</meeting>
+		<imprint>
+			<date type="published" when="2019">2019</date>
+			<biblScope unit="volume">12</biblScope>
+			<biblScope unit="page" from="2094" to="2105" />
+		</imprint>
+	</monogr>
+</biblStruct>
+
+				</listBibl>
+			</div>
+		</back>
+	</text>
+</TEI>
