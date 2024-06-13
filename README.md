@@ -38,5 +38,13 @@ data/
 │ └── submission_example_valid.json
 ```
 
-## Step3 Run GCN
+## Step3 Run the train.sh to reproduce the training model
+```
+bash train.sh
+```
+you can get models from [BaiduPan](https://pan.baidu.com/s/1eCJ4g13x5GAyknmTAZm7ow?pwd=y982). password is : y982
 
+## Step4 Run the test.sh to reproduce the answer of paper-source-trace
+```
+bash test.sh
+```
