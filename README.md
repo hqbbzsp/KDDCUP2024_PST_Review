@@ -8,7 +8,7 @@
 pip install -r requirements.txt
 ```
 
-### Note that spaCy uses the ```en_core_web_sm``` model.
+Note that spacy uses the ```en_core_web_sm``` model.
 
 ## Step2 Data Prapare
 
