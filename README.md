@@ -65,7 +65,7 @@ out/
 
 │ ├── sciroberta/
 
-
+│ │ ├── latest_model.bin
 
 │ │ ├── pytorch_model_0.bin
 
