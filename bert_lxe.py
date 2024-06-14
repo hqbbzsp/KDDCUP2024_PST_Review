@@ -1022,7 +1022,7 @@ def gen_kddcup_test_submission_bert(model_name="scibert"):
     elif model_name == "scibert":
         BERT_MODEL = "allenai/scibert_scivocab_uncased"
     elif model_name == "sciroberta":
-        BERT_MODEL = "/data/zsp/KDD_PST_2341/models/sci-roberta"
+        BERT_MODEL = "allenai/cs_roberta_base"
     elif model_name == "structbert":
         BERT_MODEL = "structbert"
     else:
