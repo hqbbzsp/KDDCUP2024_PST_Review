@@ -373,7 +373,7 @@ def train(year=2023, model_name="sciroberta"):
         BERT_MODEL = "bert-base-uncased"
     elif model_name == "sciroberta":
         #allenai/cs_roberta_base
-        BERT_MODEL = "allenai/allenai/cs_roberta_base"
+        BERT_MODEL = "allenai/cs_roberta_base"
         # BERT_MODEL = "/data/zsp/KDD_PST_2341/models/sci-roberta"
     else:
         raise NotImplementedError
