@@ -544,7 +544,7 @@ def gen_kddcup_valid_submission_bert(model_name="scibert",fold = 0):
         BERT_MODEL = "bert-base-uncased"
     elif model_name == "sciroberta":
         #allenai/cs_roberta_base
-        BERT_MODEL = "/data/zsp/KDD_PST_2341/models/sci-roberta"
+        BERT_MODEL = "allenai/cs_roberta_base"
     else:
         raise NotImplementedError
     tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL)
