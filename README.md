@@ -10,6 +10,8 @@ pip install -r requirements.txt
 
 Note that spacy uses the ```en_core_web_sm``` model.
 
+If you need to download BGEM3 pre-trained models manually, download the [model](https://huggingface.co/BAAI/bge-m3) location from huggingface to ```/models```, and change line 51 of the file ```gnn_batchs.py``` to the path where the model is located.
+
 ## Step2 Data Prapare
 
 The training set and validation set can be downloaded from [BaiduPan](https://pan.baidu.com/s/1zylNX4Ar5nZAjNx5mcxSmg?pwd=wzud).
