@@ -380,7 +380,7 @@ def train(year=2023, model_name="scibert"):
         BERT_MODEL = "allenai/scibert_scivocab_uncased"
     # batch_size = 16  0.37863
     elif model_name == "sciroberta":
-        BERT_MODEL = "allenai/allenai/cs_roberta_base"
+        BERT_MODEL = "allenai/cs_roberta_base"
         # BERT_MODEL = "/data/zsp/KDD_PST_2341/models/sci-roberta"
     # batch_size = 4  0.11
     elif model_name == "structbert":
