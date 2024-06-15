@@ -1,6 +1,8 @@
 # KDDCUP2024_PST_Review
 
+## 2024-6-15-Debug
 
+在Data Prepare中我们提供的检查点为实验此仓库一次性得出的，我们以往提交的检查点可以在[这里](https://pan.baidu.com/s/1c7PfOWbcVdctiVD0loTbEw?pwd=sirg)找到，提取码为```sirg```。但由于我们进行GNN推理时，transformers库版本不一致，请分两步执行```test.sh``` 文件，第一步执行第一行```python gnn_batchs.py test```，第二步切换transformers库版本为```4.22.2```，然后执行```test.sh``` 文件除第一行之外的命令。
 
 ## Step1 Installation
 
